@@ -59,6 +59,7 @@ def generate_system_prompt(sub_field: Optional[str] = None) -> str:
         "Your task is to extract material compositions, their processing conditions, characterisation information,\n"
         "and their associated properties with full details.\n\n"
         + sub_field_line
+<<<<<<< HEAD
         + "CRITICAL RULE - SAMPLE DIFFERENTIATION:\n"
         "═══════════════════════════════════════════════════════════════════════════\n"
         "If the SAME composition is tested under DIFFERENT conditions, create SEPARATE composition entries.\n"
@@ -118,6 +119,8 @@ def generate_system_prompt(sub_field: Optional[str] = None) -> str:
         "     Evidence: appears only in literature review tables, introduction comparisons.\n"
         "   NOTE: When in doubt, default to 'Target'.\n"
         "═══════════════════════════════════════════════════════════════════════════\n\n"
+=======
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
         + "CRITICAL RULE - DO NOT EXTRACT METADATA AS PROPERTIES:\n"
         "═══════════════════════════════════════════════════════════════════════════\n"
         "The 'properties_of_composition' field is ONLY for MEASURABLE MATERIAL CHARACTERISTICS.\n\n"
@@ -151,6 +154,7 @@ def generate_system_prompt(sub_field: Optional[str] = None) -> str:
         "{\n"
         "  \"compositions\": [\n"
         "    {\n"
+<<<<<<< HEAD
         "      \"composition\": \"string (as written in paper)\",\n"
         "      \"role\": \"string (Target or Reference)\",\n"
         "      \"composition_normalized\": \"string or null (pure chemical formula)\",\n"
@@ -160,6 +164,10 @@ def generate_system_prompt(sub_field: Optional[str] = None) -> str:
         "      \"grain_size_avg_um\": \"float or null (in micrometers)\",\n"
         "      \"processing_conditions\": \"string or null\",\n"
         "      \"process_category\": \"string or null (AM_DED/LPBF/SLM/SPS/etc.)\",\n"
+=======
+        "      \"composition\": \"string\",\n"
+        "      \"processing_conditions\": \"string or null\",\n"
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
         "      \"characterisation\": {\n"
         "        \"technique_1\": \"string\",\n"
         "        \"technique_2\": \"string\"\n"
@@ -172,7 +180,11 @@ def generate_system_prompt(sub_field: Optional[str] = None) -> str:
         "          \"value_numeric\": \"float or null (ML-ready)\",\n"
         "          \"value_type\": \"string (exact|lower_bound|upper_bound|range|qualitative|missing)\",\n"
         "          \"unit\": \"string or null\",\n"
+<<<<<<< HEAD
         "          \"measurement_condition\": \"string or null (MUST start with 'at XXX K' if temperature is known)\",\n"
+=======
+        "          \"measurement_condition\": \"string or null\",\n"
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
         "          \"additional_information\": \"string or null\"\n"
         "        }\n"
         "      ]\n"
@@ -253,6 +265,7 @@ def generate_system_prompt(sub_field: Optional[str] = None) -> str:
   
         "INCORRECT:"
             "'measurement_condition': 'DSC; Ø3 mm sample; Figure 3; Table 1 [35]'"
+<<<<<<< HEAD
         "\n\n"
         "### NEGATIVE EXAMPLES - DO NOT EXTRACT AS TARGET:\n"
         "═══════════════════════════════════════════════════════════════════════════\n"
@@ -268,6 +281,9 @@ def generate_system_prompt(sub_field: Optional[str] = None) -> str:
         "  - Original experimental measurements (mechanical, thermal, etc.)\n"
         "  - Microstructure characterization from THIS work\n"
         "═══════════════════════════════════════════════════════════════════════════\n\n"
+=======
+        "\n\n"    
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
         "Do not include any additional commentary or explanation in your response."
     )
 

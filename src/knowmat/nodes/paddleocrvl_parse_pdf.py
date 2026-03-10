@@ -267,6 +267,10 @@ def parse_pdf_with_paddleocrvl(state: KnowMatState) -> dict:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
         print(f"Saved parser metadata to: {meta_path}")
 
+<<<<<<< HEAD
         return {"paper_text": cleaned_text, "metadata": metadata}
+=======
+        return {"paper_text": cleaned_text}
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
     except Exception as exc:
         raise RuntimeError(f"Failed to parse PDF with PaddleOCR-VL: {str(exc)}") from exc

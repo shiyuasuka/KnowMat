@@ -43,6 +43,7 @@ from knowmat.app_config import Settings, settings
 from knowmat.config import _env_path
 
 
+<<<<<<< HEAD
 def _parse_temperature_to_k(measurement_condition: Optional[str]) -> Optional[int]:
     """Best-effort parse of temperature from measurement condition text.
     
@@ -59,12 +60,20 @@ def _parse_temperature_to_k(measurement_condition: Optional[str]) -> Optional[in
         return round(float(m_at.group(1)))
     
     # Fallback to general pattern
+=======
+def _parse_temperature_to_k(measurement_condition: Optional[str]) -> Optional[float]:
+    """Best-effort parse of temperature from measurement condition text."""
+    if not measurement_condition:
+        return None
+    txt = measurement_condition.lower()
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
     m = re.search(r"(-?\d+(?:\.\d+)?)\s*(k|°c|c)\b", txt)
     if not m:
         return None
     value = float(m.group(1))
     unit = m.group(2)
     if unit in {"°c", "c"}:
+<<<<<<< HEAD
         return round(value + 273)  # Convert to K without .15 offset
     return round(value)  # Ensure integer output
 
@@ -143,6 +152,22 @@ def _validate_composition_json(comp_json: dict, formula_source: str = "") -> tup
     return cleaned, warnings
 
 
+=======
+        return round(value + 273.15, 3)
+    return value
+
+
+def _build_composition_json(formula: str) -> dict:
+    """Convert formula string like Ti42Hf21Nb21V16 to a composition dict."""
+    comp = {}
+    if not formula:
+        return comp
+    for element, amount in re.findall(r"([A-Z][a-z]?)(\d+(?:\.\d+)?)", formula):
+        comp[element] = float(amount)
+    return comp
+
+
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
 def _extract_first_doi(text: Optional[str]) -> str:
     """Extract first DOI-like token from text."""
     if not text:
@@ -151,6 +176,7 @@ def _extract_first_doi(text: Optional[str]) -> str:
     return m.group(0) if m else ""
 
 
+<<<<<<< HEAD
 def _infer_main_phase(char_text: str) -> str:
     """Infer main phase from characterization text (fallback heuristic)."""
     if not char_text:
@@ -206,11 +232,16 @@ def _to_target_schema(data: dict, source_path: str, paper_text: Optional[str] = 
     - Groups compositions by normalized formula (removing condition suffixes like '[As-Built]')
     - Creates one Material per unique formula with multiple Samples for different conditions
     """
+=======
+def _to_target_schema(data: dict, source_path: str, paper_text: Optional[str] = None) -> dict:
+    """Convert internal extraction schema to target HEA dataset schema."""
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
     if not isinstance(data, dict):
         return {"Dataset_Description": "High Entropy Alloy Data Extraction Template", "Materials": []}
     if "Materials" in data and "Dataset_Description" in data:
         return data
 
+<<<<<<< HEAD
     from collections import defaultdict
     
     compositions = data.get("compositions", []) or []
@@ -220,10 +251,19 @@ def _to_target_schema(data: dict, source_path: str, paper_text: Optional[str] = 
     # Helper functions (defined first to be accessible in loops)
     def normalize_property_name(name: Optional[str]) -> Optional[str]:
         """Map common property name variants to standardized names."""
+=======
+    compositions = data.get("compositions", []) or []
+    materials = []
+    source_name = os.path.basename(source_path)
+    source_doi = _extract_first_doi(paper_text)
+
+    def normalize_property_name(name: Optional[str]) -> Optional[str]:
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
         if not name:
             return name
         key = name.strip().lower()
         mapping = {
+<<<<<<< HEAD
             # Mechanical - Tensile
             "yield strength": "Yield_Strength",
             "compressive yield strength": "Yield_Strength",
@@ -258,10 +298,20 @@ def _to_target_schema(data: dict, source_path: str, paper_text: Optional[str] = 
             "lattice constant": "Lattice_Parameter",
             "stacking fault energy": "Stacking_Fault_Energy",
             "sfe": "Stacking_Fault_Energy",
+=======
+            "yield strength": "Yield_Strength",
+            "compressive yield strength": "Yield_Strength",
+            "ultimate compressive strength": "Ultimate_Compressive_Strength",
+            "fracture strain": "Fracture_Strain",
+            "relative density": "Relative_Density",
+            "grain size": "Grain_Size",
+            "dislocation density": "Dislocation_Density",
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
         }
         return mapping.get(key, re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_"))
 
     def infer_process_category(process_text: str) -> str:
+<<<<<<< HEAD
         """Infer manufacturing process category from processing conditions text."""
         t = (process_text or "").lower()
         
@@ -430,13 +480,85 @@ def _to_target_schema(data: dict, source_path: str, paper_text: Optional[str] = 
             "Source_DOI": material_doi or "",
             "Source_File": source_name,
             "Processed_Samples": samples,
+=======
+        t = (process_text or "").lower()
+        if any(k in t for k in ("lens", "ded", "directed energy deposition", "laser-engineered net shaping")):
+            return "AM_DED"
+        if any(k in t for k in ("sps", "spark plasma sintering")):
+            return "SPS"
+        if any(k in t for k in ("arc melting", "vacuum arc")):
+            return "Arc_Melting"
+        return "Unknown"
+
+    for i, comp in enumerate(compositions, start=1):
+        comp_raw = comp.get("composition", "") or ""
+        formula_norm = comp_raw.replace(" ", "")
+        props = comp.get("properties_of_composition", []) or []
+        tests = []
+        for j, p in enumerate(props, start=1):
+            numeric_val = p.get("value_numeric")
+            if numeric_val is None:
+                continue
+            tests.append(
+                {
+                    "Test_ID": f"T{j:03d}",
+                    "Test_Temperature_K": _parse_temperature_to_k(p.get("measurement_condition")),
+                    "Property_Type": normalize_property_name(p.get("property_name")),
+                    "Property_Value": numeric_val,
+                    "Property_Unit": p.get("unit"),
+                }
+            )
+
+        process_text = comp.get("processing_conditions")
+        if isinstance(process_text, dict):
+            process_text = json.dumps(process_text, ensure_ascii=False)
+        char_text = comp.get("characterisation")
+        if isinstance(char_text, dict):
+            char_text = "; ".join([f"{k}: {v}" for k, v in char_text.items()])
+
+        has_precipitates = any(
+            kw in (char_text or "").lower()
+            for kw in ("precipitate", "precipitates", "nbc", "carbide")
+        )
+        main_phase = ""
+        ctext = (char_text or "").lower()
+        if "bcc" in ctext:
+            main_phase = "BCC"
+        elif "fcc" in ctext:
+            main_phase = "FCC"
+
+        material = {
+            "description": f"--- Material {i}: {comp_raw} ---",
+            "Mat_ID": f"M{i:03d}",
+            "Alloy_Name_Raw": comp_raw,
+            "Formula_Normalized": formula_norm,
+            "Composition_JSON": _build_composition_json(formula_norm),
+            "Source_DOI": source_doi,
+            "Source_File": source_name,
+            "Processed_Samples": [
+                {
+                    "Sample_ID": f"S{i:03d}_AutoExtracted",
+                    "Process_Category": infer_process_category(process_text or ""),
+                    "Process_Text_For_AI": process_text or "not provided",
+                    "Key_Params_JSON": {},
+                    "Main_Phase": main_phase,
+                    "Microstructure_Text_For_AI": char_text or "not provided",
+                    "Has_Precipitates": has_precipitates,
+                    "Grain_Size_avg_um": None,
+                    "Performance_Tests": tests,
+                }
+            ],
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
         }
         materials.append(material)
 
     return {
         "Dataset_Description": "High Entropy Alloy Data Extraction Template",
+<<<<<<< HEAD
         "schema_version": "2.1",
         "pipeline_version": "knowmat-2.0.1",
+=======
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
         "Materials": materials,
     }
 
@@ -675,6 +797,7 @@ def run(
     with open(runs_path, "w", encoding="utf-8") as f:
         json.dump(final_state.get("run_results", []), f, ensure_ascii=False, indent=2)
 
+<<<<<<< HEAD
     # Generate QA Report with red-line checks
     materials = final_data.get("Materials", [])
     all_samples = [s for m in materials for s in m.get("Processed_Samples", [])]
@@ -720,6 +843,8 @@ def run(
         print(f"\n[RED LINE] QA check failed: {', '.join(red_line_triggers)}")
         print(f"           Human review REQUIRED for {base_name}")
 
+=======
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
     return {
         "final_data": final_data,
         "flag": flag,

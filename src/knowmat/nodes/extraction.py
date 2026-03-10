@@ -52,12 +52,19 @@ def extract_data(state: KnowMatState) -> Dict[str, Any]:
     )
     # Invoke the extraction extractor
     result = extraction_extractor.invoke(full_prompt)
+<<<<<<< HEAD
     # TrustCall 返回结构中，responses 可能为空列表，需要安全访问
     responses = result.get("responses") or []
     if not responses:
         # 如果没有有效响应，则不更新状态，后续节点会看到 latest_extracted_data 为空
         return {}
     response = responses[0]
+=======
+    response = result.get("responses", [None])[0]
+    if response is None:
+        # If nothing returned, leave latest_extracted_data unchanged
+        return {}
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
     # Convert to dict; response is a CompositionList instance when using Pydantic
     if isinstance(response, CompositionList):
         extracted_dict = json.loads(response.model_dump_json())

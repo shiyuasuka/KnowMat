@@ -25,7 +25,11 @@ adjust the model name or temperature via environment variables.
 
 import os
 from typing import List, Optional, Dict, Any
+<<<<<<< HEAD
 from pydantic import BaseModel, Field, model_validator
+=======
+from pydantic import BaseModel, Field
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
 from langchain_openai import ChatOpenAI
 from trustcall import create_extractor
 
@@ -222,11 +226,16 @@ class Property(BaseModel):
     measurement_condition: Optional[str] = Field(
         default=None,
         description=(
+<<<<<<< HEAD
             "Conditions under which the property was measured. "
             "CRITICAL: If a test temperature is mentioned, ALWAYS start with 'at XXX K' or 'at XXX °C'. "
             "Then add other conditions (pressure, sample geometry, heating rate, strain rate). "
             "Examples: 'at 298 K; strain rate 1e-3 /s', 'at 1073 K; heating rate 20 K/min; Ar atmosphere'. "
             "Use null if not provided."
+=======
+            "Conditions under which the property was measured (e.g., temperature, pressure, "
+            "sample geometry, heating rate). Use null if not provided."
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
         )
     )
     
@@ -242,6 +251,7 @@ class Property(BaseModel):
 class CompositionProperties(BaseModel):
     """Represents the properties, processing conditions, and characterisation for a composition."""
 
+<<<<<<< HEAD
     composition: str = Field(
         default="",
         description="The chemical composition of the material as written in the paper (including any abbreviations)."
@@ -323,18 +333,29 @@ class CompositionProperties(BaseModel):
     
     characterisation: Dict[str, str] = Field(
         default_factory=dict,
+=======
+    composition: str = Field(description="The chemical composition of the material.")
+    processing_conditions: str = Field(
+        description="Processing conditions applied to the material, or 'not provided'."
+    )
+    characterisation: Dict[str, str] = Field(
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
         description=(
             "Characterisation techniques and their findings keyed by technique names."
         )
     )
     properties_of_composition: List[Property] = Field(
+<<<<<<< HEAD
         default_factory=list,
+=======
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
         description="List of standard properties extracted for this composition."
     )
     # non_standard_properties_of_composition: List[Property] = Field(
     #     description="List of non‑standard properties extracted for this composition."
     # )
 
+<<<<<<< HEAD
     @model_validator(mode="after")
     def fill_composition_from_normalized(self) -> "CompositionProperties":
         """When LLM returns only composition_normalized, use it as composition."""
@@ -342,6 +363,8 @@ class CompositionProperties(BaseModel):
             return self.model_copy(update={"composition": self.composition_normalized})
         return self
 
+=======
+>>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
 
 class CompositionList(BaseModel):
     """Encapsulates a list of compositions with extracted details."""
