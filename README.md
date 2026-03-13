@@ -98,8 +98,9 @@ data/processed/
 ### 前置要求
 
 1. **Python 3.11**
-2. **OpenAI 兼容 LLM API Key**（例如 ERNIE/Qianfan）
-3. **LangChain API Key**（可选，用于 LangSmith tracing）
+2. **Conda（推荐，用于管理虚拟环境）**
+3. **OpenAI 兼容 LLM API Key**（例如 ERNIE/Qianfan）
+4. **LangChain API Key**（可选，用于 LangSmith tracing）
 
 ### 安装步骤
 
@@ -110,16 +111,12 @@ git clone https://github.com/shiyuasuka/KnowMat.git
 cd KnowMat
 ```
 
-2. **创建 Python 虚拟环境（venv）**
+2. **创建 Conda 虚拟环境**
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
-python -m pip install -U pip
-pip install -r requirements.txt
+conda env create -f environment.yml
+conda activate KnowMat
 ```
-
-如果本机 `python3` 不是 3.11，请先安装 3.11 后再创建虚拟环境（例如使用 `pyenv` 或 `brew`），再执行上面的 `venv` 步骤。
 
 如 `paddleocr` 安装时提示缺少后端 wheel，请先为你的平台安装 `paddlepaddle` 后再重试。  
 如果要处理 PDF，建议预下载 PaddleOCR-VL 模型到项目目录：
@@ -128,21 +125,17 @@ pip install -r requirements.txt
 python scripts/download_paddleocrvl_models.py --model-dir models/paddleocrvl1_5
 ```
 
-### Apple Silicon（Mac M 系列）PaddleOCR-VL 推理配置
-
-推荐直接使用文末的 **一键脚本**（见 “PaddleOCR‑VL GPU / Apple Silicon” 部分）。如需手动安装，可参考官方文档建议：使用 `venv` 并安装 `paddlepaddle` 3.2.1+ 与 `paddleocr[doc-parser]`。
-
 3. **配置 API Key**
 
 将 `.env_example` 重命名为 `.env` 并填写：
 
 ```bash
-LLM_API_KEY=<your_llm_api_key_here>
-LLM_BASE_URL=<your_openai_compatible_base_url>
-LLM_MODEL=<your_model_name_or_endpoint>
+LLM_API_KEY=<你的_llm_api_key>
+LLM_BASE_URL=<你的_openai_兼容_base_url>
+LLM_MODEL=<你的模型名称或端点>
 PADDLEOCRVL_MODEL_DIR=models/paddleocrvl1_5
-LANGCHAIN_API_KEY=<your_langchain_api_key_here>  # 可选
-LANGCHAIN_TRACING_V2=false                        # 可选
+LANGCHAIN_API_KEY=<你的_langchain_api_key>  # 可选
+LANGCHAIN_TRACING_V2=false                  # 可选
 ```
 
 ERNIE/Qianfan 示例：
@@ -220,79 +213,6 @@ python -m knowmat
 等价于从 `data/raw` 读取输入，并输出到 `data/processed`。  
 
 也可以指定自定义目录（会覆盖默认值）：
-=======
-## Installation
-
-### Prerequisites
-
-1. **Python 3.11** with Conda
-2. **OpenAI-compatible LLM API key** (e.g. ERNIE/Qianfan)
-3. **LangChain API Key** (optional, for LangSmith tracing)
-
-### Setup Steps
-
-1. **Clone the Repository**:
-   ```bash
-   git clone https://github.com/hasan-sayeed/KnowMat2.git
-   cd KnowMat2
-   ```
-
-2. **Create Conda Environment**:
-   ```bash
-   conda env create -f environment.yml
-   conda activate KnowMat
-   ```
-   If `paddleocr` installation reports missing backend wheels, install `paddlepaddle` for your platform first and rerun the command.
-   If you will process PDF files, pre-download PaddleOCR-VL model files into the project folder:
-   ```bash
-   python scripts/download_paddleocrvl_models.py --model-dir models/paddleocrvl1_5
-   ```
-
-3. **Configure API Keys**:
-
-   Rename the provided example file `.env_example` to `.env` and add your values:
-   ```bash
-   LLM_API_KEY=<your_llm_api_key_here>
-   LLM_BASE_URL=<your_openai_compatible_base_url>
-   LLM_MODEL=<your_model_name_or_endpoint>
-   PADDLEOCRVL_MODEL_DIR=models/paddleocrvl1_5
-   LANGCHAIN_API_KEY=<your_langchain_api_key_here>  # Optional
-   LANGCHAIN_TRACING_V2=false  # Optional
-   ```
-
-   ERNIE/Qianfan example:
-   ```bash
-   LLM_API_KEY="bce-v3/xxxx"
-   LLM_BASE_URL="https://qianfan.bj.baidubce.com/v2"
-   LLM_MODEL="ep_xxxxx"
-   ```
-
-   Alternatively, set as environment variables:
-   ```bash
-   # Windows PowerShell
-   $env:LLM_API_KEY="your_key"
-   $env:LLM_BASE_URL="https://qianfan.bj.baidubce.com/v2"
-   $env:LLM_MODEL="ep_xxxxx"
-
-   # Linux/Mac
-   export LLM_API_KEY="your_key"
-   export LLM_BASE_URL="https://qianfan.bj.baidubce.com/v2"
-   export LLM_MODEL="ep_xxxxx"
-   ```
-
-4. **Verify Installation**:
-   ```bash
-   python -m knowmat --help
-   ```
-
----
-
-## Usage
-
-### Basic Command Line Usage
-
-Process a single folder of files (`.pdf` and/or `.txt`):
->>>>>>> aa54db202c45405fe7aebf5f9fe795ea4350925c
 
 ```bash
 python -m knowmat --input-folder path/to/files --output-dir output/directory
@@ -773,23 +693,28 @@ Unrecognized function call PatchFunction
 
 根据不同环境选择对应方案：
 
-### Windows + RTX 50-series (Blackwell)
+### Windows + RTX 50 系列显卡（Blackwell）
 
-Use the GPU setup script:
+在 Windows + RTX 50 系列 GPU 环境下，推荐使用提供的 GPU 一键脚本完成 PaddleOCR‑VL 安装与配置：
 
 ```powershell
 .\scripts\setup_paddleocrvl_gpu.ps1
 ```
 
-This installs the GPU PaddlePaddle build and PaddleOCR-VL dependencies, sets GPU runtime defaults, and downloads models into the project cache (models/paddleocrvl1_5).
+该脚本会自动：
 
-Notes:
-- The script sets `KNOWMAT_OCR_DEVICE=gpu:0` and `PADDLE_PDX_CACHE_HOME=models/paddleocrvl1_5`.
-- Server backends like vLLM/sglang are for dedicated serving environments; on Windows, use native Paddle GPU inference.
+- 安装 GPU 版 `paddlepaddle` 以及 PaddleOCR‑VL 相关依赖；
+- 设置默认运行设备为 GPU；
+- 将模型下载到本项目缓存目录 `models/paddleocrvl1_5`。
 
-### macOS + Apple Silicon (CPU)
+说明：
 
-一键脚本（默认 CPU 推理，安装到主环境 `.venv`）：
+- 脚本会设置环境变量 `KNOWMAT_OCR_DEVICE=gpu:0` 与 `PADDLE_PDX_CACHE_HOME=models/paddleocrvl1_5`；
+- vLLM/sglang 等推理后端更适合独立服务部署，在 Windows 本地推荐直接使用 Paddle 的原生 GPU 推理。
+
+### macOS + Apple Silicon（CPU）
+
+在 Apple Silicon 上，如无需额外加速，可直接使用 CPU 一键脚本（安装到主环境 `.venv`）：
 
 ```bash
 ./scripts/setup_paddleocrvl_macos.sh
@@ -804,16 +729,16 @@ export KNOWMAT_OCR_DEVICE=cpu
 export PADDLE_PDX_CACHE_HOME=models/paddleocrvl1_5
 ```
 
-### macOS + Apple Silicon (MLX‑VLM 加速)
+### macOS + Apple Silicon（MLX‑VLM 加速）
 
-For Mac M‑series local acceleration, the official guide recommends MLX‑VLM (`>=0.3.11`) and running a local server, then pointing PaddleOCR‑VL to that backend.
+若希望在 Mac M 系列上利用 MLX‑VLM 进行本地加速，可参考官方建议：安装 `mlx-vlm>=0.3.11`，启动本地推理服务，并将 PaddleOCR‑VL 的后端指向该服务：
 
 ```bash
 INSTALL_MLX=1 ./scripts/setup_paddleocrvl_macos.sh
 mlx_vlm.server --port 8111
 ```
 
-CLI example:
+命令行示例：
 
 ```bash
 paddleocr doc_parser \

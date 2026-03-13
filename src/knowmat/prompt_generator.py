@@ -316,6 +316,17 @@ def generate_system_prompt(sub_field: Optional[str] = None) -> str:
         "  - Original experimental measurements (mechanical, thermal, etc.)\n"
         "  - Microstructure characterization from THIS work\n"
         "═══════════════════════════════════════════════════════════════════════════\n\n"
+        "### CRITICAL - FOCUS ON THIS PAPER'S OWN MATERIALS:\n"
+        "═══════════════════════════════════════════════════════════════════════════\n"
+        "Only extract materials that are SYNTHESIZED, FABRICATED, or TESTED in THIS paper.\n"
+        "Materials mentioned in the Introduction or Literature Review as references to\n"
+        "prior work should be marked as role='Reference' or OMITTED entirely.\n\n"
+        "The Introduction section often mentions many alloy compositions from other studies\n"
+        "(e.g., 'HfNbTiZrTa was reported by [12]', 'MoNbTaW showed excellent properties [15]').\n"
+        "These are NOT target materials of this paper - do NOT extract them as role='Target'.\n\n"
+        "Focus your extraction on the Experimental, Results, and Discussion sections where\n"
+        "the paper's own materials are described with original data.\n"
+        "═══════════════════════════════════════════════════════════════════════════\n\n"
         "Do not include any additional commentary or explanation in your response."
     )
 

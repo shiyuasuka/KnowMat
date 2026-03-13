@@ -39,7 +39,7 @@ def _extract_doi_from_text(text: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# HTML â†?markdown conversion for .txt inputs
+# HTML ï¿½?markdown conversion for .txt inputs
 # ---------------------------------------------------------------------------
 
 _HTML_IMG_RE = re.compile(r'<div[^>]*>\s*<img[^>]*/>\s*</div>', re.IGNORECASE)
@@ -288,14 +288,15 @@ _SECTION_PATTERNS: List[Tuple[re.Pattern, str]] = [
 
 _NOISE_LINE_PATTERNS: List[Tuple[re.Pattern, bool]] = [
     # (pattern, skip_if_contains_doi)
-    # Journal name lines â€?may contain DOI on the same line, so skip filtering if DOI present
-    (re.compile(r'^Materials Science and Engineering', re.IGNORECASE), True),
-    (re.compile(r'^Acta Materialia', re.IGNORECASE), True),
-    (re.compile(r'^Journal of Materials Science', re.IGNORECASE), True),
-    (re.compile(r'^International Journal of Plasticity', re.IGNORECASE), True),
-    (re.compile(r'^Journal of Alloys and Compounds', re.IGNORECASE), True),
-    (re.compile(r'^Scripta Materialia', re.IGNORECASE), True),
-    (re.compile(r'^Additive Manufacturing', re.IGNORECASE), True),
+    # Journal name lines - require volume/year digits after the name to avoid
+    # false-positives when the journal name also appears as a keyword.
+    (re.compile(r'^Materials Science and Engineering\s+\d', re.IGNORECASE), True),
+    (re.compile(r'^Acta Materialia\s+\d', re.IGNORECASE), True),
+    (re.compile(r'^Journal of Materials Science\s+\d', re.IGNORECASE), True),
+    (re.compile(r'^International Journal of Plasticity\s+\d', re.IGNORECASE), True),
+    (re.compile(r'^Journal of Alloys and Compounds\s+\d', re.IGNORECASE), True),
+    (re.compile(r'^Scripta Materialia\s+\d', re.IGNORECASE), True),
+    (re.compile(r'^Additive Manufacturing\s+\d', re.IGNORECASE), True),
     # Lines that never contain DOI
     (re.compile(r'^Contents lists available at ScienceDirect', re.IGNORECASE), False),
     (re.compile(r'^Available online', re.IGNORECASE), False),
@@ -304,8 +305,8 @@ _NOISE_LINE_PATTERNS: List[Tuple[re.Pattern, bool]] = [
     (re.compile(r'^journal homepage', re.IGNORECASE), False),
     (re.compile(r'^https?://www\.(sciencedirect|elsevier|springer|wiley)', re.IGNORECASE), False),
     (re.compile(r'^Full length article\s*$', re.IGNORECASE), False),
-    (re.compile(r'^\d{4}-\d{3}[\dX]/\s*Â©', re.IGNORECASE), False),
-    (re.compile(r'^Â©\s*\d{4}', re.IGNORECASE), False),
+    (re.compile(r'^\d{4}-\d{3}[\dX]/\s*ï¿½', re.IGNORECASE), False),
+    (re.compile(r'^ï¿½\s*\d{4}', re.IGNORECASE), False),
     (re.compile(r'^Elsevier', re.IGNORECASE), False),
     (re.compile(r'^\* Corresponding author', re.IGNORECASE), False),
     (re.compile(r'^\*\* Corresponding author', re.IGNORECASE), False),
@@ -327,7 +328,7 @@ def _is_noise_line(line: str) -> bool:
     for pat, skip_if_doi in _NOISE_LINE_PATTERNS:
         if pat.match(stripped):
             if skip_if_doi and has_doi:
-                return False  # keep the line â€?it contains a DOI
+                return False  # keep the line ï¿½?it contains a DOI
             return True
     return False
 
@@ -652,7 +653,7 @@ def _extract_pdf_with_paddleocrvl(pdf_path: str, output_dir: str, model_dir: Pat
                 vl_results,
                 merge_tables=True,
                 relevel_titles=True,
-                concatenate_pages=False,
+                concatenate_pages=True,
             )
             restructured = list(restructured)
         except Exception:
