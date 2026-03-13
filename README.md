@@ -106,8 +106,8 @@ data/processed/
 1. **克隆仓库**
 
 ```bash
-git clone https://github.com/hasan-sayeed/KnowMat2.git
-cd KnowMat2
+git clone https://github.com/shiyuasuka/KnowMat.git
+cd KnowMat
 ```
 
 2. **创建 Python 虚拟环境（venv）**
