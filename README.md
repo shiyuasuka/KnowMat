@@ -112,7 +112,40 @@ data/output/
 3. **OpenAI 兼容 LLM API Key**（例如 ERNIE/Qianfan）
 4. **LangChain API Key**（可选，用于 LangSmith tracing）
 
-### 安装步骤
+### 一键部署（推荐）
+
+在克隆并进入项目目录后，可直接运行脚本完成 Conda 环境创建、PaddlePaddle GPU (cu129) + PaddleOCR、cuDNN 9 与 OCR 模型下载：
+
+**Windows (PowerShell)：**
+
+```powershell
+cd KnowMat
+.\scripts\setup_env.ps1
+```
+
+仅使用 CPU 时（不装 GPU 版 Paddle / cuDNN）：
+
+```powershell
+.\scripts\setup_env.ps1 -CPU
+```
+
+**Linux / macOS：**
+
+```bash
+cd KnowMat
+chmod +x scripts/setup_env.sh
+./scripts/setup_env.sh
+```
+
+仅使用 CPU 时：
+
+```bash
+./scripts/setup_env.sh --cpu
+```
+
+脚本会：创建或更新 `KnowMat` 环境、从国内源安装 `paddlepaddle-gpu==3.3.0` 与 `paddleocr[all]`、尝试用 conda 安装 cuDNN 9（`conda install nvidia::cudnn cuda-version=12`）、下载 PaddleOCR-VL 模型到 `models/paddleocrvl1_5`。完成后执行 `conda activate KnowMat` 并配置 `.env` 即可使用。**Windows 下 cu129 兼容 CUDA 12.7**（如 RTX 4060）；Mac/Linux 及多平台说明见 [docs/platforms.md](docs/platforms.md)。若 OCR 报 `cudnn64_9.dll` 错误，见 [docs/ocr-cudnn64_9-fix.md](docs/ocr-cudnn64_9-fix.md)。
+
+### 手动安装步骤
 
 1. **克隆仓库**
 
@@ -128,14 +161,19 @@ conda env create -f environment.yml
 conda activate KnowMat
 ```
 
-如 `paddleocr` 安装时提示缺少后端 wheel，请先为你的平台安装 `paddlepaddle` 后再重试。  
+**基础环境**（`environment.yml` / `requirements.txt`）仅含 **CPU 版** Paddle，Mac/Linux/Windows 均可直接安装。**需要 GPU** 时二选一：
+
+- **一键脚本**（推荐）：Windows 运行 `.\scripts\setup_env.ps1`，Linux/Mac 运行 `./scripts/setup_env.sh`（会按平台自动装 GPU 或保持 CPU）。
+- **手动**：`pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/`，再 `conda install nvidia::cudnn cuda-version=12`。详见 [docs/platforms.md](docs/platforms.md)。
+
+GPU 下若报 `cudnn64_9.dll`，见 [docs/ocr-cudnn64_9-fix.md](docs/ocr-cudnn64_9-fix.md)。  
 若要处理 PDF，建议预下载 PaddleOCR-VL 模型到项目目录：
 
 ```bash
 python scripts/download_paddleocrvl_models.py --model-dir models/paddleocrvl1_5
 ```
 
-Windows GPU 或 macOS（含 Apple Silicon）的一键安装与设备配置见文末 **[PaddleOCR-VL GPU / Apple Silicon](#paddleocr-vl-gpu-apple-silicon)**。
+Windows GPU 或 macOS（含 Apple Silicon）的详细设备配置见文末 **[PaddleOCR-VL GPU / Apple Silicon](#paddleocr-vl-gpu-apple-silicon)**。
 
 3. **配置 API Key**
 

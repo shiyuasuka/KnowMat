@@ -1,32 +1,41 @@
-numpy==2.2.6
-scipy==1.16.0
-pandas==2.3.2
-tqdm==4.67.1
-click
+# KnowMat 基础依赖（与 environment.yml 中 pip 部分一致，CPU 版 Paddle，跨平台）
+# 仅用 pip 安装时：pip install -r requirements.txt
+# 需要 GPU：见 requirements-gpu.txt 与 docs/platforms.md
 
-matplotlib
-seaborn
+# 项目本体（可编辑安装）
+-e .
 
+# LangChain & 编排
 langchain==0.3.26
 langchain-community==0.3.27
 langchain-openai==0.3.27
 langgraph==0.6.10
 trustcall==0.0.39
+
+# OpenAI / API
 openai==1.93.2
 
+# PaddleOCR-VL（PDF 解析，CPU 版；GPU 用 requirements-gpu.txt）
 paddlepaddle>=3.0.0
-paddleocr>=3.0.0
+paddleocr[all]
 pymupdf==1.24.13
 
+# OCR 相关传递依赖
+beautifulsoup4>=4.12
+lxml>=6.0
+cssselect>=1.4
+einops>=0.8
+openpyxl>=3.1
+premailer>=3.10
+
+# 校验与配置
 pydantic==2.11.7
 pydantic-settings>=2.0.0
 python-dotenv==1.1.1
 colorlog==6.9.0
 PyYAML>=6.0
 
+# 向量与嵌入
 sentence-transformers==5.0.0
 torch==2.8.0
 torchvision==0.23.0
-
--e .
-beautifulsoup4==4.12.3
