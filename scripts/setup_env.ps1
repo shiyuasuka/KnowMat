@@ -60,11 +60,11 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "  python -m pip install `"paddleocr[all]`"" -ForegroundColor Gray
 }
 
-# 4. 可选：安装 cuDNN 9（GPU 下若报 cudnn64_9.dll 再装）
+# 4. 可选：安装 cuDNN 9（conda，GPU 下若报 cudnn64_9.dll 再装）
 if (-not $CPU -and -not $SkipCudnn) {
     Write-Host ""
-    Write-Host "==> 尝试安装 cuDNN 9 (pip install nvidia-cudnn)" -ForegroundColor Yellow
-    & conda run -n $EnvName pip install nvidia-cudnn --quiet 2>$null
+    Write-Host "==> 尝试安装 cuDNN 9 (conda install nvidia::cudnn cuda-version=12)" -ForegroundColor Yellow
+    & conda install -n $EnvName nvidia::cudnn cuda-version=12 -y --quiet 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "    cuDNN 自动安装未成功；若 OCR 报 cudnn64_9.dll，请见 docs/ocr-cudnn64_9-fix.md" -ForegroundColor Gray
     }

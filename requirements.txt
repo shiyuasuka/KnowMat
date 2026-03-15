@@ -4,7 +4,7 @@
 # Paddle 默认使用 GPU（cu129），建议单独执行以指定国内源：
 #   python -m pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
 #   python -m pip install "paddleocr[all]"
-# cuDNN 9（GPU OCR 必需，否则报 cudnn64_9.dll error 126）：pip install nvidia-cudnn
+# cuDNN 9（GPU OCR 必需，否则报 cudnn64_9.dll error 126）：conda install nvidia::cudnn cuda-version=12
 
 # 项目本体（可编辑安装）
 -e .

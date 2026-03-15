@@ -52,11 +52,11 @@ else
   conda run -n "$ENV_NAME" python -m pip install "paddleocr[all]" -q
 fi
 
-# 4. 可选：安装 cuDNN 9
+# 4. 可选：安装 cuDNN 9（conda）
 if ! $CPU && ! $SKIP_CUDNN; then
   echo ""
-  echo "==> 尝试安装 cuDNN 9 (pip install nvidia-cudnn)"
-  conda run -n "$ENV_NAME" pip install nvidia-cudnn -q 2>/dev/null || true
+  echo "==> 尝试安装 cuDNN 9 (conda install nvidia::cudnn cuda-version=12)"
+  conda install -n "$ENV_NAME" nvidia::cudnn cuda-version=12 -y -q 2>/dev/null || true
 fi
 
 # 5. 下载 PaddleOCR-VL 模型

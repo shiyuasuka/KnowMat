@@ -143,7 +143,7 @@ chmod +x scripts/setup_env.sh
 ./scripts/setup_env.sh --cpu
 ```
 
-脚本会：创建或更新 `KnowMat` 环境、从国内源安装 `paddlepaddle-gpu==3.3.0` 与 `paddleocr[all]`、尝试安装 `nvidia-cudnn`、下载 PaddleOCR-VL 模型到 `models/paddleocrvl1_5`。完成后执行 `conda activate KnowMat` 并配置 `.env` 即可使用。若 OCR 报 `cudnn64_9.dll` 错误，见 [docs/ocr-cudnn64_9-fix.md](docs/ocr-cudnn64_9-fix.md)。
+脚本会：创建或更新 `KnowMat` 环境、从国内源安装 `paddlepaddle-gpu==3.3.0` 与 `paddleocr[all]`、尝试用 conda 安装 cuDNN 9（`conda install nvidia::cudnn cuda-version=12`）、下载 PaddleOCR-VL 模型到 `models/paddleocrvl1_5`。完成后执行 `conda activate KnowMat` 并配置 `.env` 即可使用。若 OCR 报 `cudnn64_9.dll` 错误，见 [docs/ocr-cudnn64_9-fix.md](docs/ocr-cudnn64_9-fix.md)。
 
 ### 手动安装步骤
 
@@ -168,7 +168,7 @@ python -m pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn
 python -m pip install "paddleocr[all]"
 ```
 
-GPU 下若报 `cudnn64_9.dll`，可安装 cuDNN 9：`pip install nvidia-cudnn` 或见 [docs/ocr-cudnn64_9-fix.md](docs/ocr-cudnn64_9-fix.md)。  
+GPU 下若报 `cudnn64_9.dll`，可安装 cuDNN 9：`conda install nvidia::cudnn cuda-version=12`，或见 [docs/ocr-cudnn64_9-fix.md](docs/ocr-cudnn64_9-fix.md)。  
 若要处理 PDF，建议预下载 PaddleOCR-VL 模型到项目目录：
 
 ```bash

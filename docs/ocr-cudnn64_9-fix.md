@@ -40,11 +40,7 @@ python -m knowmat --ocr-only
 
 ---
 
-## 方案二：用 conda / pip 安装 cuDNN（推荐，免手动拷 DLL）
-
-NVIDIA 官方提供通过包管理器安装 cuDNN，无需从官网下 zip 再拷贝。
-
-**方式 A：conda（与 knowmat 环境一致）**
+## 方案二：用 conda 安装 cuDNN 9（推荐，免手动拷 DLL）
 
 在 knowmat 环境中执行（CUDA 12 与 Paddle 3.3 常见组合）：
 
@@ -59,20 +55,13 @@ conda install nvidia::cudnn cuda-version=12
 conda install nvidia::cudnn cuda-version=11.8
 ```
 
-**方式 B：pip**
-
-```bash
-conda activate knowmat
-pip install nvidia-cudnn
-```
-
 安装完成后**新开终端**再运行：
 
 ```powershell
 python -m knowmat --ocr-only
 ```
 
-若 conda/pip 安装的 cuDNN 未被 Paddle 找到（仍报 126），再按方案三手动安装。
+若 conda 安装的 cuDNN 未被 Paddle 找到（仍报 126），再按方案三手动安装。
 
 ---
 
