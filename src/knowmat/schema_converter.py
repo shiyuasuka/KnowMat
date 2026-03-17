@@ -138,19 +138,34 @@ class SchemaConverter:
 
     @staticmethod
     def build_composition_json(formula: str) -> dict:
-        """Convert formula string like ``Ti42Hf21Nb21V16`` to a composition dict."""
+        """Convert formula string like ``Ti42Hf21Nb21V16`` to a composition dict.
+
+        Supports formulas where element amounts are omitted (defaults to 1),
+        e.g. ``FeCoCrNiMo0.5``.
+        """
         comp: Dict[str, float] = {}
         if not formula:
             return comp
         cleaned = re.sub(r"[()[\]{}]", "", formula)
-        for element, amount in re.findall(r"([A-Z][a-z]?)(\d+(?:\.\d+)?)", cleaned):
-            comp[element] = float(amount)
+        cleaned = cleaned.translate(
+            str.maketrans({"₀": "0", "₁": "1", "₂": "2", "₃": "3", "₄": "4", "₅": "5", "₆": "6", "₇": "7", "₈": "8", "₉": "9"})
+        )
+
+        # Match element tokens with optional numeric amount (default 1.0)
+        for element, amount in re.findall(r"([A-Z][a-z]?)(\d+(?:\.\d+)?)?", cleaned):
+            if not element:
+                continue
+            comp[element] = float(amount) if amount not in (None, "") else 1.0
         return comp
 
     def validate_composition_json(
         self, comp_json: dict, formula_source: str = ""
     ) -> Tuple[dict, List[str]]:
-        """Validate element symbols and check that at% sums to ~100."""
+        """Validate element symbols and ensure composition is in at% (sums to ~100).
+
+        If values look like atomic ratios (e.g. sum far from 100 but > 0), the
+        composition is normalised to 100 at%.
+        """
         warnings: List[str] = []
         cleaned: Dict[str, float] = {}
 
@@ -162,10 +177,17 @@ class SchemaConverter:
 
         if cleaned:
             total = sum(cleaned.values())
+            if total <= 0:
+                warnings.append(f"Composition sum = {total:.2f}, invalid total. Formula: {formula_source}")
+                return cleaned, warnings
+
+            # If clearly not at% already, normalise to at%.
             if abs(total - 100) > 2:
+                normalised = {k: (v / total) * 100.0 for k, v in cleaned.items()}
                 warnings.append(
-                    f"Composition sum = {total:.2f} at%, expected ~100 (±2%). Formula: {formula_source}"
+                    f"Composition sum = {total:.2f} (not ~100). Normalised to 100 at%. Formula: {formula_source}"
                 )
+                cleaned = normalised
         return cleaned, warnings
 
     @staticmethod

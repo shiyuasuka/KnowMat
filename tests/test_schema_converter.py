@@ -29,8 +29,17 @@ def test_parse_temperature_to_k_returns_none_when_no_temperature():
 def test_validate_composition_json_warns_on_sum_far_from_100():
     comp = {"Ti": 30.0, "Nb": 30.0, "Zr": 30.0}
     cleaned, warnings = converter.validate_composition_json(comp, "Ti30Nb30Zr30")
-    assert cleaned == comp
-    assert any("Composition sum" in w for w in warnings)
+    assert any("Normalised to 100 at%" in w for w in warnings)
+    assert abs(sum(cleaned.values()) - 100.0) < 1e-6
+
+
+def test_build_composition_json_defaults_missing_amounts_to_one():
+    comp = converter.build_composition_json("FeCoCrNiMo0.5")
+    assert comp["Fe"] == 1.0
+    assert comp["Co"] == 1.0
+    assert comp["Cr"] == 1.0
+    assert comp["Ni"] == 1.0
+    assert math.isclose(comp["Mo"], 0.5)
 
 
 def test_validate_composition_json_drops_invalid_element():
