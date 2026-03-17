@@ -27,6 +27,18 @@ For each composition entry, extract the following fields:
 
 2. composition_normalized: Rewrite composition using ONLY element symbols and atomic percentages.
    Remove abbreviations, parenthetical codes, and sample names.
+   
+   SPECIAL CASE - VARIABLE COMPOSITIONS (e.g. "FeCoCrNiMox"):
+   - If the paper reports a composition family with a variable parameter (x) and provides the corresponding
+     atomic percent values (e.g. "x = 0, 0.1, 0.3, 0.5; Mo content = 0, 2.44, 6.98, 11.11 at%"),
+     you MUST create SEPARATE Target entries for EACH variant (Mo0/Mo1/Mo3/Mo5, etc.).
+   - Compute composition_normalized in at% using the provided Mo at% values:
+       Remaining = 100 - Mo_at%
+       For FeCoCrNi base: Fe = Co = Cr = Ni = Remaining / 4
+     Example: Mo = 11.11 at% -> Fe = Co = Cr = Ni = 22.2225 at%
+   - Include the sample code in composition for clarity, e.g.:
+       composition: "FeCoCrNiMo0.5 (Mo5) [As-built]" (if as-built)
+     but keep composition_normalized as numeric at% only.
 
 3. main_phase: Identify the primary crystal structure from XRD/EBSD/electron diffraction.
    Use standard abbreviations: BCC, FCC, HCP, amorphous, or combinations.
@@ -84,6 +96,18 @@ When extracting properties, follow these instructions strictly:
 5. Use null for missing values.
 6. Preserve inequalities in value as strings (e.g., '>50', '<2000').
 7. Keep output strictly machine-readable JSON.
+
+CRITICAL RULE - TABLES (MECHANICAL PROPERTIES):
+═══════════════════════════════════════════════════════════════════════════
+When the paper contains a summary table (e.g., YS/UTS/Uniform elongation/Total elongation vs temperature),
+extract EACH row as the correct property with the correct unit:
+  - Yield strength (YS): MPa
+  - Ultimate tensile strength (UTS): MPa
+  - Uniform elongation (UFE): %
+  - Total elongation (TE): %
+Create separate Property entries per temperature condition (e.g., at 298 K and at 873 K for 600 °C).
+If OCR has broken the table formatting, use nearby narrative text to avoid column-shift errors.
+═══════════════════════════════════════════════════════════════════════════
 
 ### Output Format
 Return your answer as valid JSON strictly matching this schema:
