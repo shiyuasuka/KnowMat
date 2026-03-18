@@ -72,6 +72,13 @@ class SchemaConverter:
             if not formula_norm:
                 formula_norm = comp_raw.replace(" ", "")
             base_formula = re.sub(r"\s*\[.*?\]\s*$", "", formula_norm).strip()
+            # Variable-family formulas sometimes come through as a single
+            # compound string with multiple variants separated by ';', e.g.:
+            # "FeCoCrNiMo0 (Mo0): ...; FeCoCrNiMo0.1 (Mo1): ...; ...".
+            # For schema material display we keep only the first (Mo0) variant
+            # to avoid duplicating the full family text in each Material.
+            if ";" in base_formula and re.search(r"\(\s*%s\d+\.?\d*\s*\)" % "Mo", base_formula, re.IGNORECASE):
+                base_formula = base_formula.split(";", 1)[0].strip()
             if not base_formula:
                 base_formula = formula_norm
             groups[base_formula].append(comp)
