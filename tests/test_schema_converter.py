@@ -26,11 +26,11 @@ def test_parse_temperature_to_k_returns_none_when_no_temperature():
     assert converter.parse_temperature_to_k("room temperature test") is None
 
 
-def test_validate_composition_json_warns_on_sum_far_from_100():
+def test_validate_composition_json_keeps_non_100_sum_as_is():
     comp = {"Ti": 30.0, "Nb": 30.0, "Zr": 30.0}
     cleaned, warnings = converter.validate_composition_json(comp, "Ti30Nb30Zr30")
-    assert any("Normalised to 100 at%" in w for w in warnings)
-    assert abs(sum(cleaned.values()) - 100.0) < 1e-6
+    assert warnings == []
+    assert cleaned == comp
 
 
 def test_build_composition_json_defaults_missing_amounts_to_one():
@@ -40,6 +40,23 @@ def test_build_composition_json_defaults_missing_amounts_to_one():
     assert comp["Cr"] == 1.0
     assert comp["Ni"] == 1.0
     assert math.isclose(comp["Mo"], 0.5)
+
+
+def test_build_composition_json_parses_hyphen_separated_amounts():
+    comp = converter.build_composition_json(
+        "Ni-21.49Cr-13.13W-2.22Mo-1.57Fe-1.30Co-0.46Al-0.34Mn-0.30Si-0.029La-0.48C"
+    )
+    assert math.isclose(comp["Ni"], 21.49, rel_tol=1e-6)
+    assert math.isclose(comp["Cr"], 13.13, rel_tol=1e-6)
+    assert math.isclose(comp["W"], 2.22, rel_tol=1e-6)
+    assert math.isclose(comp["Mo"], 1.57, rel_tol=1e-6)
+    assert math.isclose(comp["Fe"], 1.30, rel_tol=1e-6)
+    assert math.isclose(comp["Co"], 0.46, rel_tol=1e-6)
+    assert math.isclose(comp["Al"], 0.34, rel_tol=1e-6)
+    assert math.isclose(comp["Mn"], 0.30, rel_tol=1e-6)
+    assert math.isclose(comp["Si"], 0.029, rel_tol=1e-6)
+    assert math.isclose(comp["La"], 0.48, rel_tol=1e-6)
+    assert "C" not in comp
 
 
 def test_validate_composition_json_drops_invalid_element():
