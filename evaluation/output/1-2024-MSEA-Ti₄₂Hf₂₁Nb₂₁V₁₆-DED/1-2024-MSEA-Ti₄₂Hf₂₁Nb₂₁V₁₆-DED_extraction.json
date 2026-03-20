@@ -1,0 +1,93 @@
+{
+  "Dataset_Description": "High Entropy Alloy Data Extraction Template",
+  "schema_version": "2.2",
+  "pipeline_version": "knowmat-2.1.0",
+  "Materials": [
+    {
+      "description": "--- Material 1: Ti42Hf21Nb21V16 ---",
+      "Mat_ID": "M001",
+      "Alloy_Name_Raw": "Ti42Hf21Nb21V16 [As-Built]",
+      "Formula_Normalized": "Ti42Hf21Nb21V16",
+      "Composition_JSON": {
+        "Ti": 42.0,
+        "Hf": 21.0,
+        "Nb": 21.0,
+        "V": 16.0
+      },
+      "Source_DOI": "10.1016/j.msea.2024.147225",
+      "Source_File": "1-2024-MSEA-Ti₄₂Hf₂₁Nb₂₁V₁₆-DED.md",
+      "Processed_Samples": [
+        {
+          "Sample_ID": "S001_01_As-Built_XY_and_XZ_planes",
+          "Process_Category": "AM_DED",
+          "Process_Text_For_AI": "LENS fabrication with remelting procedure",
+          "Key_Params_JSON": {
+            "Build_Orientation": "XY and XZ planes"
+          },
+          "Main_Phase": "BCC",
+          "Microstructure_Text_For_AI": "Single BCC phase structure with significant lattice distortion (3.68% local lattice strain). Equiaxed grains in XY plane (200 μm), columnar grains in XZ plane (400 μm). No precipitates observed. Local chemical fluctuations and lattice distortion confirmed by APT and PDF analysis.",
+          "Has_Precipitates": false,
+          "Grain_Size_avg_um": 200.0,
+          "Performance_Tests": [
+            {
+              "Test_ID": "T001",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 1030.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T002",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Fracture_Strain",
+              "Property_Value": 22.5,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T003",
+              "Test_Temperature_K": 673,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 681.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T004",
+              "Test_Temperature_K": 673,
+              "Property_Type": "Fracture_Strain",
+              "Property_Value": 27.8,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T005",
+              "Test_Temperature_K": 773,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 661.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T006",
+              "Test_Temperature_K": 773,
+              "Property_Type": "Fracture_Strain",
+              "Property_Value": 16.8,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T007",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 635.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T008",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Fracture_Strain",
+              "Property_Value": 7.5,
+              "Property_Unit": "%"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

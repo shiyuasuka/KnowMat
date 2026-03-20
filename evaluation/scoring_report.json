@@ -1,0 +1,2566 @@
+{
+  "config": {
+    "groundtruth_dir": "groundtruth",
+    "output_dir": "output",
+    "value_tol": 0.1,
+    "drop_zero_elements": false,
+    "zero_eps": 0.0,
+    "temp_tol": 1.0,
+    "allow_celsius_shift": false,
+    "ignore_test_unit": false,
+    "material_match_use_tests": false
+  },
+  "overall": {
+    "composition_detection": {
+      "tp": 55,
+      "fp": 0,
+      "fn": 1,
+      "precision": 1.0,
+      "recall": 0.982143,
+      "f1": 0.990991
+    },
+    "composition_values": {
+      "count": 55,
+      "mae": 0.470749,
+      "max_abs_err": 10.519027,
+      "exact_rate": 0.563636,
+      "within_tol_rate": 0.709091
+    },
+    "test_detection": {
+      "tp": 93,
+      "fp": 37,
+      "fn": 25,
+      "precision": 0.715385,
+      "recall": 0.788136,
+      "f1": 0.75
+    },
+    "test_values": {
+      "count": 93,
+      "mae": 113.375591,
+      "max_abs_err": 1071.07,
+      "exact_rate": 0.623656,
+      "within_tol_rate": 0.623656
+    }
+  },
+  "by_temperature": {
+    "77": {
+      "detection": {
+        "tp": 6,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "values": {
+        "count": 6,
+        "mae": 101.033333,
+        "max_abs_err": 375.0,
+        "exact_rate": 0.5,
+        "within_tol_rate": 0.5
+      }
+    },
+    "298": {
+      "detection": {
+        "tp": 43,
+        "fp": 5,
+        "fn": 1,
+        "precision": 0.895833,
+        "recall": 0.977273,
+        "f1": 0.934783
+      },
+      "values": {
+        "count": 43,
+        "mae": 87.62907,
+        "max_abs_err": 1071.07,
+        "exact_rate": 0.627907,
+        "within_tol_rate": 0.627907
+      }
+    },
+    "673": {
+      "detection": {
+        "tp": 2,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "values": {
+        "count": 2,
+        "mae": 0.0,
+        "max_abs_err": 0.0,
+        "exact_rate": 1.0,
+        "within_tol_rate": 1.0
+      }
+    },
+    "773": {
+      "detection": {
+        "tp": 5,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "values": {
+        "count": 5,
+        "mae": 0.0,
+        "max_abs_err": 0.0,
+        "exact_rate": 1.0,
+        "within_tol_rate": 1.0
+      }
+    },
+    "873": {
+      "detection": {
+        "tp": 21,
+        "fp": 0,
+        "fn": 5,
+        "precision": 1.0,
+        "recall": 0.807692,
+        "f1": 0.893617
+      },
+      "values": {
+        "count": 21,
+        "mae": 151.575238,
+        "max_abs_err": 779.07,
+        "exact_rate": 0.52381,
+        "within_tol_rate": 0.52381
+      }
+    },
+    "973": {
+      "detection": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 5,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      },
+      "values": {
+        "count": 0,
+        "mae": null,
+        "max_abs_err": null,
+        "exact_rate": null,
+        "within_tol_rate": null
+      }
+    },
+    "1073": {
+      "detection": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 6,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      },
+      "values": {
+        "count": 0,
+        "mae": null,
+        "max_abs_err": null,
+        "exact_rate": null,
+        "within_tol_rate": null
+      }
+    },
+    "1173": {
+      "detection": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 8,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      },
+      "values": {
+        "count": 0,
+        "mae": null,
+        "max_abs_err": null,
+        "exact_rate": null,
+        "within_tol_rate": null
+      }
+    },
+    "1273": {
+      "detection": {
+        "tp": 4,
+        "fp": 8,
+        "fn": 0,
+        "precision": 0.333333,
+        "recall": 1.0,
+        "f1": 0.5
+      },
+      "values": {
+        "count": 4,
+        "mae": 121.5,
+        "max_abs_err": 486.0,
+        "exact_rate": 0.75,
+        "within_tol_rate": 0.75
+      }
+    },
+    "1473": {
+      "detection": {
+        "tp": 6,
+        "fp": 6,
+        "fn": 0,
+        "precision": 0.5,
+        "recall": 1.0,
+        "f1": 0.666667
+      },
+      "values": {
+        "count": 6,
+        "mae": 136.766667,
+        "max_abs_err": 549.0,
+        "exact_rate": 0.5,
+        "within_tol_rate": 0.5
+      }
+    },
+    "1673": {
+      "detection": {
+        "tp": 2,
+        "fp": 10,
+        "fn": 0,
+        "precision": 0.166667,
+        "recall": 1.0,
+        "f1": 0.285714
+      },
+      "values": {
+        "count": 2,
+        "mae": 419.5,
+        "max_abs_err": 839.0,
+        "exact_rate": 0.5,
+        "within_tol_rate": 0.5
+      }
+    },
+    "1873": {
+      "detection": {
+        "tp": 4,
+        "fp": 8,
+        "fn": 0,
+        "precision": 0.333333,
+        "recall": 1.0,
+        "f1": 0.5
+      },
+      "values": {
+        "count": 4,
+        "mae": 210.25,
+        "max_abs_err": 841.0,
+        "exact_rate": 0.75,
+        "within_tol_rate": 0.75
+      }
+    }
+  },
+  "by_property": {
+    "elongation": {
+      "detection": {
+        "tp": 10,
+        "fp": 4,
+        "fn": 8,
+        "precision": 0.714286,
+        "recall": 0.555556,
+        "f1": 0.625
+      },
+      "values": {
+        "count": 10,
+        "mae": 2.44,
+        "max_abs_err": 12.2,
+        "exact_rate": 0.8,
+        "within_tol_rate": 0.8
+      }
+    },
+    "elongation_compressive": {
+      "detection": {
+        "tp": 8,
+        "fp": 12,
+        "fn": 0,
+        "precision": 0.4,
+        "recall": 1.0,
+        "f1": 0.571429
+      },
+      "values": {
+        "count": 8,
+        "mae": 0.075,
+        "max_abs_err": 0.6,
+        "exact_rate": 0.875,
+        "within_tol_rate": 0.875
+      }
+    },
+    "fracture_strain": {
+      "detection": {
+        "tp": 4,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "values": {
+        "count": 4,
+        "mae": 0.0,
+        "max_abs_err": 0.0,
+        "exact_rate": 1.0,
+        "within_tol_rate": 1.0
+      }
+    },
+    "total_elongation": {
+      "detection": {
+        "tp": 7,
+        "fp": 0,
+        "fn": 1,
+        "precision": 1.0,
+        "recall": 0.875,
+        "f1": 0.933333
+      },
+      "values": {
+        "count": 7,
+        "mae": 8.347143,
+        "max_abs_err": 28.28,
+        "exact_rate": 0.428571,
+        "within_tol_rate": 0.428571
+      }
+    },
+    "ultimate_strength_compressive": {
+      "detection": {
+        "tp": 8,
+        "fp": 12,
+        "fn": 0,
+        "precision": 0.4,
+        "recall": 1.0,
+        "f1": 0.571429
+      },
+      "values": {
+        "count": 8,
+        "mae": 33.875,
+        "max_abs_err": 271.0,
+        "exact_rate": 0.875,
+        "within_tol_rate": 0.875
+      }
+    },
+    "ultimate_tensile_strength": {
+      "detection": {
+        "tp": 14,
+        "fp": 0,
+        "fn": 6,
+        "precision": 1.0,
+        "recall": 0.7,
+        "f1": 0.823529
+      },
+      "values": {
+        "count": 14,
+        "mae": 369.871429,
+        "max_abs_err": 1071.07,
+        "exact_rate": 0.285714,
+        "within_tol_rate": 0.285714
+      }
+    },
+    "uniform_elongation": {
+      "detection": {
+        "tp": 8,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "values": {
+        "count": 8,
+        "mae": 6.91125,
+        "max_abs_err": 20.75,
+        "exact_rate": 0.375,
+        "within_tol_rate": 0.375
+      }
+    },
+    "yield_strength": {
+      "detection": {
+        "tp": 22,
+        "fp": 1,
+        "fn": 10,
+        "precision": 0.956522,
+        "recall": 0.6875,
+        "f1": 0.8
+      },
+      "values": {
+        "count": 22,
+        "mae": 101.864091,
+        "max_abs_err": 558.62,
+        "exact_rate": 0.636364,
+        "within_tol_rate": 0.636364
+      }
+    },
+    "yield_strength_compressive": {
+      "detection": {
+        "tp": 12,
+        "fp": 8,
+        "fn": 0,
+        "precision": 0.6,
+        "recall": 1.0,
+        "f1": 0.75
+      },
+      "values": {
+        "count": 12,
+        "mae": 226.25,
+        "max_abs_err": 841.0,
+        "exact_rate": 0.666667,
+        "within_tol_rate": 0.666667
+      }
+    }
+  },
+  "articles": [
+    {
+      "article_id": "1",
+      "status": "ok",
+      "groundtruth_file": "groundtruth/1-data.json",
+      "output_file": "output/1-2024-MSEA-Ti₄₂Hf₂₁Nb₂₁V₁₆-DED/1-2024-MSEA-Ti₄₂Hf₂₁Nb₂₁V₁₆-DED_extraction.json",
+      "material_match_count": 1,
+      "composition_detection": {
+        "tp": 4,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "composition_values": {
+        "count": 4,
+        "mae": 0.0,
+        "max_abs_err": 0.0,
+        "exact_rate": 1.0,
+        "within_tol_rate": 1.0
+      },
+      "test_detection": {
+        "tp": 8,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "test_values": {
+        "count": 8,
+        "mae": 0.0,
+        "max_abs_err": 0.0,
+        "exact_rate": 1.0,
+        "within_tol_rate": 1.0
+      },
+      "material_pairs": [
+        {
+          "gt_material": {
+            "mat_id": "M001",
+            "formula": "Ti42Hf21Nb21V16",
+            "alloy_name": "Ti42Hf21Nb21V16 (T42)"
+          },
+          "pred_material": {
+            "mat_id": "M001",
+            "formula": "Ti42Hf21Nb21V16",
+            "alloy_name": "Ti42Hf21Nb21V16 [As-Built]"
+          },
+          "pair_cost": 0.0,
+          "composition": {
+            "tp": 4,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": []
+          },
+          "tests": [
+            {
+              "property_type": "fracture_strain",
+              "unit": "%",
+              "gt_count": 4,
+              "pred_count": 4,
+              "tp": 4,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 22.5,
+                  "pred": 22.5,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 27.8,
+                  "pred": 27.8,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "673",
+                  "pred_temp_k": "673",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 16.8,
+                  "pred": 16.8,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "773",
+                  "pred_temp_k": "773",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 7.5,
+                  "pred": 7.5,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "yield_strength",
+              "unit": "mpa",
+              "gt_count": 4,
+              "pred_count": 4,
+              "tp": 4,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 1030.0,
+                  "pred": 1030.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 681.0,
+                  "pred": 681.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "673",
+                  "pred_temp_k": "673",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 661.0,
+                  "pred": 661.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "773",
+                  "pred_temp_k": "773",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 635.0,
+                  "pred": 635.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "article_id": "2",
+      "status": "ok",
+      "groundtruth_file": "groundtruth/2-data.json",
+      "output_file": "output/2-2025-Acta-Nb₁₅Ta₁₀W₇₅---添加NbC 纳米沉淀/2-2025-Acta-Nb₁₅Ta₁₀W₇₅---添加NbC 纳米沉淀_extraction.json",
+      "material_match_count": 2,
+      "composition_detection": {
+        "tp": 7,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "composition_values": {
+        "count": 7,
+        "mae": 0.158571,
+        "max_abs_err": 1.0,
+        "exact_rate": 0.428571,
+        "within_tol_rate": 0.857143
+      },
+      "test_detection": {
+        "tp": 28,
+        "fp": 33,
+        "fn": 0,
+        "precision": 0.459016,
+        "recall": 1.0,
+        "f1": 0.629213
+      },
+      "test_values": {
+        "count": 28,
+        "mae": 106.664286,
+        "max_abs_err": 841.0,
+        "exact_rate": 0.785714,
+        "within_tol_rate": 0.785714
+      },
+      "material_pairs": [
+        {
+          "gt_material": {
+            "mat_id": "M001",
+            "formula": "Nb15Ta10W75",
+            "alloy_name": "Nb15Ta10W75"
+          },
+          "pred_material": {
+            "mat_id": "M002",
+            "formula": "Nb15Ta10W75",
+            "alloy_name": "Nb15Ta10W75"
+          },
+          "pair_cost": 0.0,
+          "composition": {
+            "tp": 3,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": []
+          },
+          "tests": [
+            {
+              "property_type": "elongation_compressive",
+              "unit": "%",
+              "gt_count": 6,
+              "pred_count": 10,
+              "tp": 6,
+              "fp": 4,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [
+                {
+                  "temp_k": "1273",
+                  "value": 16.4
+                },
+                {
+                  "temp_k": "1673",
+                  "value": 14.4
+                },
+                {
+                  "temp_k": "1673",
+                  "value": 14.8
+                },
+                {
+                  "temp_k": "1873",
+                  "value": 15.3
+                }
+              ],
+              "value_pairs": [
+                {
+                  "gt": 2.6,
+                  "pred": 2.6,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 5.3,
+                  "pred": 5.3,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 15.9,
+                  "pred": 15.9,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "1273",
+                  "pred_temp_k": "1273",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 17.2,
+                  "pred": 17.2,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "1473",
+                  "pred_temp_k": "1473",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 14.4,
+                  "pred": 15.0,
+                  "abs_err": 0.6,
+                  "gt_temp_k": "1473",
+                  "pred_temp_k": "1473",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 14.6,
+                  "pred": 14.6,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "1873",
+                  "pred_temp_k": "1873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "ultimate_strength_compressive",
+              "unit": "mpa",
+              "gt_count": 6,
+              "pred_count": 10,
+              "tp": 6,
+              "fp": 4,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [
+                {
+                  "temp_k": "1273",
+                  "value": 1602.0
+                },
+                {
+                  "temp_k": "1673",
+                  "value": 1242.0
+                },
+                {
+                  "temp_k": "1673",
+                  "value": 1397.0
+                },
+                {
+                  "temp_k": "1873",
+                  "value": 957.0
+                }
+              ],
+              "value_pairs": [
+                {
+                  "gt": 939.0,
+                  "pred": 939.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1520.0,
+                  "pred": 1520.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1451.0,
+                  "pred": 1451.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "1273",
+                  "pred_temp_k": "1273",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1372.0,
+                  "pred": 1372.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "1473",
+                  "pred_temp_k": "1473",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1242.0,
+                  "pred": 1513.0,
+                  "abs_err": 271.0,
+                  "gt_temp_k": "1473",
+                  "pred_temp_k": "1473",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 744.0,
+                  "pred": 744.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "1873",
+                  "pred_temp_k": "1873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "yield_strength",
+              "unit": "mpa",
+              "gt_count": 0,
+              "pred_count": 1,
+              "tp": 0,
+              "fp": 1,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [
+                {
+                  "temp_k": "298",
+                  "value": 759.0
+                }
+              ],
+              "value_pairs": []
+            },
+            {
+              "property_type": "yield_strength_compressive",
+              "unit": "mpa",
+              "gt_count": 6,
+              "pred_count": 10,
+              "tp": 6,
+              "fp": 4,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [
+                {
+                  "temp_k": "1273",
+                  "value": 1105.0
+                },
+                {
+                  "temp_k": "1473",
+                  "value": 1042.0
+                },
+                {
+                  "temp_k": "1673",
+                  "value": 952.0
+                },
+                {
+                  "temp_k": "1873",
+                  "value": 750.0
+                }
+              ],
+              "value_pairs": [
+                {
+                  "gt": 759.0,
+                  "pred": 759.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1409.0,
+                  "pred": 1409.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1009.0,
+                  "pred": 1009.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "1273",
+                  "pred_temp_k": "1273",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 942.0,
+                  "pred": 942.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "1473",
+                  "pred_temp_k": "1473",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 841.0,
+                  "pred": 841.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "1673",
+                  "pred_temp_k": "1673",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 640.0,
+                  "pred": 640.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "1873",
+                  "pred_temp_k": "1873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "gt_material": {
+            "mat_id": "M002",
+            "formula": "Nb14.775Ta9.85W73.875C1.5",
+            "alloy_name": "(Nb15Ta10W75)98.5C1.5"
+          },
+          "pred_material": {
+            "mat_id": "M001",
+            "formula": "Nb14.745Ta9.825W73.93C0.5",
+            "alloy_name": "(Nb15Ta10W75)98.5C1.5"
+          },
+          "pair_cost": 1.11,
+          "composition": {
+            "tp": 4,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": [
+              {
+                "element": "C",
+                "gt": 1.5,
+                "pred": 0.5,
+                "abs_err": 1.0
+              },
+              {
+                "element": "Nb",
+                "gt": 14.775,
+                "pred": 14.745,
+                "abs_err": 0.03
+              },
+              {
+                "element": "Ta",
+                "gt": 9.85,
+                "pred": 9.825,
+                "abs_err": 0.025
+              },
+              {
+                "element": "W",
+                "gt": 73.875,
+                "pred": 73.93,
+                "abs_err": 0.055
+              }
+            ]
+          },
+          "tests": [
+            {
+              "property_type": "elongation_compressive",
+              "unit": "%",
+              "gt_count": 2,
+              "pred_count": 10,
+              "tp": 2,
+              "fp": 8,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [
+                {
+                  "temp_k": "1273",
+                  "value": 7.4
+                },
+                {
+                  "temp_k": "1273",
+                  "value": 8.3
+                },
+                {
+                  "temp_k": "1473",
+                  "value": 7.4
+                },
+                {
+                  "temp_k": "1473",
+                  "value": 8.3
+                },
+                {
+                  "temp_k": "1673",
+                  "value": 7.4
+                },
+                {
+                  "temp_k": "1673",
+                  "value": 8.3
+                },
+                {
+                  "temp_k": "1873",
+                  "value": 7.4
+                },
+                {
+                  "temp_k": "1873",
+                  "value": 8.3
+                }
+              ],
+              "value_pairs": [
+                {
+                  "gt": 7.4,
+                  "pred": 7.4,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 8.3,
+                  "pred": 8.3,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "ultimate_strength_compressive",
+              "unit": "mpa",
+              "gt_count": 2,
+              "pred_count": 10,
+              "tp": 2,
+              "fp": 8,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [
+                {
+                  "temp_k": "1273",
+                  "value": 1667.0
+                },
+                {
+                  "temp_k": "1273",
+                  "value": 1692.0
+                },
+                {
+                  "temp_k": "1473",
+                  "value": 1667.0
+                },
+                {
+                  "temp_k": "1473",
+                  "value": 1692.0
+                },
+                {
+                  "temp_k": "1673",
+                  "value": 1667.0
+                },
+                {
+                  "temp_k": "1673",
+                  "value": 1692.0
+                },
+                {
+                  "temp_k": "1873",
+                  "value": 1667.0
+                },
+                {
+                  "temp_k": "1873",
+                  "value": 1692.0
+                }
+              ],
+              "value_pairs": [
+                {
+                  "gt": 1667.0,
+                  "pred": 1667.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1692.0,
+                  "pred": 1692.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "yield_strength_compressive",
+              "unit": "mpa",
+              "gt_count": 6,
+              "pred_count": 10,
+              "tp": 6,
+              "fp": 4,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [
+                {
+                  "temp_k": "1273",
+                  "value": 1615.0
+                },
+                {
+                  "temp_k": "1473",
+                  "value": 1615.0
+                },
+                {
+                  "temp_k": "1673",
+                  "value": 1615.0
+                },
+                {
+                  "temp_k": "1873",
+                  "value": 1615.0
+                }
+              ],
+              "value_pairs": [
+                {
+                  "gt": 1591.0,
+                  "pred": 1591.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1615.0,
+                  "pred": 1615.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1105.0,
+                  "pred": 1591.0,
+                  "abs_err": 486.0,
+                  "gt_temp_k": "1273",
+                  "pred_temp_k": "1273",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1042.0,
+                  "pred": 1591.0,
+                  "abs_err": 549.0,
+                  "gt_temp_k": "1473",
+                  "pred_temp_k": "1473",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 752.0,
+                  "pred": 1591.0,
+                  "abs_err": 839.0,
+                  "gt_temp_k": "1673",
+                  "pred_temp_k": "1673",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 750.0,
+                  "pred": 1591.0,
+                  "abs_err": 841.0,
+                  "gt_temp_k": "1873",
+                  "pred_temp_k": "1873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "article_id": "3",
+      "status": "ok",
+      "groundtruth_file": "groundtruth/3-data.json",
+      "output_file": "output/3-2024-JMST- Co42Cr20Ni30Ti4Al4/3-2024-JMST- Co42Cr20Ni30Ti4Al4_extraction.json",
+      "material_match_count": 1,
+      "composition_detection": {
+        "tp": 5,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "composition_values": {
+        "count": 5,
+        "mae": 0.0,
+        "max_abs_err": 0.0,
+        "exact_rate": 1.0,
+        "within_tol_rate": 1.0
+      },
+      "test_detection": {
+        "tp": 18,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "test_values": {
+        "count": 18,
+        "mae": 67.355556,
+        "max_abs_err": 375.0,
+        "exact_rate": 0.666667,
+        "within_tol_rate": 0.666667
+      },
+      "material_pairs": [
+        {
+          "gt_material": {
+            "mat_id": "M001",
+            "formula": "Co42Cr20Ni30Ti4Al4",
+            "alloy_name": "Co42Cr20Ni30Ti4Al4"
+          },
+          "pred_material": {
+            "mat_id": "M001",
+            "formula": "Co42Cr20Ni30Ti4Al4",
+            "alloy_name": "Co42Cr20Ni30Ti4Al4 [As-Built]"
+          },
+          "pair_cost": 0.0,
+          "composition": {
+            "tp": 5,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": []
+          },
+          "tests": [
+            {
+              "property_type": "elongation",
+              "unit": "%",
+              "gt_count": 6,
+              "pred_count": 6,
+              "tp": 6,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 37.7,
+                  "pred": 49.9,
+                  "abs_err": 12.2,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 49.9,
+                  "pred": 37.7,
+                  "abs_err": 12.2,
+                  "gt_temp_k": "77",
+                  "pred_temp_k": "77",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 22.7,
+                  "pred": 22.7,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 22.6,
+                  "pred": 22.6,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "77",
+                  "pred_temp_k": "77",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 13.8,
+                  "pred": 13.8,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "773",
+                  "pred_temp_k": "773",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 9.1,
+                  "pred": 9.1,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "ultimate_tensile_strength",
+              "unit": "mpa",
+              "gt_count": 6,
+              "pred_count": 6,
+              "tp": 6,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 995.0,
+                  "pred": 1370.0,
+                  "abs_err": 375.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1370.0,
+                  "pred": 995.0,
+                  "abs_err": 375.0,
+                  "gt_temp_k": "77",
+                  "pred_temp_k": "77",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1586.0,
+                  "pred": 1586.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1944.0,
+                  "pred": 1944.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "77",
+                  "pred_temp_k": "77",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1263.0,
+                  "pred": 1263.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "773",
+                  "pred_temp_k": "773",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1147.0,
+                  "pred": 1147.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "yield_strength",
+              "unit": "mpa",
+              "gt_count": 6,
+              "pred_count": 6,
+              "tp": 6,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 734.0,
+                  "pred": 953.0,
+                  "abs_err": 219.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 953.0,
+                  "pred": 734.0,
+                  "abs_err": 219.0,
+                  "gt_temp_k": "77",
+                  "pred_temp_k": "77",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1180.0,
+                  "pred": 1180.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1341.0,
+                  "pred": 1341.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "77",
+                  "pred_temp_k": "77",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 977.0,
+                  "pred": 977.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "773",
+                  "pred_temp_k": "773",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 926.0,
+                  "pred": 926.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "article_id": "4",
+      "status": "ok",
+      "groundtruth_file": "groundtruth/4-data.json",
+      "output_file": "output/4-2025-IJP-Ni₆₁.₃Cr₂₅.₃W₄.₄Mo₁.₄Fe₁.₇Co₁.₄Al₁.₁Mn₀.₄Si₀.₇C₂.₅La₀.₀₁₃/4-2025-IJP-Ni₆₁.₃Cr₂₅.₃W₄.₄Mo₁.₄Fe₁.₇Co₁.₄Al₁.₁Mn₀.₄Si₀.₇C₂.₅La₀.₀₁₃_extraction.json",
+      "material_match_count": 1,
+      "composition_detection": {
+        "tp": 11,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "composition_values": {
+        "count": 11,
+        "mae": 2.143744,
+        "max_abs_err": 10.519027,
+        "exact_rate": 0.0,
+        "within_tol_rate": 0.0
+      },
+      "test_detection": {
+        "tp": 8,
+        "fp": 0,
+        "fn": 8,
+        "precision": 1.0,
+        "recall": 0.5,
+        "f1": 0.666667
+      },
+      "test_values": {
+        "count": 8,
+        "mae": 0.0,
+        "max_abs_err": 0.0,
+        "exact_rate": 1.0,
+        "within_tol_rate": 1.0
+      },
+      "material_pairs": [
+        {
+          "gt_material": {
+            "mat_id": "M002",
+            "formula": "Ni61.3Cr25.3W4.4Mo1.4Fe1.7Co1.4Al1.1Mn0.4Si0.7C2.5La0.013",
+            "alloy_name": "SD3230"
+          },
+          "pred_material": {
+            "mat_id": "M001",
+            "formula": "Ni21.49Cr13.13W2.22Mo1.57Fe1.30Co0.46Al0.34Mn0.30Si0.029La0.48C",
+            "alloy_name": "Ni-21.49Cr-13.13W-2.22Mo-1.57Fe-1.30Co-0.46Al-0.34Mn-0.30Si-0.029La-0.48C-Bal"
+          },
+          "pair_cost": 23.581182,
+          "composition": {
+            "tp": 11,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": [
+              {
+                "element": "Al",
+                "gt": 1.1,
+                "pred": 0.803422,
+                "abs_err": 0.296578
+              },
+              {
+                "element": "C",
+                "gt": 2.5,
+                "pred": 2.363005,
+                "abs_err": 0.136995
+              },
+              {
+                "element": "Co",
+                "gt": 1.4,
+                "pred": 1.086982,
+                "abs_err": 0.313018
+              },
+              {
+                "element": "Cr",
+                "gt": 25.3,
+                "pred": 31.026253,
+                "abs_err": 5.726253
+              },
+              {
+                "element": "Fe",
+                "gt": 1.7,
+                "pred": 3.071906,
+                "abs_err": 1.371906
+              },
+              {
+                "element": "La",
+                "gt": 0.013,
+                "pred": 1.134242,
+                "abs_err": 1.121242
+              },
+              {
+                "element": "Mn",
+                "gt": 0.4,
+                "pred": 0.708901,
+                "abs_err": 0.308901
+              },
+              {
+                "element": "Mo",
+                "gt": 1.4,
+                "pred": 3.709918,
+                "abs_err": 2.309918
+              },
+              {
+                "element": "Ni",
+                "gt": 61.3,
+                "pred": 50.780973,
+                "abs_err": 10.519027
+              },
+              {
+                "element": "Si",
+                "gt": 0.7,
+                "pred": 0.068527,
+                "abs_err": 0.631473
+              },
+              {
+                "element": "W",
+                "gt": 4.4,
+                "pred": 5.245871,
+                "abs_err": 0.845871
+              }
+            ]
+          },
+          "tests": [
+            {
+              "property_type": "elongation",
+              "unit": "%",
+              "gt_count": 8,
+              "pred_count": 4,
+              "tp": 4,
+              "fp": 0,
+              "fn": 4,
+              "unmatched_gt": [
+                {
+                  "temp_k": "1173",
+                  "value": 7.7
+                },
+                {
+                  "temp_k": "1173",
+                  "value": 15.5
+                },
+                {
+                  "temp_k": "1173",
+                  "value": 20.0
+                },
+                {
+                  "temp_k": "1173",
+                  "value": 47.5
+                }
+              ],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 8.2,
+                  "pred": 8.2,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 4.2,
+                  "pred": 4.2,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 12.6,
+                  "pred": 12.6,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 12.8,
+                  "pred": 12.8,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "yield_strength",
+              "unit": "mpa",
+              "gt_count": 8,
+              "pred_count": 4,
+              "tp": 4,
+              "fp": 0,
+              "fn": 4,
+              "unmatched_gt": [
+                {
+                  "temp_k": "1173",
+                  "value": 341.5
+                },
+                {
+                  "temp_k": "1173",
+                  "value": 364.3
+                },
+                {
+                  "temp_k": "1173",
+                  "value": 275.0
+                },
+                {
+                  "temp_k": "1173",
+                  "value": 273.0
+                }
+              ],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 1121.5,
+                  "pred": 1121.5,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1026.5,
+                  "pred": 1026.5,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 775.0,
+                  "pred": 775.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 773.0,
+                  "pred": 773.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "article_id": "5",
+      "status": "ok",
+      "groundtruth_file": "groundtruth/5-data.json",
+      "output_file": "output/5-2024-IJP-在 FeCoCrNiMox/5-2024-IJP-在 FeCoCrNiMox_extraction.json",
+      "material_match_count": 4,
+      "composition_detection": {
+        "tp": 19,
+        "fp": 0,
+        "fn": 1,
+        "precision": 1.0,
+        "recall": 0.95,
+        "f1": 0.974359
+      },
+      "composition_values": {
+        "count": 19,
+        "mae": 0.057895,
+        "max_abs_err": 0.275,
+        "exact_rate": 0.789474,
+        "within_tol_rate": 0.789474
+      },
+      "test_detection": {
+        "tp": 31,
+        "fp": 4,
+        "fn": 1,
+        "precision": 0.885714,
+        "recall": 0.96875,
+        "f1": 0.925373
+      },
+      "test_values": {
+        "count": 31,
+        "mae": 204.675161,
+        "max_abs_err": 1071.07,
+        "exact_rate": 0.258065,
+        "within_tol_rate": 0.258065
+      },
+      "material_pairs": [
+        {
+          "gt_material": {
+            "mat_id": "Mo0",
+            "formula": "Fe25Co25Cr25Ni25",
+            "alloy_name": "FeCoCrNi (Mo0)"
+          },
+          "pred_material": {
+            "mat_id": "M004",
+            "formula": "Fe25Co25Cr25Ni25",
+            "alloy_name": "FeCoCrNiMo0 [As-Built]"
+          },
+          "pair_cost": 100.0,
+          "composition": {
+            "tp": 4,
+            "fp": 0,
+            "fn": 1,
+            "missing_elements": [
+              "Mo"
+            ],
+            "extra_elements": [],
+            "value_errors": []
+          },
+          "tests": [
+            {
+              "property_type": "elongation",
+              "unit": "%",
+              "gt_count": 0,
+              "pred_count": 1,
+              "tp": 0,
+              "fp": 1,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [
+                {
+                  "temp_k": "298",
+                  "value": 19.0
+                }
+              ],
+              "value_pairs": []
+            },
+            {
+              "property_type": "total_elongation",
+              "unit": "%",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 19.82,
+                  "pred": 1.25,
+                  "abs_err": 18.57,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1.25,
+                  "pred": 1.25,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "ultimate_tensile_strength",
+              "unit": "mpa",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 719.0,
+                  "pred": 18.15,
+                  "abs_err": 700.85,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 420.0,
+                  "pred": 19.82,
+                  "abs_err": 400.18,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "uniform_elongation",
+              "unit": "%",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 18.15,
+                  "pred": 1.2,
+                  "abs_err": 16.95,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 1.2,
+                  "pred": 1.2,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "yield_strength",
+              "unit": "mpa",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 566.0,
+                  "pred": 566.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 398.0,
+                  "pred": 18.15,
+                  "abs_err": 379.85,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "gt_material": {
+            "mat_id": "Mo1",
+            "formula": "Fe24.39Co24.39Cr24.39Ni24.39Mo2.44",
+            "alloy_name": "FeCoCrNiMo0.1 (Mo1)"
+          },
+          "pred_material": {
+            "mat_id": "M003",
+            "formula": "Fe24.39Co24.39Cr24.39Ni24.39Mo2.44",
+            "alloy_name": "FeCoCrNiMo0.1 [As-Built]"
+          },
+          "pair_cost": 0.0,
+          "composition": {
+            "tp": 5,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": []
+          },
+          "tests": [
+            {
+              "property_type": "elongation",
+              "unit": "%",
+              "gt_count": 0,
+              "pred_count": 1,
+              "tp": 0,
+              "fp": 1,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [
+                {
+                  "temp_k": "298",
+                  "value": 27.0
+                }
+              ],
+              "value_pairs": []
+            },
+            {
+              "property_type": "total_elongation",
+              "unit": "%",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 36.51,
+                  "pred": 8.23,
+                  "abs_err": 28.28,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 8.23,
+                  "pred": 8.23,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "ultimate_tensile_strength",
+              "unit": "mpa",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 776.0,
+                  "pred": 27.46,
+                  "abs_err": 748.54,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 473.0,
+                  "pred": 36.51,
+                  "abs_err": 436.49,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "uniform_elongation",
+              "unit": "%",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 27.46,
+                  "pred": 6.71,
+                  "abs_err": 20.75,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 6.71,
+                  "pred": 6.71,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "yield_strength",
+              "unit": "mpa",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 609.0,
+                  "pred": 609.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 407.0,
+                  "pred": 27.46,
+                  "abs_err": 379.54,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "gt_material": {
+            "mat_id": "Mo3",
+            "formula": "Fe23.25Co23.25Cr23.25Ni23.25Mo6.98",
+            "alloy_name": "FeCoCrNiMo0.3 (Mo3)"
+          },
+          "pred_material": {
+            "mat_id": "M002",
+            "formula": "Fe22.98Co22.98Cr22.98Ni22.98Mo6.98",
+            "alloy_name": "FeCoCrNiMo0.3 [As-Built]"
+          },
+          "pair_cost": 1.1,
+          "composition": {
+            "tp": 5,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": [
+              {
+                "element": "Co",
+                "gt": 23.255,
+                "pred": 22.98,
+                "abs_err": 0.275
+              },
+              {
+                "element": "Cr",
+                "gt": 23.255,
+                "pred": 22.98,
+                "abs_err": 0.275
+              },
+              {
+                "element": "Fe",
+                "gt": 23.255,
+                "pred": 22.98,
+                "abs_err": 0.275
+              },
+              {
+                "element": "Ni",
+                "gt": 23.255,
+                "pred": 22.98,
+                "abs_err": 0.275
+              }
+            ]
+          },
+          "tests": [
+            {
+              "property_type": "elongation",
+              "unit": "%",
+              "gt_count": 0,
+              "pred_count": 1,
+              "tp": 0,
+              "fp": 1,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [
+                {
+                  "temp_k": "298",
+                  "value": 20.0
+                }
+              ],
+              "value_pairs": []
+            },
+            {
+              "property_type": "total_elongation",
+              "unit": "%",
+              "gt_count": 2,
+              "pred_count": 1,
+              "tp": 1,
+              "fp": 0,
+              "fn": 1,
+              "unmatched_gt": [
+                {
+                  "temp_k": "298",
+                  "value": 27.78
+                }
+              ],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 22.98,
+                  "pred": 20.0,
+                  "abs_err": 2.98,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "ultimate_tensile_strength",
+              "unit": "mpa",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 953.0,
+                  "pred": 800.0,
+                  "abs_err": 153.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 661.0,
+                  "pred": 800.0,
+                  "abs_err": 139.0,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "uniform_elongation",
+              "unit": "%",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 25.02,
+                  "pred": 20.0,
+                  "abs_err": 5.02,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 19.35,
+                  "pred": 15.0,
+                  "abs_err": 4.35,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "yield_strength",
+              "unit": "mpa",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 698.0,
+                  "pred": 580.0,
+                  "abs_err": 118.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 477.0,
+                  "pred": 580.0,
+                  "abs_err": 103.0,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "gt_material": {
+            "mat_id": "Mo5",
+            "formula": "Fe22.22Co22.22Cr22.22Ni22.22Mo11.11",
+            "alloy_name": "FeCoCrNiMo0.5 (Mo5)"
+          },
+          "pred_material": {
+            "mat_id": "M001",
+            "formula": "Fe22.22Co22.22Cr22.22Ni22.22Mo11.11",
+            "alloy_name": "FeCoCrNiMo0.5 [As-Built]"
+          },
+          "pair_cost": 0.0,
+          "composition": {
+            "tp": 5,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": []
+          },
+          "tests": [
+            {
+              "property_type": "elongation",
+              "unit": "%",
+              "gt_count": 0,
+              "pred_count": 1,
+              "tp": 0,
+              "fp": 1,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [
+                {
+                  "temp_k": "298",
+                  "value": 10.0
+                }
+              ],
+              "value_pairs": []
+            },
+            {
+              "property_type": "total_elongation",
+              "unit": "%",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 19.93,
+                  "pred": 11.33,
+                  "abs_err": 8.6,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 11.33,
+                  "pred": 11.33,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "ultimate_tensile_strength",
+              "unit": "mpa",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 1091.0,
+                  "pred": 19.93,
+                  "abs_err": 1071.07,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 799.0,
+                  "pred": 19.93,
+                  "abs_err": 779.07,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "uniform_elongation",
+              "unit": "%",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 19.38,
+                  "pred": 11.16,
+                  "abs_err": 8.22,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 11.16,
+                  "pred": 11.16,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            },
+            {
+              "property_type": "yield_strength",
+              "unit": "mpa",
+              "gt_count": 2,
+              "pred_count": 2,
+              "tp": 2,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 830.0,
+                  "pred": 566.0,
+                  "abs_err": 264.0,
+                  "gt_temp_k": "298",
+                  "pred_temp_k": "298",
+                  "temp_diff_k": 0.0
+                },
+                {
+                  "gt": 578.0,
+                  "pred": 19.38,
+                  "abs_err": 558.62,
+                  "gt_temp_k": "873",
+                  "pred_temp_k": "873",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "article_id": "6",
+      "status": "ok",
+      "groundtruth_file": "groundtruth/6-data.json",
+      "output_file": "output/6-2024-MSEA- FeCoCrNiMo0.5/6-2024-MSEA- FeCoCrNiMo0.5_extraction.json",
+      "material_match_count": 2,
+      "composition_detection": {
+        "tp": 9,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "composition_values": {
+        "count": 9,
+        "mae": 0.011111,
+        "max_abs_err": 0.02,
+        "exact_rate": 0.444444,
+        "within_tol_rate": 1.0
+      },
+      "test_detection": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 16,
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0
+      },
+      "test_values": {
+        "count": 0,
+        "mae": null,
+        "max_abs_err": null,
+        "exact_rate": null,
+        "within_tol_rate": null
+      },
+      "material_pairs": [
+        {
+          "gt_material": {
+            "mat_id": "Mo-0",
+            "formula": "Fe25Co25Cr25Ni25",
+            "alloy_name": "FeCoCrNi"
+          },
+          "pred_material": {
+            "mat_id": "M002",
+            "formula": "Fe25Co25Cr25Ni25",
+            "alloy_name": "FeCoCrNi [As-Built]"
+          },
+          "pair_cost": 0.0,
+          "composition": {
+            "tp": 4,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": []
+          },
+          "tests": [
+            {
+              "property_type": "elongation",
+              "unit": "%",
+              "gt_count": 1,
+              "pred_count": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 1,
+              "unmatched_gt": [
+                {
+                  "temp_k": "1073",
+                  "value": 5.9
+                }
+              ],
+              "unmatched_pred": [],
+              "value_pairs": []
+            },
+            {
+              "property_type": "ultimate_tensile_strength",
+              "unit": "mpa",
+              "gt_count": 3,
+              "pred_count": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 3,
+              "unmatched_gt": [
+                {
+                  "temp_k": "873",
+                  "value": 418.5
+                },
+                {
+                  "temp_k": "973",
+                  "value": 272.5
+                },
+                {
+                  "temp_k": "1073",
+                  "value": 130.6
+                }
+              ],
+              "unmatched_pred": [],
+              "value_pairs": []
+            },
+            {
+              "property_type": "yield_strength",
+              "unit": "mpa",
+              "gt_count": 3,
+              "pred_count": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 3,
+              "unmatched_gt": [
+                {
+                  "temp_k": "873",
+                  "value": 396.4
+                },
+                {
+                  "temp_k": "973",
+                  "value": 258.7
+                },
+                {
+                  "temp_k": "1073",
+                  "value": 125.5
+                }
+              ],
+              "unmatched_pred": [],
+              "value_pairs": []
+            }
+          ]
+        },
+        {
+          "gt_material": {
+            "mat_id": "Mo-5",
+            "formula": "Fe22.2Co22.2Cr22.2Ni22.2Mo11.1",
+            "alloy_name": "FeCoCrNiMo0.5"
+          },
+          "pred_material": {
+            "mat_id": "M001",
+            "formula": "Fe22.2Co22.2Cr22.2Ni22.2Mo11.1",
+            "alloy_name": "FeCoCrNiMo0.5 [As-Built]"
+          },
+          "pair_cost": 0.1,
+          "composition": {
+            "tp": 5,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": [
+              {
+                "element": "Co",
+                "gt": 22.22,
+                "pred": 22.2,
+                "abs_err": 0.02
+              },
+              {
+                "element": "Cr",
+                "gt": 22.22,
+                "pred": 22.2,
+                "abs_err": 0.02
+              },
+              {
+                "element": "Fe",
+                "gt": 22.22,
+                "pred": 22.2,
+                "abs_err": 0.02
+              },
+              {
+                "element": "Mo",
+                "gt": 11.12,
+                "pred": 11.1,
+                "abs_err": 0.02
+              },
+              {
+                "element": "Ni",
+                "gt": 22.22,
+                "pred": 22.2,
+                "abs_err": 0.02
+              }
+            ]
+          },
+          "tests": [
+            {
+              "property_type": "elongation",
+              "unit": "%",
+              "gt_count": 3,
+              "pred_count": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 3,
+              "unmatched_gt": [
+                {
+                  "temp_k": "873",
+                  "value": 11.2
+                },
+                {
+                  "temp_k": "973",
+                  "value": 6.3
+                },
+                {
+                  "temp_k": "1073",
+                  "value": 14.1
+                }
+              ],
+              "unmatched_pred": [],
+              "value_pairs": []
+            },
+            {
+              "property_type": "ultimate_tensile_strength",
+              "unit": "mpa",
+              "gt_count": 3,
+              "pred_count": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 3,
+              "unmatched_gt": [
+                {
+                  "temp_k": "873",
+                  "value": 795.5
+                },
+                {
+                  "temp_k": "973",
+                  "value": 550.8
+                },
+                {
+                  "temp_k": "1073",
+                  "value": 322.0
+                }
+              ],
+              "unmatched_pred": [],
+              "value_pairs": []
+            },
+            {
+              "property_type": "yield_strength",
+              "unit": "mpa",
+              "gt_count": 3,
+              "pred_count": 0,
+              "tp": 0,
+              "fp": 0,
+              "fn": 3,
+              "unmatched_gt": [
+                {
+                  "temp_k": "873",
+                  "value": 580.0
+                },
+                {
+                  "temp_k": "973",
+                  "value": 480.0
+                },
+                {
+                  "temp_k": "1073",
+                  "value": 192.0
+                }
+              ],
+              "unmatched_pred": [],
+              "value_pairs": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

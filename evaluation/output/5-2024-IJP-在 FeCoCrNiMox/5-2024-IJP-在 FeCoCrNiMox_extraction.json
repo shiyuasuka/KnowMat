@@ -1,0 +1,395 @@
+{
+  "Dataset_Description": "High Entropy Alloy Data Extraction Template",
+  "schema_version": "2.2",
+  "pipeline_version": "knowmat-2.1.0",
+  "Materials": [
+    {
+      "description": "--- Material 1: Fe22.22Co22.22Cr22.22Ni22.22Mo11.11 ---",
+      "Mat_ID": "M001",
+      "Alloy_Name_Raw": "FeCoCrNiMo0.5 [As-Built]",
+      "Formula_Normalized": "Fe22.22Co22.22Cr22.22Ni22.22Mo11.11",
+      "Composition_JSON": {
+        "Fe": 22.22,
+        "Co": 22.22,
+        "Cr": 22.22,
+        "Ni": 22.22,
+        "Mo": 11.11
+      },
+      "Source_DOI": "10.1016/j.ijplas.2024.104142",
+      "Source_File": "5-2024-IJP-在 FeCoCrNiMox.md",
+      "Processed_Samples": [
+        {
+          "Sample_ID": "S001_01_As-Built_Parallel-BD",
+          "Process_Category": "AM_LPBF",
+          "Process_Text_For_AI": "L-PBF additive manufacturing as-built",
+          "Key_Params_JSON": {
+            "Laser_Power_W": 200,
+            "Scan_Speed_mm_s": 750,
+            "Layer_Thickness_um": 40,
+            "Hatch_Spacing_um": 70,
+            "Preheat_Temperature_C": 120,
+            "Build_Orientation": "Parallel-BD"
+          },
+          "Main_Phase": "FCC",
+          "Microstructure_Text_For_AI": "Dendritic structure with dislocation cell patterns, rod-shaped σ-phase and blocky µ-phase precipitates",
+          "Has_Precipitates": true,
+          "Grain_Size_avg_um": 51.9,
+          "Performance_Tests": [
+            {
+              "Test_ID": "T001",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 566.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T002",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 19.93,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T003",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Elongation",
+              "Property_Value": 10.0,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T004",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Uniform_Elongation",
+              "Property_Value": 11.16,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T005",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Total_Elongation",
+              "Property_Value": 11.33,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T006",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 19.38,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T007",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 19.93,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T008",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Uniform_Elongation",
+              "Property_Value": 11.16,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T009",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Total_Elongation",
+              "Property_Value": 11.33,
+              "Property_Unit": "%"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "description": "--- Material 2: Fe22.98Co22.98Cr22.98Ni22.98Mo6.98 ---",
+      "Mat_ID": "M002",
+      "Alloy_Name_Raw": "FeCoCrNiMo0.3 [As-Built]",
+      "Formula_Normalized": "Fe22.98Co22.98Cr22.98Ni22.98Mo6.98",
+      "Composition_JSON": {
+        "Fe": 22.98,
+        "Co": 22.98,
+        "Cr": 22.98,
+        "Ni": 22.98,
+        "Mo": 6.98
+      },
+      "Source_DOI": "10.1016/j.ijplas.2024.104142",
+      "Source_File": "5-2024-IJP-在 FeCoCrNiMox.md",
+      "Processed_Samples": [
+        {
+          "Sample_ID": "S002_01_As-Built_Parallel-BD",
+          "Process_Category": "AM_LPBF",
+          "Process_Text_For_AI": "L-PBF additive manufacturing as-built",
+          "Key_Params_JSON": {
+            "Laser_Power_W": 200,
+            "Scan_Speed_mm_s": 750,
+            "Layer_Thickness_um": 40,
+            "Hatch_Spacing_um": 80,
+            "Preheat_Temperature_C": 120,
+            "Build_Orientation": "Parallel-BD"
+          },
+          "Main_Phase": "FCC",
+          "Microstructure_Text_For_AI": "Dendritic structure with sharp dislocation cell walls, rod-shaped σ-phase precipitates at grain boundaries",
+          "Has_Precipitates": true,
+          "Grain_Size_avg_um": 57.5,
+          "Performance_Tests": [
+            {
+              "Test_ID": "T001",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 580.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T002",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 800.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T003",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Elongation",
+              "Property_Value": 20.0,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T004",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Uniform_Elongation",
+              "Property_Value": 20.0,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T005",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 580.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T006",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 800.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T007",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Uniform_Elongation",
+              "Property_Value": 15.0,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T008",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Total_Elongation",
+              "Property_Value": 20.0,
+              "Property_Unit": "%"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "description": "--- Material 3: Fe24.39Co24.39Cr24.39Ni24.39Mo2.44 ---",
+      "Mat_ID": "M003",
+      "Alloy_Name_Raw": "FeCoCrNiMo0.1 [As-Built]",
+      "Formula_Normalized": "Fe24.39Co24.39Cr24.39Ni24.39Mo2.44",
+      "Composition_JSON": {
+        "Fe": 24.39,
+        "Co": 24.39,
+        "Cr": 24.39,
+        "Ni": 24.39,
+        "Mo": 2.44
+      },
+      "Source_DOI": "10.1016/j.ijplas.2024.104142",
+      "Source_File": "5-2024-IJP-在 FeCoCrNiMox.md",
+      "Processed_Samples": [
+        {
+          "Sample_ID": "S003_01_As-Built_Parallel-BD",
+          "Process_Category": "AM_LPBF",
+          "Process_Text_For_AI": "L-PBF additive manufacturing as-built",
+          "Key_Params_JSON": {
+            "Laser_Power_W": 200,
+            "Scan_Speed_mm_s": 750,
+            "Layer_Thickness_um": 40,
+            "Hatch_Spacing_um": 80,
+            "Preheat_Temperature_C": 120,
+            "Build_Orientation": "Parallel-BD"
+          },
+          "Main_Phase": "FCC",
+          "Microstructure_Text_For_AI": "Dendritic structure with sharper dendrites than Mo0, dislocation cell patterns",
+          "Has_Precipitates": false,
+          "Grain_Size_avg_um": 47.4,
+          "Performance_Tests": [
+            {
+              "Test_ID": "T001",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 609.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T002",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 27.46,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T003",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Elongation",
+              "Property_Value": 27.0,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T004",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Uniform_Elongation",
+              "Property_Value": 6.71,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T005",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Total_Elongation",
+              "Property_Value": 8.23,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T006",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 27.46,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T007",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 36.51,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T008",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Uniform_Elongation",
+              "Property_Value": 6.71,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T009",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Total_Elongation",
+              "Property_Value": 8.23,
+              "Property_Unit": "%"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "description": "--- Material 4: Fe25Co25Cr25Ni25 ---",
+      "Mat_ID": "M004",
+      "Alloy_Name_Raw": "FeCoCrNiMo0 [As-Built]",
+      "Formula_Normalized": "Fe25Co25Cr25Ni25",
+      "Composition_JSON": {
+        "Fe": 25.0,
+        "Co": 25.0,
+        "Cr": 25.0,
+        "Ni": 25.0
+      },
+      "Source_DOI": "10.1016/j.ijplas.2024.104142",
+      "Source_File": "5-2024-IJP-在 FeCoCrNiMox.md",
+      "Processed_Samples": [
+        {
+          "Sample_ID": "S004_01_As-Built_Parallel-BD",
+          "Process_Category": "AM_LPBF",
+          "Process_Text_For_AI": "L-PBF additive manufacturing as-built",
+          "Key_Params_JSON": {
+            "Laser_Power_W": 200,
+            "Scan_Speed_mm_s": 750,
+            "Layer_Thickness_um": 40,
+            "Hatch_Spacing_um": 80,
+            "Preheat_Temperature_C": 120,
+            "Build_Orientation": "Parallel-BD"
+          },
+          "Main_Phase": "FCC",
+          "Microstructure_Text_For_AI": "Dendritic structure with epitaxial columnar grains, dislocation cell patterns",
+          "Has_Precipitates": false,
+          "Grain_Size_avg_um": 35.1,
+          "Performance_Tests": [
+            {
+              "Test_ID": "T001",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 566.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T002",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 18.15,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T003",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Elongation",
+              "Property_Value": 19.0,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T004",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Uniform_Elongation",
+              "Property_Value": 1.2,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T005",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Total_Elongation",
+              "Property_Value": 1.25,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T006",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 18.15,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T007",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 19.82,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T008",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Uniform_Elongation",
+              "Property_Value": 1.2,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T009",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Total_Elongation",
+              "Property_Value": 1.25,
+              "Property_Unit": "%"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

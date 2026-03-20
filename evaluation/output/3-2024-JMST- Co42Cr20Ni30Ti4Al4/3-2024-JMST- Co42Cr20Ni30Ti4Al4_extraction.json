@@ -1,0 +1,190 @@
+{
+  "Dataset_Description": "High Entropy Alloy Data Extraction Template",
+  "schema_version": "2.2",
+  "pipeline_version": "knowmat-2.1.0",
+  "Materials": [
+    {
+      "description": "--- Material 1: Co42Cr20Ni30Ti4Al4 ---",
+      "Mat_ID": "M001",
+      "Alloy_Name_Raw": "Co42Cr20Ni30Ti4Al4 [As-Built]",
+      "Formula_Normalized": "Co42Cr20Ni30Ti4Al4",
+      "Composition_JSON": {
+        "Co": 42.0,
+        "Cr": 20.0,
+        "Ni": 30.0,
+        "Ti": 4.0,
+        "Al": 4.0
+      },
+      "Source_DOI": "10.1016/j.jmst.2024.02.077",
+      "Source_File": "3-2024-JMST- Co42Cr20Ni30Ti4Al4.md",
+      "Processed_Samples": [
+        {
+          "Sample_ID": "S001_01_As-Built_Not_specified",
+          "Process_Category": "AM_SLM",
+          "Process_Text_For_AI": "SLM with 200 W laser power, 1000 mm/s scan speed, 90 µm hatching space, 40 µm layer thickness, Ar atmosphere",
+          "Key_Params_JSON": {
+            "Laser_Power_W": 200,
+            "Scan_Speed_mm_s": 1000,
+            "Layer_Thickness_um": 40,
+            "Hatch_Spacing_um": 90,
+            "Shielding_Gas": "Argon",
+            "Build_Orientation": "Not specified"
+          },
+          "Main_Phase": "FCC",
+          "Microstructure_Text_For_AI": "Uniform sub-grain cellular structures, no precipitates, dislocation walls at cellular boundaries",
+          "Has_Precipitates": false,
+          "Grain_Size_avg_um": 0.63,
+          "Performance_Tests": [
+            {
+              "Test_ID": "T001",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 953.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T002",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 1370.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T003",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Elongation",
+              "Property_Value": 49.9,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T004",
+              "Test_Temperature_K": 77,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 734.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T005",
+              "Test_Temperature_K": 77,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 995.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T006",
+              "Test_Temperature_K": 77,
+              "Property_Type": "Elongation",
+              "Property_Value": 37.7,
+              "Property_Unit": "%"
+            }
+          ]
+        },
+        {
+          "Sample_ID": "S001_02_As-Annealed_Not_specified",
+          "Process_Category": "AM_SLM + HeatTreat",
+          "Process_Text_For_AI": "SLM followed by annealing at 973 K for 64 h with water quenching",
+          "Key_Params_JSON": {
+            "Laser_Power_W": 200,
+            "Scan_Speed_mm_s": 1000,
+            "Layer_Thickness_um": 40,
+            "Hatch_Spacing_um": 90,
+            "Shielding_Gas": "Argon",
+            "Annealing_Temperature_K": 973,
+            "Annealing_Time_h": 64,
+            "Build_Orientation": "Not specified"
+          },
+          "Main_Phase": "FCC + L12",
+          "Microstructure_Text_For_AI": "Coarsened cellular structures, discontinuous and continuous L12 precipitates, recrystallized grains",
+          "Has_Precipitates": true,
+          "Grain_Size_avg_um": 1.24,
+          "Performance_Tests": [
+            {
+              "Test_ID": "T001",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 1180.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T002",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 1586.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T003",
+              "Test_Temperature_K": 298,
+              "Property_Type": "Elongation",
+              "Property_Value": 22.7,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T004",
+              "Test_Temperature_K": 77,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 1341.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T005",
+              "Test_Temperature_K": 77,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 1944.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T006",
+              "Test_Temperature_K": 77,
+              "Property_Type": "Elongation",
+              "Property_Value": 22.6,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T007",
+              "Test_Temperature_K": 773,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 977.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T008",
+              "Test_Temperature_K": 773,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 1263.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T009",
+              "Test_Temperature_K": 773,
+              "Property_Type": "Elongation",
+              "Property_Value": 13.8,
+              "Property_Unit": "%"
+            },
+            {
+              "Test_ID": "T010",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Yield_Strength",
+              "Property_Value": 926.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T011",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Ultimate_Tensile_Strength",
+              "Property_Value": 1147.0,
+              "Property_Unit": "MPa"
+            },
+            {
+              "Test_ID": "T012",
+              "Test_Temperature_K": 873,
+              "Property_Type": "Elongation",
+              "Property_Value": 9.1,
+              "Property_Unit": "%"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

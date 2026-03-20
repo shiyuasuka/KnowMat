@@ -1,5 +1,95 @@
-Here is some information from a materials science literature:
+You are given OCR-parsed content from a materials-science paper.
+
+=== INPUT TEXT START ===
 {paper_text}
+=== INPUT TEXT END ===
 
-Extract data from it following the instructions.
+Follow the system instructions exactly, and execute this extraction protocol:
 
+1) Scope filtering (must do first)
+- Identify this paper's own target materials/samples from Experimental + Results/Discussion.
+- Treat literature-comparison statements as Reference context by default.
+- Do NOT extract performance numbers that belong to cited external alloys/papers.
+
+2) Sample decomposition
+- Split entries by chemistry variant (e.g., base vs doped; Mo0/Mo1/Mo3/Mo5).
+- Split entries by condition tuple when applicable:
+  processing state (AB/HT/annealed/aged) + orientation (H/V, parallel/perpendicular BD) + test mode (tensile/compressive).
+- Do not merge different condition tuples into one composition.
+- Treat parenthetical/suffixed variants as independent compositions
+  (e.g., (Nb15Ta10W75)98.5C1.5, base+C, alloy-A/WC).
+
+3) Property extraction (recall-first, then precision)
+- For every relevant table/data block, reconstruct a matrix:
+  sample rows x temperature rows x property columns.
+- Extract row-by-row and column-by-column; do not stop after first sample or first temperature.
+- If OCR table is broken, reconstruct using caption + headers + nearby narrative evidence.
+- If a mapping remains ambiguous, skip that value rather than guessing.
+- Lock each extracted value to its exact header intersection:
+  row sample label + temperature header + property header.
+- Never move values across neighboring columns to "fix" table noise.
+- Apply unit-lock:
+  MPa/GPa -> strength properties only;
+  % -> elongation/strain properties only.
+- If a table block has YS/UTS/El. columns but no explicit "tensile" word,
+  still treat it as tensile data and extract it.
+- If a table/caption contains a temperature list (RT/600C/700C/800C/900C etc.),
+  build the complete temperature set first, then extract every sample across all listed temperatures.
+- Keep row-lock: values must stay in the same sample row; do not borrow numbers from adjacent rows.
+- One cell one slot: one numeric table cell can only map to one property at one temperature for one sample.
+- If a row-temperature slot provides a property family, extract all available members:
+  tensile family (YS, UTS, El/UE/TE/fracture strain) or compressive family (CYS, UCS, compressive strain).
+
+4) Temperature and condition normalization
+- For each extracted property, measurement_condition should start with temperature in Kelvin when available:
+  at XXX K; ...
+- Convert C to K using K = C + 273.
+- RT/room temperature/ambient -> 298 K.
+- Assign a test temperature only if it is explicitly tied to a measured property in the same row/sentence context.
+- Do not use annealing/aging/solutionizing/sintering temperatures as test temperatures unless explicitly stated as test condition.
+
+5) Mechanical property naming constraints
+- Tensile: Yield_Strength, Ultimate_Tensile_Strength, Elongation, Uniform_Elongation, Total_Elongation, Fracture_Strain.
+- Compressive: Yield_Strength_Compressive, Ultimate_Strength_Compressive, Elongation_Compressive.
+- If compression mode, do NOT output tensile-style names.
+- Do NOT use Ultimate_Compressive_Strength.
+- Alias mapping:
+  UE/UEL/uniform strain -> Uniform_Elongation
+  TE/TEL/total strain -> Total_Elongation
+  tensile fracture strain or tensile epsilon_f -> Fracture_Strain
+- If explicitly "fracture strain" (tensile context), do not map it to Elongation.
+- Keep Yield_Strength from YS/sigma0.2/Rp0.2 columns only.
+- Keep Ultimate_Tensile_Strength from UTS/sigma_b columns only.
+- Never map UTS/UCS column values into yield fields.
+- If a candidate strength value looks like an elongation-like small % number while neighboring strength cells are MPa-level,
+  treat it as mismapped and do not assign it to strength.
+
+6) Anti-noise guardrails
+- Do not output metadata as properties (year, ref id, table index, citation id).
+- Do not output microstructure-only numeric descriptors as mechanical properties
+  (e.g., lattice constant, local lattice strain, misorientation angle, texture index).
+- Do not copy temperature values into strength/elongation slots.
+- Do not output Elastic_Modulus for this task unless explicitly required by schema.
+- For the same (composition + property_name + temperature + mode), keep only one record.
+- If table and narrative duplicate the same slot, prefer table value and remove duplicates.
+- If table and narrative conflict for the same slot, prefer table value aligned with row+header intersection.
+- Keep digit integrity: do not merge neighboring tokens into a new number.
+- Do not output temperatures that come only from process-condition text without measured property values.
+- If extracted rows exceed expected sample x temperature combinations, trim duplicates and keep one value per unique slot.
+
+7) Final silent quality gate (mandatory)
+- Coverage check: ensure expected sample/temperature/property combinations are not obviously missing.
+- Naming check: compressive tests must use *_Compressive names.
+- Provenance check: confirm extracted performance values belong to this paper's own tested samples.
+- Alignment check: verify no 77K/298K (or other temperature pair) value swapping.
+- Column check: verify no MPa strength field was filled from a % column.
+- Strength check: if both YS and UTS exist for one slot and YS > UTS, re-check mapping and keep only high-confidence values.
+- Rescue check: if any Target composition has zero mechanical properties but mechanical data exists in the paper, rerun extraction for that composition.
+- High-temperature check: if 973K/1073K/1173K (or Celsius equivalents) appear in source tables/text, they must not be omitted.
+- Variant check: every chemistry variant appearing in mechanical tables must have its own composition entry and attached test rows.
+- False-high-temp check: if 1373K/1573K points appear, verify they are true test temperatures, not heat-treatment temperatures.
+- Balance check across compositions: if one composition in the same table is well extracted but another is sparse, rerun extraction for the sparse one.
+- Pair-temperature check: for RT vs 77K (or similar paired statements), bind values to nearest temperature tokens and avoid swapping.
+- JSON check: output must be valid JSON only, with no extra commentary.
+
+Return only valid JSON.
