@@ -223,25 +223,19 @@ _PAREN_ALLOY_RE = re.compile(
 )
 
 # Keywords that indicate materials science / chemistry context
-_MATERIALS_CONTEXT_KEYWORDS = frozenset({
-    "alloy", "alloys", "steel", "steels", "metal", "metals", "ceramic",
-    "composite", "phase", "phases", "precipitate", "precipitates",
-    "microstructure", "grain", "grains", "matrix", "solid", "liquid",
-    "atom", "atoms", "mole", "moles", "atomic", "molar", "composition",
-    "element", "elements", "compound", "compounds", "solution", "solutions",
-    "BCC", "FCC", "HCP", "crystal", "crystalline", "amorphous",
-    "yield", "strength", "hardness", "ductility", "tensile", "compression",
-    "MPa", "GPa", "temperature", "thermal", "melting", "solidification",
-    "NbMoTaW", "HEA", "MPEA", "RHEA", "RMPEA", "high-entropy",
-    "refractory", "superalloy", "intermetallic",
-    # Added general materials science keywords
-    "conductivity", "bandgap", "anode", "cathode", "battery", "semiconductor", 
-    "polymer", "doping", "dielectric", "piezoelectric", "magnetic", "optical", 
-    "catalyst", "electrolyte",
-    # Element names for additional context
-    "titanium", "niobium", "tantalum", "tungsten", "molybdenum", "hafnium",
-    "vanadium", "chromium", "nickel", "cobalt", "iron", "aluminum", "zirconium",
-})
+_MATERIALS_CONTEXT_KEYWORDS = re.compile(
+    r"\b(?:alloy|alloys|steel|steels|metal|metals|ceramic|composite|phase|phases|"
+    r"precipitate|precipitates|microstructure|grain|grains|matrix|solid|liquid|"
+    r"atom|atoms|mole|moles|atomic|molar|composition|element|elements|compound|"
+    r"compounds|solution|solutions|BCC|FCC|HCP|crystal|crystalline|amorphous|"
+    r"yield|strength|hardness|ductility|tensile|compression|MPa|GPa|temperature|"
+    r"thermal|melting|solidification|NbMoTaW|HEA|MPEA|RHEA|RMPEA|high-entropy|"
+    r"refractory|superalloy|intermetallic|conductivity|bandgap|anode|cathode|"
+    r"battery|semiconductor|polymer|doping|dielectric|piezoelectric|magnetic|"
+    r"optical|catalyst|electrolyte|titanium|niobium|tantalum|tungsten|molybdenum|"
+    r"hafnium|vanadium|chromium|nickel|cobalt|iron|aluminum|zirconium)\b",
+    re.IGNORECASE
+)
 
 # Decimal normalisation: digit followed by Chinese comma / full-width period /
 # middle dot, followed by digit  →  replace separator with ASCII period.
@@ -641,12 +635,14 @@ def normalize_greek_symbols(text: str) -> str:
     """
     lines: List[str] = []
     for line in text.splitlines():
-        for char_wrong, char_correct, keywords in _GREEK_OCR_FIXES:
-            if char_wrong in line and _is_phase_context(line, keywords):
-                line = line.replace(char_wrong, char_correct)
-        for pat, repl, keywords in _GREEK_REGEX_FIXES:
-            if _is_phase_context(line, keywords):
-                line = pat.sub(repl, line)
+        # Quick check for general materials context to avoid over-matching in general text
+        if bool(_MATERIALS_CONTEXT_KEYWORDS.search(line)):
+            for char_wrong, char_correct, keywords in _GREEK_OCR_FIXES:
+                if char_wrong in line and _is_phase_context(line, keywords):
+                    line = line.replace(char_wrong, char_correct)
+            for pat, repl, keywords in _GREEK_REGEX_FIXES:
+                if _is_phase_context(line, keywords):
+                    line = pat.sub(repl, line)
         lines.append(line)
     return "\n".join(lines)
 
@@ -772,6 +768,7 @@ def normalize_alloy_strings(text: str) -> str:
 
     # Greek symbol normalisation (context-gated).
     text = normalize_greek_symbols(text)
+
     return text
 
 
