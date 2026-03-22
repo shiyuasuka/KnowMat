@@ -573,19 +573,31 @@ def _extract_pdf_with_paddleocrvl(
     finally:
         # Release OCR engine resources
         if engine is not None:
-            # Try explicit close/destroy methods if available
-            if hasattr(engine, 'close'):
-                try:
-                    engine.close()
-                    logger.debug("OCR engine closed via close() method")
-                except Exception as e:
-                    logger.debug("OCR engine close() failed (non-critical): %s", e)
-            elif hasattr(engine, 'destroy'):
-                try:
-                    engine.destroy()
-                    logger.debug("OCR engine destroyed via destroy() method")
-                except Exception as e:
-                    logger.debug("OCR engine destroy() failed (non-critical): %s", e)
+            # PaddleOCR-VL's close() can tear down the CUDA context such that the next PDF
+            # still hits Place(undefined:0) inside Paddle despite set_device("gpu:0"). Skip
+            # close by default; opt in with KNOWMAT_PADDLEOCR_VL_EXPLICIT_CLOSE=1 if you need
+            # aggressive native cleanup between PDFs.
+            skip_vl_close = backend == "paddleocrvl" and not _env_truthy(
+                "KNOWMAT_PADDLEOCR_VL_EXPLICIT_CLOSE"
+            )
+            if skip_vl_close:
+                logger.debug(
+                    "Skipping PaddleOCR-VL engine.close() between PDFs (set "
+                    "KNOWMAT_PADDLEOCR_VL_EXPLICIT_CLOSE=1 to force close)."
+                )
+            else:
+                if hasattr(engine, "close"):
+                    try:
+                        engine.close()
+                        logger.debug("OCR engine closed via close() method")
+                    except Exception as e:
+                        logger.debug("OCR engine close() failed (non-critical): %s", e)
+                elif hasattr(engine, "destroy"):
+                    try:
+                        engine.destroy()
+                        logger.debug("OCR engine destroyed via destroy() method")
+                    except Exception as e:
+                        logger.debug("OCR engine destroy() failed (non-critical): %s", e)
             del engine
             engine = None
         # Release PP-StructureV3 pipeline

@@ -657,9 +657,8 @@ def _is_chemical_context(line: str) -> bool:
     # Check for element-number pattern
     if re.search(r"(?:" + _ELEMENT_PAT + r")\d", line):
         return True
-    # Check for materials science keywords
-    line_lower = line.lower()
-    return any(kw in line_lower for kw in _MATERIALS_CONTEXT_KEYWORDS)
+    # ``_MATERIALS_CONTEXT_KEYWORDS`` is a compiled regex, not a list of strings.
+    return bool(_MATERIALS_CONTEXT_KEYWORDS.search(line))
 
 
 def _normalize_single_element_formula(match: re.Match) -> str:

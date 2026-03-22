@@ -93,6 +93,83 @@ def _prepare_ocr_home(model_dir: Path) -> None:
         os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 
+def _paddle_place_looks_undefined(place_repr: str) -> bool:
+    s = (place_repr or "").lower()
+    return "undefined" in s
+
+
+def _gpu_card_index(device: str) -> int:
+    """Parse ``gpu:1`` / ``cuda:0`` style strings; default 0."""
+    d = (device or "").strip().lower()
+    if ":" in d:
+        try:
+            return int(d.rsplit(":", 1)[-1])
+        except ValueError:
+            return 0
+    return 0
+
+
+def _paddle_device_synchronize() -> None:
+    """Prefer ``paddle.device.synchronize`` (Paddle >= 2.5); fall back to cuda API."""
+    try:
+        import paddle  # type: ignore
+
+        sync = getattr(paddle.device, "synchronize", None)
+        if callable(sync):
+            sync()
+        else:
+            paddle.device.cuda.synchronize()
+    except Exception:
+        pass
+
+
+def _warm_paddle_gpu_context(device: str) -> None:
+    """Force a valid CUDA default context.
+
+    After VL ``close()`` / ``empty_cache()``, ``paddle.get_device()`` may still
+    report ``gpu:0`` while native code passes ``Place(undefined:0)`` into
+    ``is_bfloat16_supported``. A tiny device tensor plus sync tends to realign
+    the executor place with CUDA.
+    """
+    try:
+        import paddle  # type: ignore
+    except ImportError:
+        return
+
+    try:
+        paddle.disable_static()
+    except Exception:
+        pass
+
+    idx = _gpu_card_index(device)
+    try:
+        place = paddle.CUDAPlace(idx)  # type: ignore[attr-defined]
+        try:
+            paddle.device.set_device(place)
+        except Exception:
+            paddle.device.set_device(device)
+    except Exception:
+        try:
+            paddle.device.set_device(device)
+        except Exception:
+            return
+
+    _paddle_device_synchronize()
+
+    try:
+        x = paddle.zeros([1], dtype="float32")
+        try:
+            _ = float(x.item())
+        except Exception:
+            _ = x.numpy()
+        del x
+    except Exception as exc:
+        logger.warning("_warm_paddle_gpu_context: device tensor probe failed: %s", exc)
+        return
+
+    _paddle_device_synchronize()
+
+
 def ensure_paddle_device_from_env() -> None:
     """Set Paddle's default device before VL init.
 
@@ -115,13 +192,52 @@ def ensure_paddle_device_from_env() -> None:
             has_cuda = False
         device = "gpu:0" if has_cuda else "cpu"
 
-    try:
-        paddle.device.set_device(device)
-    except Exception:
+    def _apply(dev: str) -> bool:
         try:
-            paddle.set_device(device)  # type: ignore[attr-defined]
-        except Exception as exc:
-            logger.debug("ensure_paddle_device_from_env: could not set %r: %s", device, exc)
+            paddle.device.set_device(dev)
+            return True
+        except Exception as e1:
+            try:
+                paddle.set_device(dev)  # type: ignore[attr-defined]
+                return True
+            except Exception as e2:
+                logger.warning(
+                    "ensure_paddle_device_from_env: could not set %r: %s; legacy set_device: %s",
+                    dev,
+                    e1,
+                    e2,
+                )
+                return False
+
+    if not _apply(device):
+        logger.warning(
+            "ensure_paddle_device_from_env: failed to pin device %r; "
+            "PaddleOCR-VL init may hit Place(undefined:0). Check KNOWMAT_OCR_DEVICE / CUDA.",
+            device,
+        )
+        return
+
+    # Verify default place after cleanup paths (close/empty_cache) left it valid.
+    try:
+        cur = str(paddle.get_device())
+    except Exception:
+        cur = ""
+    if _paddle_place_looks_undefined(cur):
+        logger.warning(
+            "Paddle default device is still %r after set_device(%r); retrying set_device once.",
+            cur,
+            device,
+        )
+        _apply(device)
+
+    # String device can look valid while C++ still uses Place(undefined:0) until a GPU op runs.
+    try:
+        has_cuda = bool(paddle.device.is_compiled_with_cuda())
+    except Exception:
+        has_cuda = False
+    dl = device.lower()
+    if has_cuda and (dl.startswith("gpu") or dl.startswith("cuda")):
+        _warm_paddle_gpu_context(device)
 
 
 def _legacy_paddleocr_allowed() -> bool:
@@ -264,6 +380,8 @@ def try_release_paddle_gpu_memory() -> None:
                 paddle.device.cuda.empty_cache()
             except Exception:
                 pass
+        # empty_cache / teardown can leave default Place(undefined:0); re-pin for next init/inference.
+        ensure_paddle_device_from_env()
     except Exception:
         pass
 
