@@ -1,6 +1,8 @@
-# KnowMat basic dependencies (consistent with pip section in environment.yml, CPU version of Paddle, cross-platform)
+# KnowMat basic dependencies (CPU version of Paddle, cross-platform)
 # To install using pip only: pip install -r requirements.txt
-# For GPU: see requirements-gpu.txt and docs/platforms.md
+# For GPU: install requirements.txt first, then requirements-gpu.txt
+#
+# Consistent with pyproject.toml and environment.yml (pip section)
 
 # Project itself (editable installation)
 -e .
@@ -35,8 +37,20 @@ python-dotenv==1.1.1
 colorlog==6.9.0
 PyYAML>=6.0
 
-# Vector & Embeddings (Optional: for attribute standardization, see setup.cfg extra 'standardization')
+# Core utilities (from pyproject.toml dependencies)
+tqdm>=4.66
+click>=8.0
+rich>=13.0
+pandas>=2.0
+pillow>=10.0
+pdfminer.six>=20221105
+markdownify>=0.13
 
-
-# Composition parsing
+# Composition parsing (optional, used in schema_converter.py)
 pymatgen
+
+# Vector & Embeddings (Optional: for attribute standardization)
+# Install with: pip install "KnowMat[standardization]"
+# torch>=2.8.0
+# torchvision>=0.23.0
+# sentence-transformers>=5.0.0

@@ -3,8 +3,6 @@
 *.py[cod]
 *.so
 *.cfg
-!.isort.cfg
-!setup.cfg
 *.orig
 *.log
 *.pot
@@ -59,3 +57,6 @@ MANIFEST
 .venv*/
 .conda*/
 .python-version
+
+# Test files (optional: remove if you want to keep tests in git)
+tests/

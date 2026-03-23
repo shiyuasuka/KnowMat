@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional
 
-HTML_TAG_RE = re.compile(r"</?[a-zA-Z][^>]*>")
 BLOCK_TAGS = [
     "p",
     "div",
@@ -78,8 +77,22 @@ def _html_table_to_markdown(html: str) -> str:
     return "\n".join(lines)
 
 
+def _replace_sub_sup_tags(soup: Any) -> None:
+    """Replace <sub> and <sup> tags with LaTeX-style notation in-place."""
+    for sub in soup.find_all("sub"):
+        inner = sub.get_text()
+        sub.replace_with(f"_{{{inner}}}")
+    for sup in soup.find_all("sup"):
+        inner = sup.get_text()
+        sup.replace_with(f"^{{{inner}}}")
+
+
 def convert_html_to_markdown(text: str) -> str:
-    """Convert residual HTML markup in OCR/txt output to clean markdown."""
+    """Convert residual HTML markup in OCR/txt output to clean markdown.
+
+    <sub> tags become _{content} and <sup> tags become ^{content} to preserve
+    mathematical subscripts and superscripts (e.g. chemical formulas).
+    """
     if not text:
         return ""
     if "<" not in text and ">" not in text:
@@ -97,6 +110,8 @@ def convert_html_to_markdown(text: str) -> str:
         if div.find("img") and not div.get_text(strip=True):
             div.decompose()
 
+    _replace_sub_sup_tags(soup)
+
     for br in soup.find_all("br"):
         br.replace_with("\n")
     for tag in soup.find_all(BLOCK_TAGS):
@@ -105,7 +120,11 @@ def convert_html_to_markdown(text: str) -> str:
             tag.insert_after("\n")
 
     converted = soup.get_text("\n")
-    converted = HTML_TAG_RE.sub("", converted)
+    # Re-join subscript/superscript notation split across lines by get_text.
+    # Pattern 1: "text\n_{N}" → "text_{N}"
+    converted = re.sub(r"\n([_^]\{)", r"\1", converted)
+    # Pattern 2: "_{N}\ntext" → "_{N}text" (element symbol follows subscript)
+    converted = re.sub(r"(\})\n([A-Z][a-z]?)", r"\1\2", converted)
     converted = re.sub(r"\n{3,}", "\n\n", converted)
     return converted.strip()
 

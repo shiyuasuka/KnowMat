@@ -1,0 +1,80 @@
+{
+  "Dataset_Description": "High Entropy Alloy Data Extraction Template",
+  "schema_version": "2.2",
+  "pipeline_version": "knowmat-2.1.0",
+  "Materials": [
+    {
+      "description": "--- Material 1: Fe22.22Co22.22Cr22.22Ni22.22Mo11.11 ---",
+      "Mat_ID": "M001",
+      "Alloy_Name_Raw": "FeCoCrNiMo0.5 (Mo-5)",
+      "Formula_Normalized": "Fe22.22Co22.22Cr22.22Ni22.22Mo11.11",
+      "Composition_JSON": {
+        "Fe": 22.22,
+        "Co": 22.22,
+        "Cr": 22.22,
+        "Ni": 22.22,
+        "Mo": 11.11
+      },
+      "Source_DOI": "10.1016/j.msea.2024.146413",
+      "Source_File": "6-2024-MSEA- FeCoCrNiMo0.5.md",
+      "Processed_Samples": [
+        {
+          "Sample_ID": "S001_01_Default",
+          "Process_Category": "AM_LPBF",
+          "Process_Text_For_AI": "LPBF with substrate preheating at 120°C, laser power 200 W, line spacing 80 μm, point spacing 60 μm, exposure time 80 μs, wavelength 1070 nm, layer thickness 40 μm, interlayer rotation angle 67°",
+          "Key_Params_JSON": {
+            "Preheat_Temperature_C": 120.0,
+            "Laser_Power_W": 200.0,
+            "Hatch_Spacing_um": 80.0,
+            "Layer_Thickness_um": 40.0
+          },
+          "Main_Phase": "FCC + σ",
+          "Microstructure_Text_For_AI": "Columnar grains on X-Z plane; net-like σ phase precipitates at dislocation network positions; FCC matrix retained; σ phase has tetragonal structure",
+          "Has_Precipitates": true,
+          "Grain_Size_avg_um": null,
+          "Performance_Tests": [
+            {
+              "Test_ID": "T001",
+              "Test_Temperature_K": 1073,
+              "Property_Type": "Elongation",
+              "Property_Value": 14.1,
+              "Property_Unit": "%"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "description": "--- Material 2: Fe25Co25Cr25Ni25 ---",
+      "Mat_ID": "M002",
+      "Alloy_Name_Raw": "FeCoCrNi (Mo-0)",
+      "Formula_Normalized": "Fe25Co25Cr25Ni25",
+      "Composition_JSON": {
+        "Fe": 25.0,
+        "Co": 25.0,
+        "Cr": 25.0,
+        "Ni": 25.0
+      },
+      "Source_DOI": "10.1016/j.msea.2024.146413",
+      "Source_File": "6-2024-MSEA- FeCoCrNiMo0.5.md",
+      "Processed_Samples": [
+        {
+          "Sample_ID": "S002_01_Default",
+          "Process_Category": "AM_LPBF",
+          "Process_Text_For_AI": "LPBF with substrate preheating at 120°C, laser power 200 W, line spacing 80 μm, point spacing 60 μm, exposure time 80 μs, wavelength 1070 nm, layer thickness 40 μm, interlayer rotation angle 67°",
+          "Key_Params_JSON": {
+            "Preheat_Temperature_C": 120.0,
+            "Laser_Power_W": 200.0,
+            "Hatch_Spacing_um": 80.0,
+            "Layer_Thickness_um": 40.0
+          },
+          "Main_Phase": "FCC",
+          "Microstructure_Text_For_AI": "Columnar grains on X-Z plane; no precipitate phase observed at dislocation network positions; FCC structure confirmed by SAED",
+          "Has_Precipitates": false,
+          "Grain_Size_avg_um": null,
+          "Performance_Tests": []
+        }
+      ]
+    }
+  ]
+}

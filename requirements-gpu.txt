@@ -1,6 +1,14 @@
-# GPU 可选依赖（仅 Windows/Linux + NVIDIA 显卡）
-# 在已有 KnowMat 环境内安装：pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
-# 安装后需 conda install nvidia::cudnn cuda-version=12。详见 docs/ocr-cudnn64_9-fix.md
+# KnowMat GPU dependencies (Windows/Linux with NVIDIA GPU only)
+# Installation order:
+#   1. pip install -r requirements.txt
+#   2. pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
+#   3. conda install nvidia::cudnn cuda-version=12
+#
+# For detailed instructions, see docs/ocr-cudnn64_9-fix.md and docs/platforms.md
 
+# GPU version of PaddlePaddle (replaces CPU version from requirements.txt)
 paddlepaddle-gpu==3.3.0
+
+# PaddleOCR and PDF parsing (same as requirements.txt)
 paddleocr[all]
+pymupdf==1.24.13

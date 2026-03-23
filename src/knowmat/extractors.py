@@ -23,13 +23,17 @@ hold onto stale language model instances and makes it straightforward to
 adjust the model name or temperature via environment variables.
 """
 
+import logging
 import os
+import time
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field, model_validator
 from langchain_openai import ChatOpenAI
 from trustcall import create_extractor
 
 from knowmat.app_config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _llm_connection_kwargs() -> Dict[str, str]:
@@ -95,6 +99,9 @@ class _LazyExtractor:
     authentication.  This wrapper delays construction until the first
     invocation and uses the latest settings from ``knowmat2.app_config``.
 
+    This wrapper also implements retry logic with exponential backoff for
+    transient API failures.
+
     Parameters
     ----------
     tools: list
@@ -108,6 +115,10 @@ class _LazyExtractor:
         The type of agent this extractor is for (determines which model to use).
     """
 
+    # Retry configuration
+    MAX_RETRIES = 3
+    RETRY_DELAY_BASE = 5  # seconds, will be multiplied by attempt number
+
     def __init__(self, tools: list, tool_choice: str, enable_inserts: bool = False, 
                  agent_type: str = "default") -> None:
         self.tools = tools
@@ -116,14 +127,59 @@ class _LazyExtractor:
         self.agent_type = agent_type
 
     def invoke(self, *args, **kwargs) -> Dict[str, Any]:
-        llm = get_llm(agent_type=self.agent_type)
-        extractor = create_extractor(
-            llm,
-            tools=self.tools,
-            tool_choice=self.tool_choice,
-            enable_inserts=self.enable_inserts,
-        )
-        return extractor.invoke(*args, **kwargs)
+        """Invoke the extractor with retry logic for transient failures.
+        
+        Returns
+        -------
+        Dict[str, Any]
+            The extractor response.
+            
+        Raises
+        ------
+        RuntimeError
+            If all retries fail or authentication error occurs.
+        """
+        last_error: Optional[Exception] = None
+        
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                llm = get_llm(agent_type=self.agent_type)
+                extractor = create_extractor(
+                    llm,
+                    tools=self.tools,
+                    tool_choice=self.tool_choice,
+                    enable_inserts=self.enable_inserts,
+                )
+                return extractor.invoke(*args, **kwargs)
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                
+                # Authentication errors should not be retried
+                if "401" in error_str or "invalid_model" in error_str.lower() or "authentication" in error_str.lower():
+                    logger.error("LLM API authentication failed for %s agent: %s", self.agent_type, e)
+                    raise RuntimeError(
+                        f"LLM API authentication failed for {self.agent_type} agent: {e}. "
+                        "Please check LLM_API_KEY and LLM_MODEL configuration in your .env file."
+                    ) from e
+                
+                # Rate limit or server errors - retry with backoff
+                if attempt < self.MAX_RETRIES - 1:
+                    delay = self.RETRY_DELAY_BASE * (attempt + 1)
+                    logger.warning(
+                        "LLM invocation failed for %s agent (attempt %d/%d): %s. Retrying in %ds...",
+                        self.agent_type, attempt + 1, self.MAX_RETRIES, e, delay
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(
+                        "LLM invocation failed for %s agent after %d attempts: %s",
+                        self.agent_type, self.MAX_RETRIES, e
+                    )
+        
+        raise RuntimeError(
+            f"LLM invocation failed for {self.agent_type} agent after {self.MAX_RETRIES} retries: {last_error}"
+        ) from last_error
 
 
 # -----------------------------------------------------------------------------

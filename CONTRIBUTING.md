@@ -92,10 +92,10 @@ that any documentation update is done in the same way was a code contribution.
 ```
 
 When working on documentation changes in your local machine, you can
-compile them using [tox] :
+compile them with Sphinx (install `docs/requirements.txt` first, same as Read the Docs):
 
 ```
-tox -e docs
+sphinx-build --color -b html -d docs/_build/doctrees docs docs/_build/html
 ```
 
 and use Python's built-in web server for a preview in your web browser
@@ -222,13 +222,12 @@ conda activate KnowMat
 5. Please check that your changes don't break any unit tests with:
 
    ```
-   tox
+   pytest
    ```
 
-   (after having installed [tox] with `pip install tox` or `pipx`).
+   (with dev dependencies, e.g. `pip install -e ".[dev]"`).
 
-   You can also use [tox] to run several other pre-configured tasks in the
-   repository. Try `tox -av` to see a list of the available checks.
+   Options such as coverage are configured under `[tool.pytest.ini_options]` in `pyproject.toml`.
 
 ### Submit your contribution
 
@@ -262,44 +261,18 @@ package:
    `.eggs`, as well as the `*.egg-info` folders in the `src` folder or
    potentially in the root of your project.
 
-2. Sometimes [tox] misses out when new dependencies are added, especially to
-   `setup.cfg` and `docs/requirements.txt`. If you find any problems with
-   missing dependencies when running a command with [tox], try to recreate the
-   `tox` environment using the `-r` flag. For example, instead of:
+2. When new dependencies are added, sync `pyproject.toml` / `docs/requirements.txt`
+   / `environment.yml` as needed, then reinstall in your environment
+   (e.g. `pip install -e ".[dev]"`).
+
+3. Use Python 3.11+ as declared in `pyproject.toml`. When in doubt:
 
    ```
-   tox -e docs
-   ```
-
-   Try running:
-
-   ```
-   tox -r -e docs
-   ```
-
-3. Make sure to have a reliable [tox] installation that uses the correct
-   Python version (e.g., 3.7+). When in doubt you can run:
-
-   ```
-   tox --version
-   # OR
-   which tox
-   ```
-
-   If you have trouble and are seeing weird errors upon running [tox], you can
-   also try to create a dedicated [virtual environment] with a [tox] binary
-   freshly installed. For example:
-
-   ```
-   virtualenv .venv
-   source .venv/bin/activate
-   .venv/bin/pip install tox
-   .venv/bin/tox -e all
+   python --version
    ```
 
 4. [Pytest can drop you] in an interactive session in the case an error occurs.
-   In order to do that you need to pass a `--pdb` option (for example by
-   running `tox -- -k <NAME OF THE FALLING TEST> --pdb`).
+   Pass `--pdb` (for example `pytest --pdb -k <NAME OF THE FALLING TEST>`).
    You can also setup breakpoints manually instead of using the `--pdb` option.
 
 ## Maintainer tasks
@@ -320,15 +293,14 @@ on [PyPI], the following steps can be used to release a new version for
 2. Tag the current commit on the main branch with a release tag, e.g., `v1.2.3`.
 3. Push the new tag to the upstream [repository],
    e.g., `git push upstream v1.2.3`
-4. Clean up the `dist` and `build` folders with `tox -e clean`
-   (or `rm -rf dist build`)
+4. Clean up the `dist` and `build` folders (`rm -rf dist build` or equivalent)
    to avoid confusion with old builds and Sphinx docs.
-5. Run `tox -e build` and check that the files in `dist` have
+5. Run `python -m build` (install the `build` package if needed) and check that the files in `dist` have
    the correct version (no `.dirty` or [git] hash) according to the [git] tag.
    Also check the sizes of the distributions, if they are too big (e.g., >
    500KB), unwanted clutter may have been accidentally included.
-6. Run `tox -e publish -- --repository pypi` and check that everything was
-   uploaded to [PyPI] correctly.
+6. Run `python -m twine upload dist/*` (or your index of choice) and verify
+   uploads on [PyPI] (or the target index) correctly.
 
 [^contrib1]: Even though, these resources focus on open source projects and
     communities, the general ideas behind collaborating with other developers
@@ -359,7 +331,6 @@ on [PyPI], the following steps can be used to release a new version for
 [python software foundation's code of conduct]: https://www.python.org/psf/conduct/
 [restructuredtext]: https://www.sphinx-doc.org/en/master/usage/restructuredtext/
 [sphinx]: https://www.sphinx-doc.org/en/master/
-[tox]: https://tox.readthedocs.io/en/stable/
 [virtual environment]: https://realpython.com/python-virtual-environments-a-primer/
 [virtualenv]: https://virtualenv.pypa.io/en/stable/
 
