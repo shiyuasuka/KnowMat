@@ -26,6 +26,32 @@ BLOCK_TAGS = [
     "h6",
 ]
 
+# 正则表达式检测 rowspan/colspan 属性
+_COMPLEX_CELL_ATTR_RE = re.compile(
+    r'<(?:td|th)\b[^>]*\b(rowspan|colspan)\s*=\s*["\']?\s*[2-9]\d*["\']?',
+    re.IGNORECASE,
+)
+
+
+def _has_complex_cell_attributes(html: str) -> bool:
+    """检测HTML表格是否包含复杂的单元格合并属性。
+
+    复杂表格指包含 rowspan 或 colspan >= 2 的单元格，
+    这些表格无法被准确转换为 Markdown 格式。
+
+    Parameters
+    ----------
+    html : str
+        HTML 表格字符串
+
+    Returns
+    -------
+    bool
+        True 表示表格包含合并单元格，需要保留HTML格式
+        False 表示简单表格，可以转换为Markdown
+    """
+    return bool(_COMPLEX_CELL_ATTR_RE.search(html))
+
 
 def _html_table_to_markdown(html: str) -> str:
     """Best-effort conversion of a single <table> to markdown table."""
@@ -92,6 +118,9 @@ def convert_html_to_markdown(text: str) -> str:
 
     <sub> tags become _{content} and <sup> tags become ^{content} to preserve
     mathematical subscripts and superscripts (e.g. chemical formulas).
+
+    For tables with complex structures (rowspan/colspan), HTML is preserved
+    because Markdown cannot accurately represent merged cells.
     """
     if not text:
         return ""
@@ -103,8 +132,14 @@ def convert_html_to_markdown(text: str) -> str:
     soup = BeautifulSoup(text, "html.parser")
 
     for table in soup.find_all("table"):
-        md_table = _html_table_to_markdown(str(table))
-        table.replace_with(f"\n{md_table}\n")
+        table_html = str(table)
+        if _has_complex_cell_attributes(table_html):
+            # 复杂表格保留HTML格式，Markdown无法准确表示合并单元格
+            table.replace_with(f"\n{table_html}\n")
+        else:
+            # 简单表格转换为Markdown
+            md_table = _html_table_to_markdown(table_html)
+            table.replace_with(f"\n{md_table}\n")
 
     for div in soup.find_all("div"):
         if div.find("img") and not div.get_text(strip=True):
@@ -181,4 +216,3 @@ def html_table_to_structured(html: str) -> Optional[Dict[str, Any]]:
         "columns": [{"name": name, "type": "string"} for name in headers],
         "rows": normalized_rows,
     }
-

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from .html_cleaner import convert_html_to_markdown, html_table_to_structured
+from .html_cleaner import _has_complex_cell_attributes, convert_html_to_markdown, html_table_to_structured
 
 
 def _get_block_attr(block: Any, name: str, default: Any = None) -> Any:
@@ -173,15 +173,32 @@ def find_captions_in_text(text: str) -> List[Tuple[str, str, str, int, int]]:
 
 
 def _make_table_item(content: str, confidence: Any) -> Dict[str, Any]:
-    """Create a table item with structured data and optional caption."""
-    structured = html_table_to_structured(content)
-    data: Dict[str, Any] = structured if structured else {
-        "text": convert_html_to_markdown(content),
-        "raw_html": content,
-    }
+    """Create a table item with structured data and optional caption.
+    
+    For complex tables (with rowspan/colspan), raw_html is preserved
+    because structured parsing loses cell merge information.
+    """
+    data: Dict[str, Any] = {}
+    
+    # 检测是否为复杂表格
+    is_complex = _has_complex_cell_attributes(content)
+    
+    if is_complex:
+        # 复杂表格：保留HTML，同时生成简化文本
+        data["text"] = convert_html_to_markdown(content)
+        data["raw_html"] = content
+        data["is_complex_table"] = True
+    else:
+        # 简单表格：尝试结构化解析
+        structured = html_table_to_structured(content)
+        if structured:
+            data = structured
+        else:
+            data["text"] = convert_html_to_markdown(content)
+            data["raw_html"] = content
     
     # Try to extract table caption from the raw HTML or text
-    if "raw_html" in data:
+    if content:
         # Check first line of text for caption pattern
         first_line = convert_html_to_markdown(content).split('\n')[0] if content else ""
         caption_info = extract_table_caption(first_line)

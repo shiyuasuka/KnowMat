@@ -42,4 +42,3 @@ __all__ = [
     "block_to_item",
     "text_to_paragraph_items",
 ]
-
