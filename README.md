@@ -198,9 +198,27 @@ export LLM_MODEL="ep_xxxxx"
 python -m knowmat --help
 ```
 
+### 依赖文件说明
+
+本项目包含以下依赖配置文件：
+
+| 文件 | 用途 | 使用场景 |
+|------|------|----------|
+| `environment.yml` | 完整的 Conda 开发环境 | **推荐**：本地开发 |
+| `requirements.txt` | 精确的 pip 依赖锁定 | 生产部署/CI |
+| `requirements-gpu.txt` | GPU 版本 Paddle | NVIDIA GPU 用户 |
+| `pyproject.toml` | 项目元数据 + 最小依赖 | 打包发布 |
+
+**快速选择**：
+- **本地开发**：使用 `environment.yml`（一键脚本自动处理）
+- **生产部署**：使用 `requirements.txt`
+- **GPU 服务器**：`requirements.txt` + `requirements-gpu.txt`
+
 ### 手动安装（可选）
 
 当你不使用一键脚本时，可按下面步骤手动安装：
+
+#### 方式 1：使用 Conda（推荐）
 
 1. 创建并激活 conda 环境
 
@@ -224,6 +242,31 @@ python scripts/download_paddleocrvl_models.py --model-dir models/paddleocrvl1_5
 python scripts/download_paddleocrvl_1.0_models.py --model-dir models/paddleocrvl1_0
 ```
 
+#### 方式 2：使用 pip（仅当不使用 Conda 时）
+
+1. 创建虚拟环境
+
+```bash
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+```
+
+2. 安装项目和基础依赖
+
+```bash
+pip install -e .
+pip install -r requirements.txt
+```
+
+3. 按需安装 GPU 依赖（Windows/Linux + NVIDIA）
+
+```bash
+pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
+conda install nvidia::cudnn cuda-version=12
+```
+
+4. 下载 OCR 模型（同上）
+
 > **提示**：如果不手动下载模型，**首次运行时会自动下载**。程序会在初始化 OCR 引擎时检查 `models/paddleocrvl1_5/` 目录，若不存在则自动从官方源下载模型文件。自动下载可能需要较长时间（取决于网络状况），建议首次使用前手动下载。
 > 
 > **PP-StructureV3 模型说明**:PP-StructureV3 不是一个单独的模型，而是一个**集成管道**,它由多个子模型组成 (表格识别、公式识别、布局检测等)。这些子模型会在首次调用 `PPStructureV3()` 时**自动下载**到 `models/paddleocrvl1_5/official_models` 目录，**无需手动下载**。
@@ -232,10 +275,32 @@ python scripts/download_paddleocrvl_1.0_models.py --model-dir models/paddleocrvl
 
 #### 本地开发与测试
 
+**方式 1：使用完整开发环境（推荐）**
+
 ```bash
-python -m pip install --upgrade pip
-pip install -e ".[dev]"
+# 使用 environment.yml 创建完整环境
+conda env create -f environment.yml
+conda activate KnowMat
+
+# 以可编辑模式安装项目
+pip install -e .
+
+# 运行测试
 pytest
+```
+
+**方式 2：最小化安装（仅当不使用 Conda 时）**
+
+```bash
+# 创建虚拟环境
+python -m venv venv
+source venv/bin/activate  # Windows: venv\Scripts\activate
+
+# 安装项目 + 开发工具
+pip install -e ".[dev]"
+
+# 安装额外依赖（OCR、LLM 等）
+pip install -r requirements.txt
 ```
 #### Prompt 模板维护
 
@@ -594,16 +659,14 @@ print(f"Flagged: {result['flag']}")
 ```text
 ├── README.md                 项目说明（当前文档）
 ├── AUTHORS.md / CHANGELOG.md / CONTRIBUTING.md / LICENSE.txt
-├── pyproject.toml            构建与依赖（推荐 pip install -e .）
-├── setup.cfg / setup.py      传统安装入口（setup.py 已弱化）
+├── pyproject.toml            构建、依赖、pytest/coverage/isort 等工具配置
 ├── requirements.txt          补充 pip 依赖
 ├── requirements-gpu.txt      GPU / Paddle 等可选依赖说明
 ├── environment.yml           Conda 环境
 ├── configs/                  预留配置目录（可为空）
 ├── Dockerfile                容器构建
-├── tox.ini / .coveragerc     测试与覆盖率
 ├── .env.example              环境变量模板（无真实密钥）
-├── .pre-commit-config.yaml / .isort.cfg
+├── .pre-commit-config.yaml   提交前检查（black / isort / flake8 等）
 ├── .readthedocs.yml          Read the Docs（若启用）
 └── .gitignore
 ```

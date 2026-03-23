@@ -19,8 +19,8 @@ RUN mamba env create -f environment.yml
 # RUN pip install -e . # not needed since it's in environment.yml
 SHELL ["mamba", "run", "-n", "KnowMat", "/bin/bash", "-c"]
 
-# Build package
-RUN tox -e build
+# Build package (PEP 517; no tox required in image)
+RUN pip install build && python -m build
 RUN mamba env export -n KnowMat -f environment.docker.yml
 
 
