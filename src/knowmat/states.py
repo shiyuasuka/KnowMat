@@ -45,6 +45,24 @@ from typing import TypedDict, List, Optional, Dict, Any
 # OCR / document metadata types
 # ---------------------------------------------------------------------------
 
+class OcrItem(TypedDict, total=False):
+    """Structure representing a single OCR-processed block.
+    
+    This type represents the output of the OCR pipeline for individual
+    content blocks (paragraphs, tables, formulas, images).
+    """
+    
+    typer: str  # Block type: "paragraph", "table", "formula", "image"
+    text: str  # Extracted text content (for paragraphs/formulas)
+    data: Dict[str, Any]  # Structured data (for tables/images)
+    page: int  # 1-based page number
+    bbox: List[float]  # Bounding box [x0, y0, x1, y1] in 72-DPI coordinates
+    confidence: float  # OCR confidence score (0.0 to 1.0)
+    block_label: str  # Layout label from PP-DocLayout (e.g., "text", "table", "formula")
+    is_layout_noise: bool  # True if block is header/footer/aside
+    reocr_source: str  # Source of re-OCR if applicable (e.g., "ppstructurev3_replace")
+
+
 class OcrPageMeta(TypedDict):
     """Per-page metadata produced by the OCR stage."""
 
@@ -142,6 +160,9 @@ class KnowMatState(TypedDict, total=False):
     # Initial inputs
     pdf_path: str
     output_dir: Optional[str]
+    # OCR options (optional; used by parse_pdf_with_paddleocrvl)
+    ocr_pages: Optional[str]
+    ocr_skip_cached: bool
     
     # PDF parsing results
     paper_text: str

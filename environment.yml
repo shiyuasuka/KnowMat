@@ -1,6 +1,8 @@
-# KnowMat conda 环境：整合所有依赖（含 OCR、LLM、开发）
-# 创建: conda env create -f environment.yml
-# 更新: conda env update -f environment.yml --prune
+# KnowMat conda environment: all dependencies (OCR, LLM, development tools)
+# Create: conda env create -f environment.yml
+# Update: conda env update -f environment.yml --prune
+#
+# Consistent with pyproject.toml and requirements.txt
 name: KnowMat
 channels:
   - defaults
@@ -10,7 +12,7 @@ dependencies:
   - python==3.11
   - pip
 
-  # 基础科学计算与数据
+  # Core science & data (from pyproject.toml)
   - numpy==2.2.6
   - scipy==1.16.0
   - pandas==2.3.2
@@ -18,16 +20,15 @@ dependencies:
   - click
   - ipython
 
-  # 可视化
+  # Visualization
   - matplotlib
   - ipympl
   - seaborn
 
-  # 开发与文档
+  # Development & documentation
   - jupyterlab
   - pytest
   - pytest-cov
-  - tox
   - pre-commit
   - nbdime
   - nbstripout
@@ -35,9 +36,10 @@ dependencies:
   - recommonmark
 
   - pip:
+      # Project itself (editable installation)
       - -e .
 
-      # LangChain & 编排
+      # LangChain & Orchestration
       - langchain==0.3.26
       - langchain-community==0.3.27
       - langchain-openai==0.3.27
@@ -47,12 +49,13 @@ dependencies:
       # OpenAI / API
       - openai==1.93.2
 
-      # PaddleOCR-VL（PDF 解析）：此处为 CPU 版，跨平台通用。需 GPU 时由脚本或 requirements-gpu.txt 单独安装。
+      # PaddleOCR-VL (PDF parsing, CPU version; cross-platform)
+      # For GPU: run setup_env scripts or install requirements-gpu.txt
       - paddlepaddle>=3.0.0
       - paddleocr[all]
       - pymupdf==1.24.13
 
-      # OCR 相关传递依赖（与 knowmat 可运行环境一致）
+      # OCR related transitive dependencies
       - beautifulsoup4>=4.12
       - lxml>=6.0
       - cssselect>=1.4
@@ -60,20 +63,30 @@ dependencies:
       - openpyxl>=3.1
       - premailer>=3.10
 
-      # 校验与配置
+      # Validation and Configuration
       - pydantic==2.11.7
       - pydantic-settings>=2.0.0
       - python-dotenv==1.1.1
       - colorlog==6.9.0
       - PyYAML>=6.0
 
-      # 向量与嵌入
+      # Core utilities (from pyproject.toml dependencies)
+      - rich>=13.0
+      - pillow>=10.0
+      - pdfminer.six>=20221105
+      - markdownify>=0.13
+
+      # Composition parsing
+      - pymatgen
+
+      # Vector & Embeddings (for attribute standardization)
       - sentence-transformers==5.0.0
       - torch==2.8.0
       - torchvision==0.23.0
 
-# GPU 与 KnowMat 已分开：本 yml 仅含 CPU 版 Paddle，Mac/Linux/Windows 均可直接 conda env create。
-# 需要 GPU（Windows/Linux + NVIDIA）时，二选一：
-#   1) 一键脚本（推荐）：Windows 运行 .\scripts\setup_env.ps1；Linux/Mac 运行 ./scripts/setup_env.sh（Mac 自动用 CPU）
-#   2) 手动：pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
-#      然后 conda install nvidia::cudnn cuda-version=12。详见 docs/ocr-cudnn64_9-fix.md、docs/platforms.md
+# GPU support is separate: this yml contains CPU version of Paddle (cross-platform).
+# For GPU (Windows/Linux with NVIDIA):
+#   1) Recommended: run setup scripts (.\scripts\setup_env.ps1 or ./scripts/setup_env.sh)
+#   2) Manual: pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
+#      then: conda install nvidia::cudnn cuda-version=12
+# See docs/ocr-cudnn64_9-fix.md and docs/platforms.md for details.

@@ -4,7 +4,6 @@ import os
 from typing import Optional, Tuple
 
 import openai
-import pandas as pd
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -211,59 +210,6 @@ Return JSON format:
             self.match_stats["no_match"] += 1
             logger.warning(f"No match found for '{property_name}'")
             return None, None, None
-
-    def process_extracted_data(self):
-        """
-        Reads the extracted data CSV, matches properties using GPT,
-        updates the DataFrame with new columns, and saves back to the same file.
-        
-        New columns added:
-        - domain: Materials science domain (e.g., "thermal and thermodynamic properties")
-        - category: Property category (e.g., "values of thermal conductivity")
-        - standard_property_name: Standardized property name
-        """
-        if not os.path.exists(self.extracted_data_file):
-            raise FileNotFoundError(f"File not found: {self.extracted_data_file}")
-
-        # Load extracted data
-        extracted_df = pd.read_csv(self.extracted_data_file)
-
-        # Check for property_name column (new format)
-        if "property_name" in extracted_df.columns:
-            property_col = "property_name"
-            symbol_col = "property_symbol" if "property_symbol" in extracted_df.columns else None
-        elif "property name" in extracted_df.columns:
-            property_col = "property name"
-            symbol_col = None
-        else:
-            raise ValueError("No 'property_name' or 'property name' column found in extracted data")
-
-        # Apply GPT matching
-        def match_row(row):
-            property_name = row[property_col]
-            property_symbol = row[symbol_col] if symbol_col else None
-            
-            domain, category, std_property = (
-                self.find_closest_property(property_name, property_symbol)
-            )
-            
-            return pd.Series({
-                "domain": domain,
-                "category": category,
-                "standard_property_name": std_property,
-            })
-
-        # Apply matching and add new columns
-        extracted_df[
-            ["domain", "category", "standard_property_name"]
-        ] = extracted_df.apply(match_row, axis=1)
-
-        # Save the updated DataFrame
-        extracted_df.to_csv(self.extracted_data_file, index=False)
-        
-        # Print statistics
-        self._print_match_stats()
-        logger.info(f"Updated extracted data saved to {self.extracted_data_file}")
 
     def update_extracted_json(self, extracted_result):
         """

@@ -4,6 +4,9 @@
 !.gitignore
 !raw
 !raw/*
+# Large PDFs under raw/ (do not commit; keep .md/.json etc.)
+raw/*.pdf
+raw/**/*.pdf
 !external
 !processed
 !processed/*

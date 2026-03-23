@@ -9,6 +9,7 @@ generation in :mod:`knowmat.report_writer`.
 
 import json
 import os
+import re
 import uuid
 from typing import Optional
 
@@ -28,6 +29,53 @@ from knowmat.nodes.standardize import standardize_properties
 from knowmat.nodes.schema_convert import convert_to_target_schema
 from knowmat.app_config import Settings, settings
 from knowmat.config import _env_path
+
+
+def sanitize_filename(name: str, max_length: int = 200) -> str:
+    """Sanitize a filename to prevent path traversal and filesystem issues.
+    
+    Removes potentially dangerous characters and limits length to prevent
+    issues with very long filenames.
+    
+    Parameters
+    ----------
+    name : str
+        The original filename to sanitize.
+    max_length : int
+        Maximum allowed length for the filename. Default 200 characters.
+        
+    Returns
+    -------
+    str
+        A sanitized filename safe for filesystem use.
+    """
+    if not name:
+        return "unnamed"
+    
+    # Remove path separators and potentially dangerous characters
+    # Keep alphanumeric, underscores, hyphens, dots, and common Unicode
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name)
+    
+    # Remove leading/trailing dots and spaces (issues on Windows)
+    safe = safe.strip('. ')
+    
+    # Collapse multiple underscores/spaces
+    safe = re.sub(r'[_\s]+', '_', safe)
+    
+    # Ensure we have something left
+    if not safe:
+        safe = "unnamed"
+    
+    # Limit length
+    if len(safe) > max_length:
+        # Try to cut at a reasonable point (underscore or space)
+        cut_point = safe[:max_length].rfind('_')
+        if cut_point > max_length // 2:
+            safe = safe[:cut_point]
+        else:
+            safe = safe[:max_length]
+    
+    return safe
 
 
 def evaluation_condition(state: KnowMatState) -> str:
@@ -166,15 +214,20 @@ def run(
     if not flagging_model and not overrides.get("flagging_model"):
         effective_settings.flagging_model = effective_settings.model_name
 
-    print(f"\nModel Configuration:")
+    print("\nModel Configuration:")
     print(f"   Subfield Detection: {effective_settings.subfield_model}")
     print(f"   Extraction:         {effective_settings.extraction_model}")
     print(f"   Evaluation:         {effective_settings.evaluation_model}")
-    print(f"   Aggregation:        rule-based (no LLM)")
+    print("   Aggregation:        rule-based (no LLM)")
     print(f"   Validation:         {effective_settings.manager_model}")
     print(f"   Flagging:           {effective_settings.flagging_model}")
 
-    base_name = os.path.splitext(os.path.basename(pdf_path))[0]
+    # Sanitize the base name to prevent path traversal issues
+    raw_base_name = os.path.splitext(os.path.basename(pdf_path))[0]
+    base_name = sanitize_filename(raw_base_name)
+    if base_name != raw_base_name:
+        print(f"   Note: Filename sanitized: '{raw_base_name}' -> '{base_name}'")
+    
     paper_output_dir = os.path.join(effective_settings.output_dir, base_name)
     os.makedirs(paper_output_dir, exist_ok=True)
 
@@ -194,7 +247,8 @@ def run(
 
     graph = build_graph(full_pipeline=full_pipeline)
     for _ in graph.stream(state, thread_config, stream_mode="values"):
-        pass
+        # Stream execution - each step updates state automatically
+        continue
 
     final_state = graph.get_state(thread_config).values
     final_data = final_state.get("final_data", {})
