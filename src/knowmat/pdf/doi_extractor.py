@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,28 @@ def extract_first_doi(text: str) -> Optional[str]:
     if m:
         return m.group(1).rstrip(".")
     return None
+
+
+def extract_first_doi_from_ocr_items(items: Optional[List[Dict[str, Any]]]) -> Optional[str]:
+    """Scan paragraph texts in OCR block list (same structure as stem ``.json``).
+
+    ``_to_markdown`` / merged page text can omit lines that still exist on
+    ``parsing_res_list`` blocks; this recovers DOIs and similar identifiers.
+    """
+    if not items:
+        return None
+    parts: List[str] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        if it.get("typer") != "paragraph":
+            continue
+        text = (it.get("text") or "").strip()
+        if text:
+            parts.append(text)
+    if not parts:
+        return None
+    return extract_first_doi("\n".join(parts))
 
 
 def extract_doi_from_pdf_metadata(pdf_path: str) -> Optional[str]:

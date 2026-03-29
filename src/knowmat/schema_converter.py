@@ -131,7 +131,8 @@ class SchemaConverter:
         for mat_idx, (base_formula, comps) in enumerate(sorted(groups.items()), start=1):
             first_comp = comps[0]
             comp_raw_first = first_comp.get("composition", "") or ""
-            material_doi = first_comp.get("source_doi") or global_doi
+            # Prefer metadata / regex DOI over LLM-filled source_doi to reduce fabrication.
+            material_doi = (global_doi or "").strip() or (first_comp.get("source_doi") or "").strip() or ""
 
             samples: List[Dict[str, Any]] = []
             for s_idx, comp in enumerate(comps, start=1):

@@ -17,7 +17,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from knowmat.pdf.blocks import block_to_item, sanitize_ocr_items_vl_artifacts, text_to_paragraph_items
 from knowmat.pdf.block_filter import filter_figure_internal_fragments
-from knowmat.pdf.doi_extractor import extract_doi_from_pdf_metadata, extract_first_doi
+from knowmat.pdf.doi_extractor import (
+    extract_doi_from_pdf_metadata,
+    extract_first_doi,
+    extract_first_doi_from_ocr_items,
+)
 from knowmat.pdf.html_cleaner import convert_html_to_markdown
 from knowmat.pdf.ocr_cache import (
     cache_signature_key,
@@ -86,6 +90,52 @@ _FOOTER_Y_FRAC = 0.92
 def _env_truthy(name: str) -> bool:
     v = os.getenv(name, "").strip().lower()
     return v in ("1", "true", "yes", "on")
+
+
+def _append_missing_ocr_paragraphs_enabled() -> bool:
+    """Default on: append OCR paragraph lines missing from merged body (set to 0/false to disable)."""
+    v = os.getenv("KNOWMAT_APPEND_MISSING_OCR_PARAGRAPHS", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _append_missing_paragraph_hints(
+    body: str,
+    items: Optional[List[Dict[str, Any]]],
+    *,
+    max_chars: int = 4000,
+    max_line_len: int = 500,
+) -> str:
+    """Append short paragraph texts from OCR items that are absent from *body* (substring check).
+
+    Covers masthead/DOI lines dropped by markdown export without duplicating tables/formulas.
+    """
+    if not items or not body:
+        return body
+    extras: List[str] = []
+    total = 0
+    seen: set[str] = set()
+    for it in items:
+        if not isinstance(it, dict) or it.get("typer") != "paragraph":
+            continue
+        t = (it.get("text") or "").strip()
+        if len(t) < 6 or len(t) > max_line_len:
+            continue
+        if t in seen:
+            continue
+        if t in body:
+            continue
+        seen.add(t)
+        extras.append(t)
+        total += len(t) + 2
+        if total >= max_chars:
+            break
+    if not extras:
+        return body
+    block = (
+        "\n\n=== SUPPLEMENTARY OCR LINES (paragraph blocks missing from main text) ===\n\n"
+        + "\n\n".join(extras)
+    )
+    return body + block
 
 
 def _env_int(name: str, default: int) -> int:
@@ -642,9 +692,13 @@ def _finalize_pdf_parse(
         if settings.trim_references_section
         else structured_text
     )
-    doi_from_ocr = metadata.get("doi")
-    if doi_from_ocr and doi_from_ocr not in cleaned_text:
-        cleaned_text = f"DOI: {doi_from_ocr}\n\n{cleaned_text}"
+    # Prefer DOI from full OCR block list: merged markdown can omit lines still on parsing_res_list.
+    resolved_doi = extract_first_doi_from_ocr_items(_ocr_items) or metadata.get("doi")
+    if resolved_doi and resolved_doi not in cleaned_text:
+        cleaned_text = f"DOI: {resolved_doi}\n\n{cleaned_text}"
+
+    if _append_missing_ocr_paragraphs_enabled():
+        cleaned_text = _append_missing_paragraph_hints(cleaned_text, _ocr_items)
 
     pdf_name = source_path.stem
     if save_intermediate:
@@ -657,7 +711,7 @@ def _finalize_pdf_parse(
         "backend": metadata.get("backend", "paddleocrvl"),
         "model_dir": metadata.get("model_dir"),
         "pages": metadata.get("pages"),
-        "doi": doi_from_ocr,
+        "doi": resolved_doi,
         "page_level_metadata": metadata.get("page_level_metadata"),
         "ocr_quality": metadata.get("ocr_quality"),
     }
@@ -701,9 +755,24 @@ def parse_pdf_with_paddleocrvl(state: KnowMatState) -> dict:
         )
         stem = source_path.stem
 
-        doi = extract_first_doi(cleaned_text[:5000])
+        sidecar_items: Optional[List[Dict[str, Any]]] = None
+        sidecar_path = source_path.with_suffix(".json")
+        if sidecar_path.is_file():
+            try:
+                raw_side = json.loads(sidecar_path.read_text(encoding="utf-8"))
+                if isinstance(raw_side, list):
+                    sidecar_items = raw_side
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.debug("Could not read OCR sidecar %s: %s", sidecar_path, exc)
+
+        doi_from_sidecar = extract_first_doi_from_ocr_items(sidecar_items)
+        doi_from_text = extract_first_doi(cleaned_text[:5000])
+        doi = doi_from_sidecar or doi_from_text
         if doi and doi not in cleaned_text:
             cleaned_text = f"DOI: {doi}\n\n{cleaned_text}"
+
+        if sidecar_items and _append_missing_ocr_paragraphs_enabled():
+            cleaned_text = _append_missing_paragraph_hints(cleaned_text, sidecar_items)
 
         if save_intermediate:
             final_md_path = parse_output_dir / f"{stem}_final_output.md"
@@ -711,17 +780,27 @@ def parse_pdf_with_paddleocrvl(state: KnowMatState) -> dict:
                 f.write(cleaned_text)
             print(f"Saved txt parsed output to: {final_md_path}")
 
-        doc_meta: Dict[str, Any] = {"backend": "txt-direct", "source_file": str(source_path), "doi": doi}
+        doc_meta: Dict[str, Any] = {
+            "backend": "txt-direct",
+            "source_file": str(source_path),
+            "doi": doi,
+            "ocr_sidecar": str(sidecar_path) if sidecar_path.is_file() else None,
+        }
         if save_intermediate:
             meta_path = parse_output_dir / f"{stem}_parse_metadata.json"
             with open(meta_path, "w", encoding="utf-8") as f:
                 json.dump(doc_meta, f, ensure_ascii=False, indent=2)
             print(f"Saved parser metadata to: {meta_path}")
+        ocr_items_out: List[Dict[str, Any]]
+        if sidecar_items:
+            ocr_items_out = list(sidecar_items)
+        else:
+            ocr_items_out = text_to_paragraph_items(cleaned_text)
         return {
             "paper_text": cleaned_text,
             "document_metadata": doc_meta,
             "metadata": doc_meta,
-            "ocr_items": text_to_paragraph_items(cleaned_text),
+            "ocr_items": ocr_items_out,
         }
 
     if suffix != ".pdf":
