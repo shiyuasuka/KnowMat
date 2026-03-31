@@ -13,15 +13,36 @@ Follow the system instructions exactly, and execute this extraction protocol:
 - Exception: if the document is clearly datasheet/handbook style (Common Name / Specifications and Compositions /
   Summary of Physical Properties), treat the listed materials in this document as extractable Target entries.
 
-2) Sample decomposition
+2) Entry decomposition (item splitting)
+- One entry = one unique (composition + process state).
 - Split entries by chemistry variant (e.g., base vs doped; Mo0/Mo1/Mo3/Mo5).
 - Split entries by condition tuple when applicable:
   processing state (AB/HT/annealed/aged) + orientation (H/V, parallel/perpendicular BD) + test mode (tensile/compressive).
 - Do not merge different condition tuples into one composition.
 - Treat parenthetical/suffixed variants as independent compositions
   (e.g., (Nb15Ta10W75)98.5C1.5, base+C, alloy-A/WC).
+- For graded materials, each composition step/layer must be a separate composition entry.
+- For in-situ composites, separate matrix and reinforcement entries if both are explicitly provided.
+- If the same (composition + process) has multiple test conditions, keep one composition entry and include all test points in
+  `properties_of_composition`.
 
-3) Property extraction (recall-first, then precision)
+3) Composition extraction (mandatory fields)
+- For each composition entry, fill:
+  - `alloy_name_raw`
+  - `composition_normalized`
+  - `nominal_composition`
+  - `nominal_composition_type` (wt% / at% / null)
+  - `measured_composition`
+  - `measured_composition_type` (wt% / at% / null)
+- If source composition is formula-like (e.g., FeCoCrNiMo0.5), normalize stoichiometric ratios to 100.
+- If source composition is wt%/at% list and sum is not exactly 100, preserve source values and add `other` to close to 100.
+- If source is a fixed-column composition table, keep explicit 0.00 element values; do not drop zero columns.
+- If one obvious matrix element is missing in a measured-composition row but row is clearly a total-composition table,
+  infer that matrix element by balance-to-100 (instead of only adding `other`).
+- For mature commercial alloys with no numeric composition reported in the paper, keep `alloy_name_raw`, and set
+  normalized/nominal/measured composition fields to null.
+
+4) Property extraction (recall-first, then precision)
 - For every relevant table/data block, reconstruct a matrix:
   sample rows x temperature rows x property columns.
 - Extract row-by-row and column-by-column; do not stop after first sample or first temperature.
@@ -43,15 +64,19 @@ Follow the system instructions exactly, and execute this extraction protocol:
   tensile family (YS, UTS, El/UE/TE/fracture strain) or compressive family (CYS, UCS, compressive strain).
 - For variant families (e.g., Mo0/Mo1/Mo3/Mo5), sweep all variant rows explicitly and finish each row before moving on.
 
-4) Temperature and condition normalization
+5) Data-source and temperature normalization
+- Use only: body text, tables, captions, and body descriptions of figures.
+- Do NOT infer values from chart image coordinates.
 - For each extracted property, measurement_condition should start with temperature in Kelvin when available:
   at XXX K; ...
-- Convert C to K using K = C + 273.
-- RT/room temperature/ambient -> 298 K.
+- Convert C to K using K = C + 273.15.
+- RT/room temperature/ambient -> 298.15 K.
 - Assign a test temperature only if it is explicitly tied to a measured property in the same row/sentence context.
 - Do not use annealing/aging/solutionizing/sintering temperatures as test temperatures unless explicitly stated as test condition.
+- For process parameters, if energy density has multiple supported values in different sections, preserve all supported values:
+  threshold/full-densification and selected/optimal should be separated, and conflicts should be represented as a range.
 
-5) Mechanical property naming constraints
+6) Mechanical property naming and numeric formatting constraints
 - Tensile: Yield_Strength, Ultimate_Tensile_Strength, Elongation, Uniform_Elongation, Total_Elongation, Fracture_Strain.
 - Compressive: Yield_Strength_Compressive, Ultimate_Strength_Compressive, Elongation_Compressive.
 - If compression mode, do NOT output tensile-style names.
@@ -66,8 +91,13 @@ Follow the system instructions exactly, and execute this extraction protocol:
 - Never map UTS/UCS column values into yield fields.
 - If a candidate strength value looks like an elongation-like small % number while neighboring strength cells are MPa-level,
   treat it as mismapped and do not assign it to strength.
+- Preserve source decimal precision exactly in `value`.
+- Range handling:
+  - source "200-230" -> `value`="200-230", `value_type`="range", `value_numeric`=215, `value_range`="200-230".
+- Std-dev handling:
+  - source "215±5" -> `value`="215±5", `value_numeric`=215, `value_stddev`=5.
 
-6) Anti-noise guardrails
+7) Anti-noise guardrails
 - Do not output metadata as properties (year, ref id, table index, citation id).
 - Do not output microstructure-only numeric descriptors as mechanical properties
   (e.g., lattice constant, local lattice strain, misorientation angle, texture index).
@@ -80,11 +110,11 @@ Follow the system instructions exactly, and execute this extraction protocol:
 - Do not output temperatures that come only from process-condition text without measured property values.
 - If extracted rows exceed expected sample x temperature combinations, trim duplicates and keep one value per unique slot.
 
-7) Final silent quality gate (mandatory)
+8) Final silent quality gate (mandatory)
 - Coverage check: ensure expected sample/temperature/property combinations are not obviously missing.
 - Naming check: compressive tests must use *_Compressive names.
 - Provenance check: confirm extracted performance values belong to this paper's own tested samples.
-- Alignment check: verify no 77K/298K (or other temperature pair) value swapping.
+- Alignment check: verify no 77K/298.15K (or other temperature pair) value swapping.
 - Column check: verify no MPa strength field was filled from a % column.
 - Strength check: if both YS and UTS exist for one slot and YS > UTS, re-check mapping and keep only high-confidence values.
 - Rescue check: if any Target composition has zero mechanical properties but mechanical data exists in the paper, rerun extraction for that composition.

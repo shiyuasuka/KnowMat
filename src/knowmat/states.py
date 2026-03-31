@@ -91,9 +91,11 @@ class PerformanceTest(TypedDict, total=False):
     """A single mechanical / physical test result."""
 
     Test_ID: str
-    Test_Temperature_K: Optional[int]
+    Test_Temperature_K: Optional[float]
     Property_Type: Optional[str]
     Property_Value: float
+    Property_Value_Range: Optional[str]
+    Property_StdDev: Optional[float]
     Property_Unit: Optional[str]
 
 
@@ -119,6 +121,8 @@ class TargetMaterial(TypedDict, total=False):
     Alloy_Name_Raw: str
     Formula_Normalized: str
     Composition_JSON: Dict[str, float]
+    Composition_Info: Dict[str, Any]
+    Composition_Source: str
     Source_DOI: str
     Source_File: str
     Processed_Samples: List[ProcessedSample]

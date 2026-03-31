@@ -56,8 +56,11 @@ class SchemaConverter:
         if "Materials" in data and "Dataset_Description" in data:
             existing_materials = data.get("Materials", []) or []
             if existing_materials:
+                repaired = self._harmonize_existing_target_materials(existing_materials)
+                patched = dict(data)
+                patched["Materials"] = repaired
                 return self._expand_variable_materials_in_target_schema(  # type: ignore[return-value]
-                    data, paper_text
+                    patched, paper_text
                 )
             source_name = os.path.basename(source_path)
             if self._is_datasheet_like_document(paper_text, source_name):
@@ -105,6 +108,7 @@ class SchemaConverter:
         target_compositions = self._expand_variable_composition_families(
             target_compositions, paper_text
         )
+        target_compositions = self._harmonize_system_element_sets(target_compositions)
         target_count = len(target_compositions)
 
         groups: Dict[str, list] = defaultdict(list)
@@ -138,12 +142,62 @@ class SchemaConverter:
             for s_idx, comp in enumerate(comps, start=1):
                 samples.append(self._build_sample(comp, mat_idx, s_idx))
 
-            raw_comp_json = self.build_composition_json(base_formula)
+            nominal_comp = self._normalize_reported_composition(
+                first_comp.get("nominal_composition")
+            )
+            nominal_type = first_comp.get("nominal_composition_type")
+            measured_type = first_comp.get("measured_composition_type")
+
+            inferred_nominal, inferred_nominal_type = self._infer_nominal_from_commercial_name(
+                comp_raw_first
+            )
+            if inferred_nominal is None:
+                process_context = first_comp.get("processing_conditions")
+                if isinstance(process_context, dict):
+                    process_context = json.dumps(process_context, ensure_ascii=False)
+                inferred_nominal, inferred_nominal_type = self._infer_blend_nominal_from_name(
+                    comp_raw_first,
+                    context_text=str(process_context or ""),
+                )
+            if nominal_comp is None and inferred_nominal is not None:
+                nominal_comp = inferred_nominal
+                if not nominal_type:
+                    nominal_type = inferred_nominal_type
+
+            balance_element = self._pick_balance_element(
+                nominal_comp, comp_raw_first
+            )
+            measured_comp = self._normalize_reported_composition(
+                first_comp.get("measured_composition"),
+                preferred_balance_element=balance_element,
+            )
+
+            composition_source = "formula_parse"
+            if measured_comp:
+                raw_comp_json = dict(measured_comp)
+                composition_source = "measured_composition"
+            elif nominal_comp:
+                raw_comp_json = dict(nominal_comp)
+                composition_source = "nominal_composition"
+            elif self._is_commercial_shorthand(comp_raw_first, base_formula):
+                # Avoid turning commercial shorthand grades (e.g. Ti6Al4V) into
+                # stoichiometric formulas via pymatgen.
+                raw_comp_json = {}
+                composition_source = "commercial_name_only"
+            else:
+                raw_comp_json = self.build_composition_json(base_formula)
+
             validated_comp_json, comp_warnings = self.validate_composition_json(
                 raw_comp_json, base_formula
             )
             for warning in comp_warnings:
                 logger.warning("[COMPOSITION] %s", warning)
+            if composition_source == "commercial_name_only":
+                logger.warning(
+                    "[COMPOSITION] Commercial-grade shorthand detected ('%s'). "
+                    "Skip formula parsing because no nominal/measured composition map was provided.",
+                    comp_raw_first,
+                )
 
             material = {
                 "description": f"--- Material {mat_idx}: {base_formula} ---",
@@ -151,6 +205,18 @@ class SchemaConverter:
                 "Alloy_Name_Raw": comp_raw_first,
                 "Formula_Normalized": base_formula,
                 "Composition_JSON": validated_comp_json,
+                "Composition_Info": {
+                    "Alloy_Name_Raw": first_comp.get("alloy_name_raw") or comp_raw_first,
+                    "Nominal_Composition": {
+                        "Composition_Type": nominal_type,
+                        "Elements_Normalized": nominal_comp,
+                    },
+                    "Measured_Composition": {
+                        "Composition_Type": measured_type,
+                        "Elements_Normalized": measured_comp,
+                    },
+                },
+                "Composition_Source": composition_source,
                 "Source_DOI": material_doi or "",
                 "Source_File": source_name,
                 "Processed_Samples": samples,
@@ -676,20 +742,503 @@ class SchemaConverter:
     # Helpers – each is independently testable
     # ------------------------------------------------------------------
 
+    def _normalize_reported_composition(
+        self,
+        comp_map: Any,
+        preferred_balance_element: Optional[str] = None,
+    ) -> Optional[Dict[str, float]]:
+        """Clean a reported composition map and add/adjust ``other`` to close sum to 100.
+
+        This is used for LLM-extracted nominal/measured compositions where values
+        are already in wt%/at% style and should stay faithful to source numbers.
+        """
+        if not isinstance(comp_map, dict):
+            return None
+
+        cleaned: Dict[str, float] = {}
+        for raw_key, raw_val in comp_map.items():
+            key = str(raw_key).strip()
+            if not key:
+                continue
+            if key != "other" and key not in self.rules.valid_elements:
+                continue
+            try:
+                val = float(raw_val)
+            except Exception:
+                m = re.search(r"-?\d+(?:\.\d+)?", str(raw_val))
+                if not m:
+                    continue
+                try:
+                    val = float(m.group(0))
+                except Exception:
+                    continue
+            cleaned[key] = round(val, 6)
+
+        if not cleaned:
+            return None
+
+        non_other_total = sum(v for k, v in cleaned.items() if k != "other")
+        balance_delta = round(100.0 - non_other_total, 6)
+
+        # When measured composition omits matrix element (e.g., Ti in EDX table),
+        # prefer filling that matrix element by balance instead of pushing into "other".
+        if (
+            preferred_balance_element
+            and preferred_balance_element not in cleaned
+            and preferred_balance_element in self.rules.valid_elements
+            and balance_delta > 0
+        ):
+            cleaned[preferred_balance_element] = balance_delta
+            return cleaned
+
+        if "other" not in cleaned:
+            if abs(balance_delta) > 1e-9:
+                cleaned["other"] = balance_delta
+        else:
+            total = sum(cleaned.values())
+            if abs(total - 100.0) > 1e-9:
+                cleaned["other"] = round(cleaned["other"] + (100.0 - total), 6)
+
+        return cleaned
+
+    def _harmonize_system_element_sets(self, target_compositions: List[dict]) -> List[dict]:
+        """Harmonize element sets inside one alloy system cluster.
+
+        Goal: preserve explicit zero-columns (e.g. Ni/Cr/Nb/Mo = 0.00) when the
+        paper reports multiple related materials under one shared chemistry table.
+        The function is intentionally conservative:
+        - clusters are built from configured commercial-alloy aliases;
+        - only nominal/measured maps are padded; and
+        - residual is always closed by ``other`` to keep sum near 100.
+        """
+        if not target_compositions:
+            return target_compositions
+
+        aliases = self.rules.commercial_alloy_aliases or {}
+        if not aliases:
+            return target_compositions
+
+        # Union-find to connect aliases that co-occur in blended/graded labels.
+        parents: Dict[str, str] = {k: k for k in aliases.keys()}
+
+        def _find(x: str) -> str:
+            p = parents.setdefault(x, x)
+            while parents.get(p, p) != p:
+                parents[p] = parents[parents[p]]
+                p = parents[p]
+            return p
+
+        def _union(a: str, b: str) -> None:
+            ra, rb = _find(a), _find(b)
+            if ra != rb:
+                parents[rb] = ra
+
+        alias_sets: List[set[str]] = []
+        for comp in target_compositions:
+            comp_text = str(comp.get("composition") or "")
+            norm_text = str(comp.get("composition_normalized") or "")
+            alloy_text = str(comp.get("alloy_name_raw") or "")
+            proc_text = comp.get("processing_conditions")
+            if isinstance(proc_text, dict):
+                proc_text = json.dumps(proc_text, ensure_ascii=False)
+            joined_text = " ".join(
+                part
+                for part in (
+                    comp_text,
+                    norm_text,
+                    alloy_text,
+                    str(proc_text or ""),
+                )
+                if part
+            )
+            present = self._extract_alias_keys(joined_text)
+            alias_sets.append(present)
+            if len(present) >= 2:
+                present_list = sorted(present)
+                for i in range(len(present_list) - 1):
+                    _union(present_list[i], present_list[i + 1])
+
+        # Build alias-cluster labels so single-alloy rows can inherit zero-columns
+        # from related blended/graded rows in the same paper.
+        root_members: Dict[str, set[str]] = defaultdict(set)
+        for a in parents.keys():
+            root_members[_find(a)].add(a)
+
+        group_to_indices: Dict[str, List[int]] = defaultdict(list)
+        for idx, present in enumerate(alias_sets):
+            if not present:
+                continue
+            roots = sorted({_find(a) for a in present})
+            cluster_members: set[str] = set()
+            for r in roots:
+                cluster_members.update(root_members.get(r, {r}))
+            if not cluster_members:
+                cluster_members = present
+            gkey = "alias_cluster:" + "+".join(sorted(cluster_members))
+            group_to_indices[gkey].append(idx)
+
+        for indices in group_to_indices.values():
+            if not indices:
+                continue
+
+            union_elements: set[str] = set()
+            for idx in indices:
+                comp = target_compositions[idx]
+                for field in ("nominal_composition", "measured_composition"):
+                    cmap = comp.get(field)
+                    if not isinstance(cmap, dict):
+                        continue
+                    for el in cmap.keys():
+                        if el in self.rules.valid_elements:
+                            union_elements.add(el)
+
+            if not union_elements:
+                continue
+
+            for idx in indices:
+                comp = target_compositions[idx]
+                raw_name = str(comp.get("composition") or "")
+                proc_text = comp.get("processing_conditions")
+                if isinstance(proc_text, dict):
+                    proc_text = json.dumps(proc_text, ensure_ascii=False)
+                context_text = str(proc_text or "")
+
+                nominal = comp.get("nominal_composition")
+                if not isinstance(nominal, dict) or not nominal:
+                    inferred_nominal, inferred_type = self._infer_nominal_from_commercial_name(raw_name)
+                    if inferred_nominal is None:
+                        inferred_nominal, inferred_type = self._infer_blend_nominal_from_name(
+                            raw_name,
+                            context_text=context_text,
+                        )
+                    if inferred_nominal is not None:
+                        nominal = inferred_nominal
+                        comp["nominal_composition"] = inferred_nominal
+                        if not comp.get("nominal_composition_type"):
+                            comp["nominal_composition_type"] = inferred_type
+
+                measured = comp.get("measured_composition")
+                balance_element = self._pick_balance_element(
+                    nominal if isinstance(nominal, dict) else None,
+                    raw_name,
+                )
+
+                if isinstance(nominal, dict) and any(el in self.rules.valid_elements for el in nominal.keys()):
+                    patched_nominal = dict(nominal)
+                    for el in union_elements:
+                        patched_nominal.setdefault(el, 0.0)
+                    normalized_nominal = self._normalize_reported_composition(
+                        patched_nominal,
+                        preferred_balance_element=balance_element,
+                    )
+                    if normalized_nominal is not None:
+                        comp["nominal_composition"] = normalized_nominal
+
+                if isinstance(measured, dict) and any(el in self.rules.valid_elements for el in measured.keys()):
+                    patched_measured = dict(measured)
+                    for el in union_elements:
+                        patched_measured.setdefault(el, 0.0)
+                    normalized_measured = self._normalize_reported_composition(
+                        patched_measured,
+                        preferred_balance_element=balance_element,
+                    )
+                    if normalized_measured is not None:
+                        comp["measured_composition"] = normalized_measured
+
+        return target_compositions
+
+    def _extract_alias_keys(self, text: str) -> set[str]:
+        """Extract known commercial-alloy alias keys from free text."""
+        if not text:
+            return set()
+        txt = text.lower()
+        found: set[str] = set()
+        for key, syns in (self.rules.commercial_alloy_aliases or {}).items():
+            for syn in syns:
+                token = str(syn).strip().lower()
+                if token and token in txt:
+                    found.add(str(key))
+                    break
+        return found
+
+    def _harmonize_existing_target_materials(self, materials: List[dict]) -> List[dict]:
+        """Repair composition fields when input is already in target-schema shape."""
+        if not materials:
+            return materials
+
+        pseudo: List[dict] = []
+        for mat in materials:
+            comp_info = mat.get("Composition_Info") or {}
+
+            nominal_block = comp_info.get("Nominal_Composition") or {}
+            measured_block = comp_info.get("Measured_Composition") or {}
+
+            nominal_comp = nominal_block.get("Elements_Normalized")
+            if nominal_comp is None:
+                nominal_comp = comp_info.get("Composition")
+            if nominal_comp is None:
+                nominal_comp = mat.get("Composition_JSON")
+
+            measured_comp = measured_block.get("Elements_Normalized")
+            if measured_comp is None and isinstance(comp_info.get("Measured_Composition"), dict):
+                maybe_legacy = comp_info.get("Measured_Composition")
+                if "Elements_Normalized" not in maybe_legacy:
+                    measured_comp = maybe_legacy
+
+            proc_text = ""
+            samples = mat.get("Processed_Samples") or []
+            if samples and isinstance(samples, list):
+                proc_text = str((samples[0] or {}).get("Process_Text_For_AI") or "")
+            if not proc_text:
+                proc_text = str((mat.get("Process_Info") or {}).get("Process_Text_For_AI") or "")
+
+            pseudo.append(
+                {
+                    "composition": mat.get("Alloy_Name_Raw")
+                    or comp_info.get("Alloy_Name_Raw")
+                    or "",
+                    "composition_normalized": mat.get("Formula_Normalized")
+                    or comp_info.get("Formula_Normalized")
+                    or "",
+                    "alloy_name_raw": comp_info.get("Alloy_Name_Raw") or mat.get("Alloy_Name_Raw") or "",
+                    "processing_conditions": proc_text,
+                    "nominal_composition": nominal_comp,
+                    "nominal_composition_type": nominal_block.get("Composition_Type")
+                    or comp_info.get("Composition_Type"),
+                    "measured_composition": measured_comp,
+                    "measured_composition_type": measured_block.get("Composition_Type"),
+                }
+            )
+
+        pseudo = self._harmonize_system_element_sets(pseudo)
+
+        out: List[dict] = []
+        for mat, p in zip(materials, pseudo):
+            patched = dict(mat)
+            comp_info = dict(patched.get("Composition_Info") or {})
+
+            nominal_comp = self._normalize_reported_composition(p.get("nominal_composition"))
+            measured_comp = self._normalize_reported_composition(
+                p.get("measured_composition"),
+                preferred_balance_element=self._pick_balance_element(
+                    nominal_comp,
+                    str(patched.get("Alloy_Name_Raw") or p.get("composition") or ""),
+                ),
+            )
+
+            nominal_type = p.get("nominal_composition_type")
+            measured_type = p.get("measured_composition_type")
+
+            comp_info["Alloy_Name_Raw"] = comp_info.get("Alloy_Name_Raw") or patched.get("Alloy_Name_Raw")
+            comp_info["Nominal_Composition"] = {
+                "Composition_Type": nominal_type,
+                "Elements_Normalized": nominal_comp,
+            }
+            comp_info["Measured_Composition"] = {
+                "Composition_Type": measured_type,
+                "Elements_Normalized": measured_comp,
+            }
+            patched["Composition_Info"] = comp_info
+
+            if measured_comp:
+                raw_comp_json = dict(measured_comp)
+                source = "measured_composition"
+            elif nominal_comp:
+                raw_comp_json = dict(nominal_comp)
+                source = "nominal_composition"
+            else:
+                raw_comp_json = patched.get("Composition_JSON") or {}
+                source = patched.get("Composition_Source") or "unknown"
+
+            formula = str(patched.get("Formula_Normalized") or p.get("composition_normalized") or "")
+            validated_comp_json, comp_warnings = self.validate_composition_json(raw_comp_json, formula)
+            for warning in comp_warnings:
+                logger.warning("[COMPOSITION] %s", warning)
+
+            patched["Composition_JSON"] = validated_comp_json
+            patched["Composition_Source"] = source
+            out.append(patched)
+        return out
+
+    def _pick_balance_element(
+        self, nominal_comp: Optional[Dict[str, float]], raw_name: str
+    ) -> Optional[str]:
+        """Pick matrix element used for balance completion in measured maps."""
+        if nominal_comp:
+            ranked = sorted(
+                ((k, v) for k, v in nominal_comp.items() if k != "other"),
+                key=lambda kv: kv[1],
+                reverse=True,
+            )
+            if ranked and ranked[0][0] in self.rules.valid_elements:
+                return ranked[0][0]
+        inferred_nominal, _ = self._infer_nominal_from_commercial_name(raw_name or "")
+        if inferred_nominal:
+            ranked = sorted(inferred_nominal.items(), key=lambda kv: kv[1], reverse=True)
+            if ranked:
+                return ranked[0][0]
+        return None
+
     @staticmethod
-    def parse_temperature_to_k(measurement_condition: Optional[str]) -> Optional[int]:
+    def _is_commercial_shorthand(raw_name: str, formula: str) -> bool:
+        """Return True when the token likely represents a commercial grade name."""
+        text = f"{raw_name} {formula}".lower().replace(" ", "")
+        known = (
+            "ti6al4v",
+            "ti-6al-4v",
+            "in718",
+            "inconel718",
+            "316l",
+            "304l",
+            "17-4ph",
+            "174ph",
+        )
+        return any(tok in text for tok in known)
+
+    def _infer_nominal_from_commercial_name(
+        self, raw_name: str
+    ) -> Tuple[Optional[Dict[str, float]], Optional[str]]:
+        """Infer nominal composition for a small set of canonical commercial aliases."""
+        if not raw_name:
+            return None, None
+        name = raw_name.lower().replace(" ", "")
+        # Only infer for single-alloy aliases; avoid blended/graded/multi-alloy labels.
+        if any(tok in name for tok in ("+", "/", "blend", "graded", "gradient", "wt%", "in718", "inconel")):
+            return None, None
+        aliases = self.rules.commercial_alloy_aliases or {}
+        nominal_maps = self.rules.commercial_nominal_maps or {}
+        for key, syns in aliases.items():
+            if any(str(s).lower().replace(" ", "") in name for s in syns):
+                comp = nominal_maps.get(key)
+                if isinstance(comp, dict) and comp:
+                    return {
+                        str(k): float(v) for k, v in comp.items()
+                    }, "wt%"
+        return None, None
+
+    def _infer_blend_nominal_from_name(
+        self, raw_name: str, context_text: str = ""
+    ) -> Tuple[Optional[Dict[str, float]], Optional[str]]:
+        """Infer blended nominal composition from labels like 'A + 20 wt% B' or '0-20 wt% B'."""
+        if not raw_name:
+            raw_name = ""
+        txt = f"{raw_name} {context_text or ''}".lower()
+        known = self.rules.commercial_nominal_maps or {}
+        aliases = self.rules.commercial_alloy_aliases or {}
+        if not known or not aliases:
+            return None, None
+
+        present: List[str] = []
+        for key, syns in aliases.items():
+            if any(s in txt for s in syns):
+                present.append(key)
+        if len(present) < 2:
+            return None, None
+
+        pct = None
+        additive_key = None
+        alias_tokens: List[str] = []
+        for syns in aliases.values():
+            alias_tokens.extend(re.escape(str(s).lower()) for s in syns if str(s).strip())
+        if not alias_tokens:
+            return None, None
+        alloy_alt = "|".join(sorted(set(alias_tokens), key=len, reverse=True))
+        pct_pattern = re.compile(
+            rf"(\d+(?:\.\d+)?)\s*(?:-\s*(\d+(?:\.\d+)?)\s*)?(?:wt\s*%|wt%|%\s*wt|%)\s*({alloy_alt})",
+            re.IGNORECASE,
+        )
+        candidates: List[Tuple[float, float, str]] = []
+        for m in pct_pattern.finditer(txt):
+            lo = float(m.group(1))
+            hi = float(m.group(2)) if m.group(2) else lo
+            tok = m.group(3).replace(" ", "")
+            key_hit = None
+            for key, syns in aliases.items():
+                if any(s.replace(" ", "") in tok for s in syns):
+                    key_hit = key
+                    break
+            if key_hit:
+                candidates.append((lo, hi, key_hit))
+
+        if candidates:
+            additive_key = candidates[0][2]
+            lo_vals = [lo for lo, _hi, key in candidates if key == additive_key]
+            hi_vals = [hi for _lo, hi, key in candidates if key == additive_key]
+            lo = min(lo_vals) if lo_vals else None
+            hi = max(hi_vals) if hi_vals else None
+
+            # Graded descriptions often write "5% wt ... up to 20%" where upper
+            # bound has no trailing alloy token. Use it as the range ceiling.
+            if lo is not None and hi is not None:
+                graded_hint = any(k in txt for k in ("graded", "gradient", "step"))
+                up_to = re.search(r"up\s*to\s*(\d+(?:\.\d+)?)\s*(?:wt\s*%|wt%|%\s*wt|%)", txt)
+                if graded_hint and up_to:
+                    try:
+                        up_to_val = float(up_to.group(1))
+                        if up_to_val > hi:
+                            hi = up_to_val
+                        # Phrases like "steps of 5% ... up to 20%" usually imply
+                        # a graded span from 0% to 20%, where 5% is step size.
+                        if "step" in txt and lo <= up_to_val * 0.5:
+                            lo = 0.0
+                    except Exception:
+                        pass
+                pct = (lo + hi) / 2.0 if hi >= lo else lo
+
+        if pct is None or additive_key not in known:
+            return None, None
+        if pct < 0 or pct > 100:
+            return None, None
+
+        base_key = None
+        for k in present:
+            if k != additive_key and k in known:
+                base_key = k
+                break
+        if base_key is None:
+            return None, None
+
+        add_frac = pct / 100.0
+        base_frac = 1.0 - add_frac
+        comp: Dict[str, float] = {}
+        for el in set(known[base_key].keys()) | set(known[additive_key].keys()):
+            try:
+                base_v = float(known[base_key].get(el, 0.0))
+            except Exception:
+                base_v = 0.0
+            try:
+                add_v = float(known[additive_key].get(el, 0.0))
+            except Exception:
+                add_v = 0.0
+            v = base_frac * base_v + add_frac * add_v
+            comp[el] = round(v, 6)
+
+        total = sum(comp.values())
+        if abs(total - 100.0) > 1e-6:
+            comp["other"] = round(comp.get("other", 0.0) + (100.0 - total), 6)
+        return comp, "wt%"
+
+    @staticmethod
+    def parse_temperature_to_k(measurement_condition: Optional[str]) -> Optional[float]:
         """Best-effort parse of temperature from measurement condition text.
 
         Prioritises ``at XXX K`` format, then general patterns.
-        Returns integer Kelvin.
+        Returns Kelvin as float.
         """
         if not measurement_condition:
             return None
         txt = measurement_condition.lower()
 
+        if re.search(r"\b(rt|room temperature|ambient)\b", txt):
+            return 298.15
+
         m_at = re.search(r"at\s+(-?\d+(?:\.\d+)?)\s*k\b", txt)
         if m_at:
-            return round(float(m_at.group(1)))
+            return round(float(m_at.group(1)), 2)
+
+        m_at_c = re.search(r"at\s+(-?\d+(?:\.\d+)?)\s*(?:°c|\bc\b)\b", txt)
+        if m_at_c:
+            return round(float(m_at_c.group(1)) + 273.15, 2)
 
         m = re.search(r"(-?\d+(?:\.\d+)?)\s*(k|°c|\bc\b)\b", txt)
         if not m:
@@ -697,8 +1246,8 @@ class SchemaConverter:
         value = float(m.group(1))
         unit = m.group(2)
         if unit in {"°c", "c"}:
-            return round(value + 273.15)
-        return round(value)
+            return round(value + 273.15, 2)
+        return round(value, 2)
 
     @staticmethod
     def build_composition_json(formula: str) -> dict:
@@ -823,10 +1372,18 @@ class SchemaConverter:
         cleaned: Dict[str, float] = {}
 
         for elem, val in comp_json.items():
+            try:
+                parsed_val = float(val)
+            except Exception:
+                warnings.append(f"Invalid composition value '{val}' for '{elem}' removed from {formula_source}")
+                continue
+            if str(elem).lower() == "other":
+                cleaned["other"] = parsed_val
+                continue
             if elem not in self.rules.valid_elements:
                 warnings.append(f"Invalid element '{elem}' removed from {formula_source}")
                 continue
-            cleaned[elem] = val
+            cleaned[elem] = parsed_val
 
         if cleaned:
             total = sum(cleaned.values())
@@ -834,13 +1391,22 @@ class SchemaConverter:
                 warnings.append(f"Composition sum = {total:.2f}, invalid total. Formula: {formula_source}")
                 return cleaned, warnings
 
-            # If clearly not at% already, normalise to at%.
-            if abs(total - 100) > 2:
-                normalised = {k: (v / total) * 100.0 for k, v in cleaned.items()}
-                warnings.append(
-                    f"Composition sum = {total:.2f} (not ~100). Normalised to 100 at%. Formula: {formula_source}"
-                )
-                cleaned = normalised
+            if "other" in cleaned:
+                # For reported wt%/at% maps, keep source values and use `other` to
+                # absorb residual so total becomes 100.
+                if abs(total - 100) > 1e-6:
+                    cleaned["other"] = round(cleaned["other"] + (100.0 - total), 6)
+                    warnings.append(
+                        f"Composition sum = {total:.2f}; adjusted 'other' to close sum to 100. Formula: {formula_source}"
+                    )
+            else:
+                # If clearly not at% already, normalise to at%.
+                if abs(total - 100) > 2:
+                    normalised = {k: (v / total) * 100.0 for k, v in cleaned.items()}
+                    warnings.append(
+                        f"Composition sum = {total:.2f} (not ~100). Normalised to 100 at%. Formula: {formula_source}"
+                    )
+                    cleaned = normalised
         return cleaned, warnings
 
     @staticmethod
@@ -883,8 +1449,6 @@ class SchemaConverter:
             for k, v in processing_params.items():
                 if v is not None:
                     params[k] = v
-        if params:
-            return params
 
         if not process_text:
             return params
@@ -905,6 +1469,8 @@ class SchemaConverter:
                     return None
 
         for param_name, compiled in self.rules._compiled_param_patterns.items():
+            if param_name in params:
+                continue
             for pat in compiled:
                 m = pat.search(process_text)
                 if m:
@@ -920,12 +1486,70 @@ class SchemaConverter:
                     params[param_name] = parsed
                     break
 
-        if re.search(r"\bargon\b", process_text, re.IGNORECASE):
+        if re.search(r"\bargon\b", process_text, re.IGNORECASE) and "Shielding_Gas" not in params:
             params["Shielding_Gas"] = "Ar"
-        elif re.search(r"\bnitrogen\b", process_text, re.IGNORECASE):
+        elif re.search(r"\bnitrogen\b", process_text, re.IGNORECASE) and "Shielding_Gas" not in params:
             params["Shielding_Gas"] = "N2"
 
+        for k, v in self._extract_energy_density_params(process_text).items():
+            if k not in params:
+                params[k] = v
+
         return params
+
+    @staticmethod
+    def _extract_energy_density_params(process_text: str) -> Dict[str, Any]:
+        """Extract energy-density related parameters, preserving threshold ranges."""
+        if not process_text:
+            return {}
+        txt = process_text
+        out: Dict[str, Any] = {}
+
+        patt = re.compile(r"(\d+(?:\.\d+)?)\s*J\s*/\s*mm(?:\^?3|3)", re.IGNORECASE)
+        dens_vals: List[float] = []
+        opt_vals: List[float] = []
+
+        for m in patt.finditer(txt):
+            try:
+                val = float(m.group(1))
+            except Exception:
+                continue
+            window = txt[max(0, m.start() - 80): min(len(txt), m.end() + 80)].lower()
+            is_dens_ctx = any(
+                kw in window for kw in ("full dens", "densification", "fully dense", "full dense")
+            )
+            is_opt_ctx = any(
+                kw in window for kw in ("optimal", "optimum", "produced at", "sample shown", "selected")
+            )
+            if is_dens_ctx:
+                dens_vals.append(val)
+            elif is_opt_ctx:
+                opt_vals.append(val)
+
+        if not dens_vals and not opt_vals:
+            all_vals = sorted({float(m.group(1)) for m in patt.finditer(txt)})
+            if all_vals:
+                if len(all_vals) == 1:
+                    out["Energy_Density_J_mm3"] = all_vals[0]
+                else:
+                    out["Energy_Density_J_mm3_Range"] = (
+                        f"{all_vals[0]:g}-{all_vals[-1]:g}"
+                    )
+            return out
+
+        if dens_vals:
+            uniq = sorted(set(dens_vals))
+            if len(uniq) == 1:
+                out["Energy_Density_J_mm3_FullDensification"] = uniq[0]
+            else:
+                out["Energy_Density_J_mm3_FullDensification"] = f"{uniq[0]:g}-{uniq[-1]:g}"
+        if opt_vals:
+            uniq = sorted(set(opt_vals))
+            if len(uniq) == 1:
+                out["Energy_Density_J_mm3_Optimal"] = uniq[0]
+            else:
+                out["Energy_Density_J_mm3_Optimal_Range"] = f"{uniq[0]:g}-{uniq[-1]:g}"
+        return out
 
     @staticmethod
     def build_microstructure_text(comp: dict) -> str:
@@ -959,13 +1583,35 @@ class SchemaConverter:
             return mapped
         return re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
 
-    def infer_process_category(self, process_text: str) -> str:
+    def infer_process_category(self, process_text: str, comp_raw: str = "") -> str:
         """Classify manufacturing process from free text."""
         t = (process_text or "").lower()
+        c = (comp_raw or "").lower()
+        base = "Unknown"
         for category, keywords in self.rules.process_category_keywords.items():
-            if any(kw in t for kw in keywords):
-                return category
-        return "Unknown"
+            if any(
+                re.search(rf"(?<![A-Za-z0-9]){re.escape(kw.lower())}(?![A-Za-z0-9])", t)
+                for kw in keywords
+            ):
+                base = category
+                break
+
+        # SLM is a LPBF sub-family. Use LPBF as the canonical parent category.
+        if base == "AM_SLM":
+            base = "AM_LPBF"
+
+        if base in {"AM_LPBF", "AM_SLM"}:
+            suffixes: List[str] = []
+            blend_kw = ("blend", "blending", "premix", "premixed", "double hopper", "mixing chamber")
+            graded_kw = ("graded", "multigraded", "gradient", "stepwise", "layers per blend")
+            if any(kw in t for kw in blend_kw):
+                suffixes.append("Powder_Blending")
+            if any(kw in t for kw in graded_kw) or "graded" in c or "gradient" in c:
+                suffixes.append("Graded_Composition")
+            if suffixes:
+                return f"{base} + " + " + ".join(suffixes)
+
+        return base
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -1005,11 +1651,26 @@ class SchemaConverter:
 
             if numeric_val is None:
                 continue
+            value_range = p.get("value_range")
+            if value_range is None and p.get("value_type") == "range":
+                value_range = p.get("value")
+
+            value_stddev = p.get("value_stddev")
+            if value_stddev is None:
+                value_txt = str(p.get("value") or "")
+                m_std = re.search(r"±\s*(-?\d+(?:\.\d+)?)", value_txt)
+                if m_std:
+                    try:
+                        value_stddev = float(m_std.group(1))
+                    except Exception:
+                        value_stddev = None
             tests.append({
                 "Test_ID": f"T{j:03d}",
                 "Test_Temperature_K": self.parse_temperature_to_k(p.get("measurement_condition")),
                 "Property_Type": prop_std_name,
                 "Property_Value": numeric_val,
+                "Property_Value_Range": value_range,
+                "Property_StdDev": value_stddev,
                 "Property_Unit": p.get("unit"),
             })
 
@@ -1032,8 +1693,20 @@ class SchemaConverter:
             grain_size_um = grain_size_from_props
 
         process_category = comp.get("process_category")
-        if not process_category or process_category == "Unknown":
-            process_category = self.infer_process_category(process_text or "")
+        inferred_process_category = self.infer_process_category(process_text or "", comp_raw=comp_raw)
+        if (
+            not process_category
+            or process_category == "Unknown"
+            or str(process_category).strip().upper() in {"AM", "ADDITIVE_MANUFACTURING"}
+        ):
+            process_category = inferred_process_category
+        elif inferred_process_category != "Unknown":
+            current = str(process_category).strip()
+            # Prefer more specific inferred categories (e.g., + Powder_Blending / + Graded_Composition)
+            if ("+" in inferred_process_category and "+" not in current) or (
+                current == "AM_SLM" and inferred_process_category.startswith("AM_LPBF")
+            ):
+                process_category = inferred_process_category
 
         key_params = self.parse_key_params(process_text or "", comp.get("processing_params"))
         if orientation and "Build_Orientation" not in key_params:

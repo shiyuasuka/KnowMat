@@ -45,6 +45,9 @@ ALIASES = {
     "yieldstrengthcompressive": "yield_strength_compressive",
     "ultimatestrengthcompressive": "ultimate_strength_compressive",
     "elongationcompressive": "elongation_compressive",
+    "hardnesshv": "microhardness",
+    "microhardness": "microhardness",
+    "hardness": "microhardness",
 }
 
 
@@ -131,8 +134,11 @@ def load_materials(path: Path, drop_zero_elements: bool, zero_eps: float) -> Lis
 
     out: List[MaterialRecord] = []
     for i, m in enumerate(data.get("Materials", [])):
+        comp_info = m.get("Composition_Info") or {}
         comp: Dict[str, float] = {}
-        raw_comp = m.get("Composition_JSON") or {}
+        raw_comp = m.get("Composition_JSON")
+        if not raw_comp:
+            raw_comp = comp_info.get("Composition") or {}
         for k, v in raw_comp.items():
             fv = to_float(v)
             if fv is None:
@@ -142,8 +148,9 @@ def load_materials(path: Path, drop_zero_elements: bool, zero_eps: float) -> Lis
             comp[k] = fv
 
         tests: List[TestRecord] = []
-        for sample in m.get("Processed_Samples", []):
-            for t in sample.get("Performance_Tests", []):
+        # Old schema: Processed_Samples[].Performance_Tests[]
+        for sample in m.get("Processed_Samples", []) or []:
+            for t in sample.get("Performance_Tests", []) or []:
                 tests.append(
                     TestRecord(
                         temp_k=normalize_temp(t.get("Test_Temperature_K")),
@@ -154,12 +161,24 @@ def load_materials(path: Path, drop_zero_elements: bool, zero_eps: float) -> Lis
                         raw_unit=t.get("Property_Unit"),
                     )
                 )
+        # New schema: Properties_Info[]
+        for t in m.get("Properties_Info", []) or []:
+            tests.append(
+                TestRecord(
+                    temp_k=normalize_temp(t.get("Test_Temperature_K")),
+                    property_type=normalize_property_type(t.get("Property_Type")),
+                    unit=normalize_unit(t.get("Property_Unit")),
+                    value=to_float(t.get("Property_Value")),
+                    raw_property_type=t.get("Property_Type"),
+                    raw_unit=t.get("Property_Unit"),
+                )
+            )
 
         out.append(
             MaterialRecord(
-                mat_id=str(m.get("Mat_ID", f"M{i+1:03d}")),
-                formula=m.get("Formula_Normalized"),
-                alloy_name=m.get("Alloy_Name_Raw"),
+                mat_id=str(m.get("Mat_ID") or comp_info.get("Mat_ID") or f"M{i+1:03d}"),
+                formula=m.get("Formula_Normalized") or comp_info.get("Formula_Normalized"),
+                alloy_name=m.get("Alloy_Name_Raw") or comp_info.get("Alloy_Name_Raw"),
                 composition=comp,
                 tests=tests,
             )
@@ -455,6 +474,12 @@ def build_markdown_report(report: Dict, output_json_path: Path) -> str:
     lines.append(f"- Exact Rate: `{tv['exact_rate']}`")
     lines.append(f"- Within Tol Rate: `{tv['within_tol_rate']}`")
     lines.append("")
+    lines.append("### Material-Level Full Hit")
+    lines.append("")
+    mh = ov["material_full_hit"]
+    lines.append(f"- Full Hit / Total: `{mh['full_hit']}` / `{mh['total']}`")
+    lines.append(f"- Hit Rate: `{mh['hit_rate']}`")
+    lines.append("")
 
     lines.append("## By Temperature (K)")
     lines.append("")
@@ -496,15 +521,51 @@ def build_markdown_report(report: Dict, output_json_path: Path) -> str:
         cv = a["composition_values"]
         td = a["test_detection"]
         tv = a["test_values"]
+        mh = a["material_full_hit"]
         lines.append(
             f"- Composition Detection P/R/F1: `{cd['precision']:.4f}` / `{cd['recall']:.4f}` / `{cd['f1']:.4f}`"
         )
         lines.append(f"- Composition Value MAE: `{cv['mae']}` (count={cv['count']})")
+        lines.append(
+            f"- Material Full Hit: `{mh['full_hit']}/{mh['total']}` (hit_rate={mh['hit_rate']})"
+        )
         lines.append(f"- Test Detection P/R/F1: `{td['precision']:.4f}` / `{td['recall']:.4f}` / `{td['f1']:.4f}`")
         lines.append(f"- Test Value MAE: `{tv['mae']}` (count={tv['count']})")
         lines.append("")
 
     return "\n".join(lines)
+
+
+def discover_pairs(gt_dir: Path, out_dir: Path) -> List[Tuple[str, Path, Optional[Path]]]:
+    # Legacy style: groundtruth/1-data.json
+    legacy_gt = sorted(gt_dir.glob("*-data.json"))
+
+    pairs: List[Tuple[str, Path, Optional[Path]]] = []
+    if legacy_gt:
+        for gt_path in legacy_gt:
+            m = re.match(r"(\d+)-data\.json$", gt_path.name)
+            article_id = m.group(1) if m else gt_path.stem
+            out_candidates = sorted(out_dir.glob(f"{article_id}-*/*_extraction.json"))
+            out_path = out_candidates[0] if out_candidates else None
+            pairs.append((article_id, gt_path, out_path))
+        return pairs
+
+    # Generic style: groundtruth/<id>.json with output/<id>/<id>_extraction.json
+    generic_gt = sorted(p for p in gt_dir.glob("*.json") if not p.name.startswith("."))
+    for gt_path in generic_gt:
+        article_id = gt_path.stem
+        candidates = []
+        candidates += sorted(out_dir.glob(f"{article_id}/{article_id}_extraction.json"))
+        candidates += sorted(out_dir.glob(f"{article_id}-*/*_extraction.json"))
+        if not candidates:
+            candidates += sorted(out_dir.glob(f"**/{article_id}_extraction.json"))
+        out_path = candidates[0] if candidates else None
+        pairs.append((article_id, gt_path, out_path))
+    return pairs
+
+
+def article_sort_key(article_id: str):
+    return (0, int(article_id)) if article_id.isdigit() else (1, article_id)
 
 
 def main():
@@ -558,14 +619,15 @@ def main():
     report_json = Path(args.report_json)
     report_md = Path(args.report_md)
 
-    gt_files = sorted(gt_dir.glob("*-data.json"))
-    if not gt_files:
+    pairs_to_score = discover_pairs(gt_dir, out_dir)
+    if not pairs_to_score:
         raise SystemExit(f"No groundtruth files found in: {gt_dir}")
 
     overall_comp_det = {"tp": 0, "fp": 0, "fn": 0}
     overall_comp_val = {"count": 0, "sum_abs_err": 0.0, "max_abs_err": 0.0, "exact": 0, "within_tol": 0}
     overall_test_det = {"tp": 0, "fp": 0, "fn": 0}
     overall_test_val = {"count": 0, "sum_abs_err": 0.0, "max_abs_err": 0.0, "exact": 0, "within_tol": 0}
+    overall_mat_full_hit = {"full_hit": 0, "total": 0}
 
     by_temp_det = defaultdict(lambda: {"tp": 0, "fp": 0, "fn": 0})
     by_temp_val = defaultdict(lambda: {"count": 0, "sum_abs_err": 0.0, "max_abs_err": 0.0, "exact": 0, "within_tol": 0})
@@ -574,18 +636,10 @@ def main():
 
     article_reports = []
 
-    for gt_path in gt_files:
-        m = re.match(r"(\d+)-data\.json$", gt_path.name)
-        if not m:
-            continue
-        article_id = m.group(1)
-        out_candidates = sorted(out_dir.glob(f"{article_id}-*/*_extraction.json"))
-
-        if not out_candidates:
+    for article_id, gt_path, out_path in pairs_to_score:
+        if out_path is None:
             article_reports.append({"article_id": article_id, "status": "missing_output", "groundtruth_file": str(gt_path)})
             continue
-
-        out_path = out_candidates[0]
         gt_materials = load_materials(gt_path, args.drop_zero_elements, args.zero_eps)
         pred_materials = load_materials(out_path, args.drop_zero_elements, args.zero_eps)
 
@@ -599,6 +653,7 @@ def main():
         art_comp_val = {"count": 0, "sum_abs_err": 0.0, "max_abs_err": 0.0, "exact": 0, "within_tol": 0}
         art_test_det = {"tp": 0, "fp": 0, "fn": 0}
         art_test_val = {"count": 0, "sum_abs_err": 0.0, "max_abs_err": 0.0, "exact": 0, "within_tol": 0}
+        art_mat_full_hit = {"full_hit": 0, "total": 0}
 
         pair_details = []
 
@@ -622,6 +677,13 @@ def main():
             comp_errs = [abs(g_comp[e] - p_comp[e]) for e in inter]
             update_value_stats(art_comp_val, comp_errs, args.value_tol)
             update_value_stats(overall_comp_val, comp_errs, args.value_tol)
+
+            if gt_m is not None:
+                art_mat_full_hit["total"] += 1
+                overall_mat_full_hit["total"] += 1
+                if comp_fp == 0 and comp_fn == 0:
+                    art_mat_full_hit["full_hit"] += 1
+                    overall_mat_full_hit["full_hit"] += 1
 
             g_tests = [t for t in (gt_m.tests if gt_m else []) if t.value is not None]
             p_tests = [t for t in (pred_m.tests if pred_m else []) if t.value is not None]
@@ -771,6 +833,15 @@ def main():
                 "material_match_count": len(matches),
                 "composition_detection": finalize_detection(art_comp_det),
                 "composition_values": finalize_value(art_comp_val),
+                "material_full_hit": {
+                    "full_hit": art_mat_full_hit["full_hit"],
+                    "total": art_mat_full_hit["total"],
+                    "hit_rate": (
+                        art_mat_full_hit["full_hit"] / art_mat_full_hit["total"]
+                        if art_mat_full_hit["total"]
+                        else None
+                    ),
+                },
                 "test_detection": finalize_detection(art_test_det),
                 "test_values": finalize_value(art_test_val),
                 "material_pairs": pair_details,
@@ -806,12 +877,21 @@ def main():
         "overall": {
             "composition_detection": finalize_detection(overall_comp_det),
             "composition_values": finalize_value(overall_comp_val),
+            "material_full_hit": {
+                "full_hit": overall_mat_full_hit["full_hit"],
+                "total": overall_mat_full_hit["total"],
+                "hit_rate": (
+                    overall_mat_full_hit["full_hit"] / overall_mat_full_hit["total"]
+                    if overall_mat_full_hit["total"]
+                    else None
+                ),
+            },
             "test_detection": finalize_detection(overall_test_det),
             "test_values": finalize_value(overall_test_val),
         },
         "by_temperature": by_temperature,
         "by_property": by_property,
-        "articles": sorted(article_reports, key=lambda x: int(x["article_id"])),
+        "articles": sorted(article_reports, key=lambda x: article_sort_key(x["article_id"])),
     }
 
     report = round_floats(report, ndigits=6)

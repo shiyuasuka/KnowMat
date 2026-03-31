@@ -28,6 +28,8 @@ class DomainRules:
     property_name_mapping: Dict[str, str] = field(default_factory=dict)
     process_category_keywords: Dict[str, List[str]] = field(default_factory=dict)
     parameter_patterns: Dict[str, List[str]] = field(default_factory=dict)
+    commercial_alloy_aliases: Dict[str, List[str]] = field(default_factory=dict)
+    commercial_nominal_maps: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
     # Pre-compiled regexes (populated by _compile)
     _compiled_param_patterns: Dict[str, List[re.Pattern]] = field(
@@ -63,6 +65,8 @@ class DomainRules:
             property_name_mapping=raw.get("property_name_mapping", {}),
             process_category_keywords=raw.get("process_category_keywords", {}),
             parameter_patterns=raw.get("parameter_patterns", {}),
+            commercial_alloy_aliases=raw.get("commercial_alloy_aliases", {}),
+            commercial_nominal_maps=raw.get("commercial_nominal_maps", {}),
         )
         rules._compile()
         return rules

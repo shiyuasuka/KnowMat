@@ -251,3 +251,31 @@ parameter_patterns:
     - "(?:preheat|preheating|substrate)\\s+(?:temperature|temp)\\s*[=:]\\s*(\\d+(?:\\.\\d+)?)\\s*°?\\s*C"
   Oxygen_Content_ppm:
     - "oxygen\\s+(?:content\\s+)?(?:below|<|under)?\\s*(\\d+)\\s*ppm"
+
+# Configurable commercial alloy aliases and nominal composition maps.
+# These are used as a conservative fallback only when explicit nominal/measured
+# compositions are missing in extracted data.
+commercial_alloy_aliases:
+  ti6al4v:
+    - ti6al4v
+    - ti-6al-4v
+    - ti64
+  in718:
+    - in718
+    - inconel 718
+    - inconel718
+
+commercial_nominal_maps:
+  ti6al4v:
+    Ti: 90.0
+    Al: 6.0
+    V: 4.0
+  in718:
+    Ni: 52.99
+    Cr: 19.04
+    Fe: 18.20
+    Nb: 4.90
+    Mo: 2.73
+    Ti: 0.97
+    Al: 0.48
+    other: 0.69

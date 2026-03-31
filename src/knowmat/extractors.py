@@ -257,6 +257,22 @@ class Property(BaseModel):
             "For missing: null."
         )
     )
+
+    value_range: Optional[str] = Field(
+        default=None,
+        description=(
+            "Original textual range when the reported value is an interval, "
+            "e.g. '200-230'. Keep null for non-range values."
+        ),
+    )
+
+    value_stddev: Optional[float] = Field(
+        default=None,
+        description=(
+            "Standard deviation when a mean±std format is reported, e.g. 215±5 -> 5. "
+            "Keep null when not available."
+        ),
+    )
     
     value_type: str = Field(
         description=(
@@ -279,9 +295,9 @@ class Property(BaseModel):
         default=None,
         description=(
             "Conditions under which the property was measured. "
-            "CRITICAL: If a test temperature is mentioned, ALWAYS start with 'at XXX K' or 'at XXX °C'. "
+            "CRITICAL: If a test temperature is mentioned, ALWAYS start with 'at XXX K'. "
             "Then add other conditions (pressure, sample geometry, heating rate, strain rate). "
-            "Examples: 'at 298 K; strain rate 1e-3 /s', 'at 1073 K; heating rate 20 K/min; Ar atmosphere'. "
+            "Examples: 'at 298.15 K; strain rate 1e-3 /s', 'at 1073.15 K; heating rate 20 K/min; Ar atmosphere'. "
             "Use null if not provided."
         )
     )
@@ -303,6 +319,14 @@ class CompositionProperties(BaseModel):
         description="The chemical composition of the material as written in the paper (including any abbreviations)."
     )
 
+    alloy_name_raw: Optional[str] = Field(
+        default=None,
+        description=(
+            "Raw alloy name from source text, preserving commercial names and original formatting "
+            "(e.g., 'IN718', 'Ti-6Al-4V'). Use null if not explicitly provided."
+        ),
+    )
+
     role: Optional[str] = Field(
         default="Target",
         description=(
@@ -321,6 +345,37 @@ class CompositionProperties(BaseModel):
             "E.g., 'Ti42Hf21Nb21V16 (T42)' → 'Ti42Hf21Nb21V16', "
             "'FeCoCrNiMo0.5' → 'Fe22.22Co22.22Cr22.22Ni22.22Mo11.11'."
         )
+    )
+
+    nominal_composition: Optional[Dict[str, float]] = Field(
+        default=None,
+        description=(
+            "Nominal bulk composition by element when available. Use null if not provided."
+        ),
+    )
+
+    nominal_composition_type: Optional[str] = Field(
+        default=None,
+        description=(
+            "Composition unit for nominal_composition. Expected values: 'wt%' or 'at%'. "
+            "Use null when unknown."
+        ),
+    )
+
+    measured_composition: Optional[Dict[str, float]] = Field(
+        default=None,
+        description=(
+            "Measured composition by element (e.g., EDS/EPMA) when available. "
+            "Use null if not provided."
+        ),
+    )
+
+    measured_composition_type: Optional[str] = Field(
+        default=None,
+        description=(
+            "Composition unit for measured_composition. Expected values: 'wt%' or 'at%'. "
+            "Use null when unknown."
+        ),
     )
     
     source_doi: Optional[str] = Field(
@@ -370,7 +425,7 @@ class CompositionProperties(BaseModel):
             "Use standardised keys: "
             "Laser_Power_W (float), Scan_Speed_mm_s (float), "
             "Layer_Thickness_um (float), Hatch_Spacing_um (float), "
-            "Preheat_Temperature_C (float), Shielding_Gas (str, e.g. 'Ar'), "
+            "Preheat_Temperature_K (float), Shielding_Gas (str, e.g. 'Ar'), "
             "Oxygen_Content_ppm (float), Build_Orientation (str, e.g. 'Parallel-BD'). "
             "Include ONLY parameters with explicit values in the paper. "
             "Use null if no structured parameters can be extracted."

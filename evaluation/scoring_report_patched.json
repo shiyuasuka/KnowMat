@@ -1,0 +1,443 @@
+{
+  "config": {
+    "groundtruth_dir": "evaluation/groundtruth",
+    "output_dir": "evaluation/output_patched",
+    "value_tol": 0.1,
+    "drop_zero_elements": false,
+    "zero_eps": 0.0,
+    "temp_tol": 1.0,
+    "allow_celsius_shift": false,
+    "ignore_test_unit": false,
+    "material_match_use_tests": false
+  },
+  "overall": {
+    "composition_detection": {
+      "tp": 54,
+      "fp": 0,
+      "fn": 9,
+      "precision": 1.0,
+      "recall": 0.857143,
+      "f1": 0.923077
+    },
+    "composition_values": {
+      "count": 54,
+      "mae": 0.006667,
+      "max_abs_err": 0.18,
+      "exact_rate": 0.962963,
+      "within_tol_rate": 0.962963
+    },
+    "material_full_hit": {
+      "full_hit": 6,
+      "total": 7,
+      "hit_rate": 0.857143
+    },
+    "test_detection": {
+      "tp": 6,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    "test_values": {
+      "count": 6,
+      "mae": 0.0,
+      "max_abs_err": 0.0,
+      "exact_rate": 1.0,
+      "within_tol_rate": 1.0
+    }
+  },
+  "by_temperature": {
+    "298.15": {
+      "detection": {
+        "tp": 6,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "values": {
+        "count": 6,
+        "mae": 0.0,
+        "max_abs_err": 0.0,
+        "exact_rate": 1.0,
+        "within_tol_rate": 1.0
+      }
+    }
+  },
+  "by_property": {
+    "microhardness": {
+      "detection": {
+        "tp": 6,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "values": {
+        "count": 6,
+        "mae": 0.0,
+        "max_abs_err": 0.0,
+        "exact_rate": 1.0,
+        "within_tol_rate": 1.0
+      }
+    }
+  },
+  "articles": [
+    {
+      "article_id": "AYzJ5YexzHG1b1fwF_ul",
+      "status": "ok",
+      "groundtruth_file": "evaluation/groundtruth/AYzJ5YexzHG1b1fwF_ul.json",
+      "output_file": "evaluation/output_patched/AYzJ5YexzHG1b1fwF_ul/AYzJ5YexzHG1b1fwF_ul_extraction.json",
+      "material_match_count": 7,
+      "composition_detection": {
+        "tp": 54,
+        "fp": 0,
+        "fn": 9,
+        "precision": 1.0,
+        "recall": 0.857143,
+        "f1": 0.923077
+      },
+      "composition_values": {
+        "count": 54,
+        "mae": 0.006667,
+        "max_abs_err": 0.18,
+        "exact_rate": 0.962963,
+        "within_tol_rate": 0.962963
+      },
+      "material_full_hit": {
+        "full_hit": 6,
+        "total": 7,
+        "hit_rate": 0.857143
+      },
+      "test_detection": {
+        "tp": 6,
+        "fp": 0,
+        "fn": 0,
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1": 1.0
+      },
+      "test_values": {
+        "count": 6,
+        "mae": 0.0,
+        "max_abs_err": 0.0,
+        "exact_rate": 1.0,
+        "within_tol_rate": 1.0
+      },
+      "material_pairs": [
+        {
+          "gt_material": {
+            "mat_id": "M_Ti64_SLM_01",
+            "formula": null,
+            "alloy_name": "Ti6Al4V"
+          },
+          "pred_material": {
+            "mat_id": "M006",
+            "formula": "Ti:88.93, Al:6.40, V:4.10",
+            "alloy_name": "Ti6Al4V [As-Built]"
+          },
+          "pair_cost": 0.36,
+          "composition": {
+            "tp": 9,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": [
+              {
+                "element": "Fe",
+                "gt": 0.18,
+                "pred": 0.0,
+                "abs_err": 0.18
+              },
+              {
+                "element": "other",
+                "gt": 0.39,
+                "pred": 0.57,
+                "abs_err": 0.18
+              }
+            ]
+          },
+          "tests": [
+            {
+              "property_type": "microhardness",
+              "unit": "hv",
+              "gt_count": 1,
+              "pred_count": 1,
+              "tp": 1,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 402.0,
+                  "pred": 402.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298.15",
+                  "pred_temp_k": "298.15",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "gt_material": {
+            "mat_id": "M_IN718_SLM_01",
+            "formula": null,
+            "alloy_name": "IN718 (Inconel 718)"
+          },
+          "pred_material": {
+            "mat_id": "M001",
+            "formula": "Ni:52.99, Cr:19.04, Fe:18.20, Nb:4.90, Mo:2.73, Ti:0.97, Al:0.48",
+            "alloy_name": "IN718 [As-Built]"
+          },
+          "pair_cost": 0.0,
+          "composition": {
+            "tp": 9,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": []
+          },
+          "tests": [
+            {
+              "property_type": "microhardness",
+              "unit": "hv",
+              "gt_count": 1,
+              "pred_count": 1,
+              "tp": 1,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 255.0,
+                  "pred": 255.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298.15",
+                  "pred_temp_k": "298.15",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "gt_material": {
+            "mat_id": "M_Blend_10_01",
+            "formula": null,
+            "alloy_name": "Ti6Al4V + 10 wt% IN718"
+          },
+          "pred_material": {
+            "mat_id": "M005",
+            "formula": "Ti:83.10, Al:4.2, V:3.25, Ni:5.00, Cr:1.96, Fe:1.75, Nb:0.47, Mo:0.26",
+            "alloy_name": "Ti6Al4V-10wt%IN718 [As-Built]"
+          },
+          "pair_cost": 0.0,
+          "composition": {
+            "tp": 9,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": []
+          },
+          "tests": [
+            {
+              "property_type": "microhardness",
+              "unit": "hv",
+              "gt_count": 1,
+              "pred_count": 1,
+              "tp": 1,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 381.0,
+                  "pred": 381.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298.15",
+                  "pred_temp_k": "298.15",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "gt_material": {
+            "mat_id": "M_Blend_20_01",
+            "formula": null,
+            "alloy_name": "Ti6Al4V + 20 wt% IN718"
+          },
+          "pred_material": {
+            "mat_id": "M004",
+            "formula": "Ti:74.36, Al:3.85, V:2.91, Ni:10.00, Cr:3.92, Fe:3.50, Nb:0.95, Mo:0.53",
+            "alloy_name": "Ti6Al4V-20wt%IN718 [As-Built]"
+          },
+          "pair_cost": 0.0,
+          "composition": {
+            "tp": 9,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": []
+          },
+          "tests": [
+            {
+              "property_type": "microhardness",
+              "unit": "hv",
+              "gt_count": 1,
+              "pred_count": 1,
+              "tp": 1,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 477.0,
+                  "pred": 477.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298.15",
+                  "pred_temp_k": "298.15",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "gt_material": {
+            "mat_id": "M_Blend_30_01",
+            "formula": null,
+            "alloy_name": "Ti6Al4V + 30 wt% IN718"
+          },
+          "pred_material": {
+            "mat_id": "M003",
+            "formula": "Ti:64.74, Al:3.45, V:2.53, Ni:15.53, Cr:6.07, Fe:5.42, Nb:1.47, Mo:0.82",
+            "alloy_name": "Ti6Al4V-30wt%IN718 [As-Built]"
+          },
+          "pair_cost": 0.0,
+          "composition": {
+            "tp": 9,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": []
+          },
+          "tests": [
+            {
+              "property_type": "microhardness",
+              "unit": "hv",
+              "gt_count": 1,
+              "pred_count": 1,
+              "tp": 1,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 684.0,
+                  "pred": 684.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298.15",
+                  "pred_temp_k": "298.15",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "gt_material": {
+            "mat_id": "M_Blend_40_01",
+            "formula": null,
+            "alloy_name": "Ti6Al4V + 40 wt% IN718"
+          },
+          "pred_material": {
+            "mat_id": "M002",
+            "formula": "Ti:56.87, Al:3.13, V:2.22, Ni:20.00, Cr:9.80, Fe:7.00, Nb:1.89, Mo:1.05",
+            "alloy_name": "Ti6Al4V-40wt%IN718 [As-Built]"
+          },
+          "pair_cost": 0.0,
+          "composition": {
+            "tp": 9,
+            "fp": 0,
+            "fn": 0,
+            "missing_elements": [],
+            "extra_elements": [],
+            "value_errors": []
+          },
+          "tests": [
+            {
+              "property_type": "microhardness",
+              "unit": "hv",
+              "gt_count": 1,
+              "pred_count": 1,
+              "tp": 1,
+              "fp": 0,
+              "fn": 0,
+              "unmatched_gt": [],
+              "unmatched_pred": [],
+              "value_pairs": [
+                {
+                  "gt": 582.0,
+                  "pred": 582.0,
+                  "abs_err": 0.0,
+                  "gt_temp_k": "298.15",
+                  "pred_temp_k": "298.15",
+                  "temp_diff_k": 0.0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "gt_material": {
+            "mat_id": "M_Graded_01",
+            "formula": null,
+            "alloy_name": "Multigraded Ti6Al4V/IN718 (0-20 wt% IN718)"
+          },
+          "pred_material": {
+            "mat_id": "M007",
+            "formula": "Variable composition from Ti6Al4V to Ti6Al4V-20wt%IN718",
+            "alloy_name": "Graded Ti6Al4V-IN718 [As-Built]"
+          },
+          "pair_cost": 900.0,
+          "composition": {
+            "tp": 0,
+            "fp": 0,
+            "fn": 9,
+            "missing_elements": [
+              "Al",
+              "Cr",
+              "Fe",
+              "Mo",
+              "Nb",
+              "Ni",
+              "Ti",
+              "V",
+              "other"
+            ],
+            "extra_elements": [],
+            "value_errors": []
+          },
+          "tests": []
+        }
+      ]
+    }
+  ]
+}

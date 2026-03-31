@@ -9,85 +9,118 @@ GLOBAL PRIORITIES (HIGHEST TO LOWEST):
 3) No hallucination: never invent numbers that are not explicitly supported by text.
 4) Strict JSON compliance.
 
-CRITICAL RULE - SAMPLE DIFFERENTIATION:
+CRITICAL RULE - WHAT IS ONE ENTRY (ONE ITEM):
 ═══════════════════════════════════════════════════════════════════════════
-If the SAME base composition is tested under DIFFERENT conditions, create SEPARATE composition entries.
-Different conditions include:
-  - As-built vs heat-treated / aged / annealed
-  - Different loading/build directions (horizontal/vertical, parallel/perpendicular to BD)
-  - Different process windows (laser power, scan speed, etc.)
-  - Different post-treatments or test modes (tension vs compression)
+One extracted entry equals one unique (composition + process state) pair.
 
-Append condition tags in composition, e.g.:
-  'Ti42Hf21Nb21V16 [As-Built]'
-  'Ti42Hf21Nb21V16 [Annealed 973K/64h]'
-  'Nb15Ta10W75 [Vertical BD, Compression]'
-  'Nb15Ta10W75 [Horizontal BD, Compression]'
+Mandatory splitting rules:
+- If composition changes -> new entry.
+- If process state changes -> new entry.
+- If build/loading direction changes -> new entry.
+- If test mode changes (tension/compression) -> new entry.
+- If graded/stepwise material changes by layer/step composition -> each step is a separate entry.
+- For in-situ composites: treat matrix and reinforcement as separate composition entries when both are explicitly described.
 
-NEVER merge multiple directions/treatments into one composition entry.
+If the same (composition + process) has multiple test temperatures/strain rates/conditions,
+keep ONE composition entry and place all test points in `properties_of_composition`.
+
+Array rule:
+- The outer extraction array is `compositions` (internal schema), and each object inside it is one independent item.
+- Never merge multiple process states or direction states into one composition object.
+
+Append condition tags in composition when needed, e.g.:
+- 'Ti42Hf21Nb21V16 [As-Built]'
+- 'Ti42Hf21Nb21V16 [Annealed 973.15 K/64 h]'
+- 'Nb15Ta10W75 [Vertical BD, Compression]'
+- 'Nb15Ta10W75 [Horizontal BD, Compression]'
+═══════════════════════════════════════════════════════════════════════════
+
+CRITICAL RULE - DATA SOURCE, PRECISION, AND TEMPERATURE:
+═══════════════════════════════════════════════════════════════════════════
+- Extract only from: body text, tables, figure/table captions, and body text that describes figures.
+- Do NOT read chart pixel coordinates or infer values from plotted points.
+- Preserve numeric precision exactly in `value` (same decimal places as source text).
+- Convert all process/test temperatures to Kelvin for normalized fields.
+- Temperature conversion must use: K = C + 273.15.
+- RT/room temperature/ambient must map to 298.15 K.
 ═══════════════════════════════════════════════════════════════════════════
 
 EXTRACTION INSTRUCTIONS FOR COMPOSITION FIELDS:
 ═══════════════════════════════════════════════════════════════════════════
 For each composition entry, extract:
 
-1. source_doi:
-   Extract DOI from title/header/footer/body if present.
-   Format: '10.XXXX/...' (e.g., '10.1016/j.msea.2024.147225'). Use null if missing.
+1) source_doi:
+- Extract DOI from title/header/footer/body if present.
+- Format: '10.XXXX/...'. Use null if missing.
 
-2. composition_normalized:
-   Use ONLY element symbols + numeric atomic percentages.
-   Remove abbreviations and sample codes from this field.
+2) composition and alloy_name_raw:
+- `composition`: readable entry label (can include sample code and condition tags).
+- `alloy_name_raw`: original raw alloy name text from paper (commercial names preserved exactly).
 
-   SPECIAL CASE - VARIABLE COMPOSITIONS (e.g. "FeCoCrNiMox"):
-   - If x variants are reported (e.g., x = 0, 0.1, 0.3, 0.5), create SEPARATE Target entries for each variant.
-   - If at% values are provided, convert to numeric at%.
-   - If only formula coefficients are given (e.g., FeCoCrNiMo0.5), compute atomic percentages by stoichiometric ratio.
-     Example: Fe:Co:Cr:Ni:Mo = 1:1:1:1:0.5, total=4.5, so Mo=11.11 at% and Fe/Co/Cr/Ni=22.22 at% each.
-   - If sample codes like Mo0/Mo1/Mo3/Mo5 are explicitly tied to x values, you MUST output separate entries for each code.
-   - Keep sample code in `composition` for readability, but keep `composition_normalized` numeric only.
-   - If composition text uses "Bal.", compute the balance element as 100 - sum(other elements).
-   - Prefer nominal bulk alloy composition used for tests; do NOT replace with local EDS spot composition unless bulk composition is absent.
+3) composition_normalized:
+- Use ONLY element symbols + numeric composition values (prefer at% normalized representation when inferable).
+- Remove abbreviations/sample codes from this field.
 
-3. composition-splitting for chemistry variants:
-   If a paper contains base alloy and modified alloy (e.g., carbon/WC-added variant), create separate compositions.
-   Never merge chemically different alloys into one entry.
-   - Parenthetical/suffixed formulas (e.g., (Nb15Ta10W75)98.5C1.5, Alloy-A+C) are independent compositions and must not be merged into base alloy.
+Variable composition families (e.g., FeCoCrNiMox):
+- If x variants are reported (x=0/0.1/0.3/0.5 etc.), create SEPARATE Target entries for each variant.
+- If only formula coefficients are given (e.g., FeCoCrNiMo0.5), normalize by stoichiometric ratio to 100.
+  Example: 1:1:1:1:0.5 -> Fe/Co/Cr/Ni=22.22, Mo=11.11.
+- If sample codes like Mo0/Mo1/Mo3/Mo5 map to x values, each code must have its own entry.
+- Keep sample code in `composition`; keep `composition_normalized` numeric-only.
 
-4. main_phase:
-   Primary crystal structure (BCC/FCC/HCP/amorphous or combinations) from XRD/EBSD/TEM/SAED.
+4) nominal/measured composition and composition type:
+- Distinguish nominal and measured composition whenever available.
+- Fill these fields per entry:
+  - `nominal_composition` (object or null)
+  - `nominal_composition_type` ('wt%' | 'at%' | null)
+  - `measured_composition` (object or null)
+  - `measured_composition_type` ('wt%' | 'at%' | null)
 
-5. has_precipitates:
-   true if any precipitate/secondary phase is reported.
+Composition-type rules:
+- If source explicitly states wt% or at%, keep that exact type.
+- If unstated, infer using context and common convention for that alloy family.
+- If composition is reported in a fixed-column table, preserve the full column set for each row:
+  explicit 0.00 values must be kept and must not be dropped.
+- For measured composition rows that omit one obvious matrix/base element while other elements are listed,
+  infer the missing matrix element by balance-to-100 only when this is clearly a row-total composition table.
+- For mature commercial alloys with no numeric composition in the full paper
+  (e.g., Inconel 718, 316L, Ti-6Al-4V): keep `alloy_name_raw`, set
+  `composition_normalized`, `nominal_composition`, and `measured_composition` to null.
 
-6. grain_size_avg_um:
-   Average grain size in um. Convert nm to um.
+5) normalization and balance completion:
+- For formula-style compositions, normalize to total 100.0.
+- For explicitly reported wt%/at% tables that do not sum to 100, stay faithful to source,
+  and add `other` component to make total 100.0.
+- If composition text includes 'Bal.' or balance notation, compute balance element accordingly.
 
-7. grain_size_text:
-   Original textual grain-size evidence (method/condition aware).
+6) phase and microstructure fields:
+- `main_phase`: primary crystal structure(s) from XRD/EBSD/TEM/SAED.
+- `has_precipitates`: true if any precipitate/secondary phase is reported.
+- `grain_size_avg_um`: average grain size in um (convert nm to um).
+- `grain_size_text`: original grain-size evidence text.
 
-8. process_category:
-   One of AM_DED, AM_LPBF, AM_SLM, SPS, Arc_Melting, HeatTreat, Casting, Unknown.
+7) process and characterization fields:
+- `process_category`: one of AM_DED, AM_LPBF, AM_SLM, SPS, Arc_Melting, HeatTreat, Casting, Unknown.
+- `processing_params`: structured parameters with explicit values only.
+  Preferred keys include:
+  Laser_Power_W, Scan_Speed_mm_s, Layer_Thickness_um, Hatch_Spacing_um,
+  Preheat_Temperature_K, Solution_Temperature_K, Aging_Temperature_K,
+  Shielding_Gas, Oxygen_Content_ppm, Build_Orientation.
+- Energy density extraction rule:
+  when multiple supported energy-density values exist for the same condition across text/sections,
+  keep all supported values. Use range strings when needed (e.g., "120-160"), and separate
+  full-densification threshold from selected/optimal value.
+- `build_orientation`: direction marker (Parallel-BD, Perpendicular-BD, Horizontal, Vertical, etc.).
+- `xrd_details`: XRD instrument/phase ID details only.
+- `processing_conditions`: detailed process narrative for AI usage (must be rich and specific).
+- `microstructure_description`: detailed morphology and mechanism narrative, including
+  phase morphology, grain morphology/distribution, precipitate location/type, segregation,
+  defects, orientation effects, and condition dependence when available.
 
-9. processing_params:
-   Structured JSON with explicit values only.
-   Preferred keys:
-   Laser_Power_W, Scan_Speed_mm_s, Layer_Thickness_um, Hatch_Spacing_um,
-   Preheat_Temperature_C, Shielding_Gas, Oxygen_Content_ppm, Build_Orientation.
-
-10. build_orientation:
-   Direction marker (Parallel-BD, Perpendicular-BD, Horizontal, Vertical, etc.).
-
-11. xrd_details:
-    XRD instrument/phase ID details only.
-
-12. microstructure_description:
-    Morphology and microstructural evidence from SEM/EBSD/TEM.
-
-13. role:
-    - Target: synthesized/processed/tested in THIS paper
-    - Reference: only cited from other work
-    Default to Target when uncertain but data appears from this paper.
+8) role:
+- Target: synthesized/processed/tested in THIS paper.
+- Reference: only cited from other work.
+- Default to Target when uncertain but data appears from this paper.
 ═══════════════════════════════════════════════════════════════════════════
 
 CRITICAL RULE - PERFORMANCE EXTRACTION PROTOCOL:
@@ -95,141 +128,152 @@ CRITICAL RULE - PERFORMANCE EXTRACTION PROTOCOL:
 For each Target composition entry, perform this protocol mentally before final JSON:
 
 A) Identify test mode per data block
-   - If context says tensile/tension/uniaxial tensile -> tensile properties.
-   - If context says compression/compressive/hot compression -> compressive properties.
-   - Never map compressive data to tensile property names.
-   - If data source is Introduction/Literature review/comparison with citations, treat as Reference context by default.
-     Extract performance values only when they belong to THIS paper's own tested samples.
-   - If a value is in a sentence containing "reported", "previous", "literature", or citation-only comparison language,
-     treat it as external reference unless explicitly marked as this paper's own sample.
+- If context says tensile/tension/uniaxial tensile -> tensile properties.
+- If context says compression/compressive/hot compression -> compressive properties.
+- Never map compressive data to tensile property names.
+- If data source is Introduction/Literature review/comparison with citations, treat as Reference context by default.
+  Extract performance values only when they belong to THIS paper's own tested samples.
+- If a value is in a sentence containing "reported", "previous", "literature", or citation-only comparison language,
+  treat it as external reference unless explicitly marked as this paper's own sample.
 
 B) Normalize temperature in measurement_condition
-   - measurement_condition MUST start with: 'at XXX K; ...' when temperature is known.
-   - Convert C to K with K = C + 273.
-   - Room temperature / RT / ambient -> 298 K.
-   - Keep other conditions after semicolon (strain rate, atmosphere, orientation, etc.).
-   - Temperature provenance rule: assign a test temperature only when that temperature is explicitly tied to a mechanical property
-     value in the same table row/column context or the same sentence.
-   - Never use process temperatures (annealing/solutionizing/sintering/aging/heat-treatment) as mechanical test temperature
-     unless the text explicitly states the test was performed at that temperature.
+- measurement_condition MUST start with: 'at XXX K; ...' when temperature is known.
+- Convert C to K with K = C + 273.15.
+- Room temperature / RT / ambient -> 298.15 K.
+- Keep other conditions after semicolon (strain rate, atmosphere, orientation, etc.).
+- Temperature provenance rule: assign a test temperature only when that temperature is explicitly tied to a mechanical property
+  value in the same table row/column context or the same sentence.
+- Never use process temperatures (annealing/solutionizing/sintering/aging/heat-treatment) as mechanical test temperature
+  unless the text explicitly states the test was performed at that temperature.
 
 C) Exhaustive table extraction (recall-critical)
-   - For each sample row and each temperature condition, output all available property columns.
-   - If a table has multiple samples (e.g., Mo0/Mo1/Mo3/Mo5), do not stop after first row.
-   - If a table has multiple temperatures (e.g., RT/600C/700C/800C), extract each temperature.
-   - If a table has two axes of conditions (e.g., direction + heat-treatment + temperature), keep full condition tuple and do not collapse.
-   - If OCR breaks table layout, reconstruct using:
-     1) nearby table title/caption,
-     2) header order,
-     3) row labels,
-     4) corroborating narrative text.
-   - Header locking rule (mandatory): assign each value by the exact column header it sits under.
-     Never move a value horizontally to another property column just to "make it look reasonable".
-   - Temperature locking rule (mandatory): when multiple temperatures are columns/rows, bind each value to the
-     temperature header in the same row/column intersection. Never swap 77K/298K (or any two temperatures).
-   - Unit locking rule (mandatory): MPa/GPa columns map only to strength properties; % columns map only to elongation/strain.
-     Never fill strength from a % column, and never fill elongation from an MPa/GPa column.
-   - If test mode keywords are missing but columns contain YS/UTS/El./UE/TE with MPa/% units, treat as tensile block.
-     If columns contain CYS/UCS/compressive strain, treat as compressive block.
-   - If a table/caption lists temperature headers (e.g., RT, 600C, 700C, 800C, 900C), build the full temperature set first,
-     convert to Kelvin, then extract each sample across this full set (do not skip mid/high-temperature columns).
-   - Row locking rule (mandatory): keep values within the same sample row; never borrow values from adjacent rows/samples.
-   - Strength-column disambiguation rule: keep Yield_Strength from YS/σ0.2/Rp0.2 columns only;
-     keep Ultimate_Tensile_Strength (or Ultimate_Strength_Compressive) from UTS/UCS/σb/σm columns only.
-     Never map UTS/UCS column values into yield fields.
-   - Cell exclusivity rule: one table cell value can map to only one (property, temperature, sample) slot.
-     Never reuse the same numeric cell for multiple property names in the same row.
-   - Property-family completeness rule: when a block provides multiple related columns (e.g., YS+UTS+El or CYS+UCS+strain),
-     extract all available columns for that same row-temperature slot instead of only one/two columns.
-   - Variant-family sweep rule: for sample families like Mo0/Mo1/Mo3/Mo5 (or similar coded variants),
-     iterate through every variant row explicitly and complete extraction for each; do not stop after first matched variant.
-   - If value-column mapping is ambiguous after reconstruction, keep only values with high confidence and do NOT guess.
-   - Never use a temperature token itself (e.g., 900) as a strength value unless explicitly labeled as MPa property value.
-   - Never copy a number from the temperature column into strength/elongation columns.
+- For each sample row and each temperature condition, output all available property columns.
+- If a table has multiple samples (e.g., Mo0/Mo1/Mo3/Mo5), do not stop after first row.
+- If a table has multiple temperatures (e.g., RT/600C/700C/800C), extract each temperature.
+- If a table has two axes of conditions (e.g., direction + heat-treatment + temperature), keep full condition tuple and do not collapse.
+- If OCR breaks table layout, reconstruct using:
+  1) nearby table title/caption,
+  2) header order,
+  3) row labels,
+  4) corroborating narrative text.
+- Header locking rule (mandatory): assign each value by the exact column header it sits under.
+  Never move a value horizontally to another property column just to "make it look reasonable".
+- Temperature locking rule (mandatory): when multiple temperatures are columns/rows, bind each value to the
+  temperature header in the same row/column intersection. Never swap 77K/298.15K (or any two temperatures).
+- Unit locking rule (mandatory): MPa/GPa columns map only to strength properties; % columns map only to elongation/strain.
+  Never fill strength from a % column, and never fill elongation from an MPa/GPa column.
+- If test mode keywords are missing but columns contain YS/UTS/El./UE/TE with MPa/% units, treat as tensile block.
+  If columns contain CYS/UCS/compressive strain, treat as compressive block.
+- If a table/caption lists temperature headers (e.g., RT, 600C, 700C, 800C, 900C), build the full temperature set first,
+  convert to Kelvin, then extract each sample across this full set (do not skip mid/high-temperature columns).
+- Row locking rule (mandatory): keep values within the same sample row; never borrow values from adjacent rows/samples.
+- Strength-column disambiguation rule: keep Yield_Strength from YS/σ0.2/Rp0.2 columns only;
+  keep Ultimate_Tensile_Strength (or Ultimate_Strength_Compressive) from UTS/UCS/σb/σm columns only.
+  Never map UTS/UCS column values into yield fields.
+- Cell exclusivity rule: one table cell value can map to only one (property, temperature, sample) slot.
+  Never reuse the same numeric cell for multiple property names in the same row.
+- Property-family completeness rule: when a block provides multiple related columns (e.g., YS+UTS+El or CYS+UCS+strain),
+  extract all available columns for that same row-temperature slot instead of only one/two columns.
+- Variant-family sweep rule: for sample families like Mo0/Mo1/Mo3/Mo5 (or similar coded variants),
+  iterate through every variant row explicitly and complete extraction for each; do not stop after first matched variant.
+- If value-column mapping is ambiguous after reconstruction, keep only values with high confidence and do NOT guess.
+- Never use a temperature token itself (e.g., 900) as a strength value unless explicitly labeled as MPa property value.
+- Never copy a number from the temperature column into strength/elongation columns.
 
-   Matrix completeness self-check (mandatory):
-   - Infer expected matrix dimensions from table header/caption:
-     samples x temperatures x property-columns.
-   - If your extracted count is far below expected (e.g., clearly missing many rows/columns), do a second extraction pass.
-   - For condition tuples like AB-H / AB-V / HT-H / HT-V, ensure separate composition entries and separate property sets.
-   - For composition families (Mo0/Mo1/Mo3/Mo5), ensure each family member keeps only its own rows.
+Matrix completeness self-check (mandatory):
+- Infer expected matrix dimensions from table header/caption: samples x temperatures x property-columns.
+- If your extracted count is far below expected (e.g., clearly missing many rows/columns), do a second extraction pass.
+- For condition tuples like AB-H / AB-V / HT-H / HT-V, ensure separate composition entries and separate property sets.
+- For composition families (Mo0/Mo1/Mo3/Mo5), ensure each family member keeps only its own rows.
 
 D) Property naming rules (use these exact names in property_name when applicable)
-   Tensile:
-   - Yield_Strength
-   - Ultimate_Tensile_Strength
-   - Elongation
-   - Uniform_Elongation
-   - Total_Elongation
-   - Fracture_Strain
+Tensile:
+- Yield_Strength
+- Ultimate_Tensile_Strength
+- Elongation
+- Uniform_Elongation
+- Total_Elongation
+- Fracture_Strain
 
-   Compressive:
-   - Yield_Strength_Compressive
-   - Ultimate_Strength_Compressive
-   - Elongation_Compressive
+Compressive:
+- Yield_Strength_Compressive
+- Ultimate_Strength_Compressive
+- Elongation_Compressive
 
-   For compression mode, these are mandatory:
-   - ALWAYS use *_Compressive names for yield/ultimate/elongation.
-   - NEVER use Ultimate_Compressive_Strength.
-   - NEVER use Fracture_Strain as a substitute for compression elongation unless paper explicitly says fracture strain.
+For compression mode, these are mandatory:
+- ALWAYS use *_Compressive names for yield/ultimate/elongation.
+- NEVER use Ultimate_Compressive_Strength.
+- NEVER use Fracture_Strain as a substitute for compression elongation unless paper explicitly says fracture strain.
 
-   Symbol mapping guidance:
-   - Tensile: YS or σy -> Yield_Strength; UTS or σb -> Ultimate_Tensile_Strength; UFE -> Uniform_Elongation; TE -> Total_Elongation.
-   - Compressive: σ0.2/CYS/compressive yield -> Yield_Strength_Compressive;
-                  σm/UCS/ultimate compressive -> Ultimate_Strength_Compressive;
-                  εf/fracture strain in compression/compressive strain -> Elongation_Compressive.
-   - Additional aliases:
-     UE/UEL/uniform strain -> Uniform_Elongation
-     TE/TEL/total strain -> Total_Elongation
-     tensile fracture strain / εf (tensile context) -> Fracture_Strain
+Symbol mapping guidance:
+- Tensile: YS or σy -> Yield_Strength; UTS or σb -> Ultimate_Tensile_Strength; UFE -> Uniform_Elongation; TE -> Total_Elongation.
+- Compressive: σ0.2/CYS/compressive yield -> Yield_Strength_Compressive;
+               σm/UCS/ultimate compressive -> Ultimate_Strength_Compressive;
+               εf/fracture strain in compression/compressive strain -> Elongation_Compressive.
+- Additional aliases:
+  UE/UEL/uniform strain -> Uniform_Elongation
+  TE/TEL/total strain -> Total_Elongation
+  tensile fracture strain / εf (tensile context) -> Fracture_Strain
 
-   Important disambiguation:
-   - Use Elongation when table/text only says elongation/ductility with no "uniform/total".
-   - Use Uniform_Elongation only when explicitly stated as UFE/uniform elongation.
-   - Use Total_Elongation only when explicitly stated as TE/total elongation.
-   - If explicitly labeled "fracture strain" (tensile context), map to Fracture_Strain, not Elongation.
-   - Do NOT replace elongation with fracture strain unless explicitly "fracture strain".
-   - Do NOT map UTS/σb (or UCS/σm) into Yield_Strength fields.
-   - Strength plausibility guard: if a candidate strength value is in the typical elongation range (e.g., single/two-digit %-like numbers)
-     while neighboring strength columns contain MPa-level values, treat it as column mismatch and do not assign it to strength.
-   - Consistency check: when both YS and UTS are available for the same slot and YS > UTS, re-check header mapping;
-     if still ambiguous, keep only high-confidence value(s) instead of forcing both.
-   - Do NOT output Elastic_Modulus / elasticmodulus for this task unless the schema explicitly requests it.
+Important disambiguation:
+- Use Elongation when table/text only says elongation/ductility with no "uniform/total".
+- Use Uniform_Elongation only when explicitly stated as UFE/uniform elongation.
+- Use Total_Elongation only when explicitly stated as TE/total elongation.
+- If explicitly labeled "fracture strain" (tensile context), map to Fracture_Strain, not Elongation.
+- Do NOT replace elongation with fracture strain unless explicitly "fracture strain".
+- Do NOT map UTS/σb (or UCS/σm) into Yield_Strength fields.
+- Strength plausibility guard: if a candidate strength value is in the typical elongation range (e.g., single/two-digit %-like numbers)
+  while neighboring strength columns contain MPa-level values, treat it as column mismatch and do not assign it to strength.
+- Consistency check: when both YS and UTS are available for the same slot and YS > UTS, re-check header mapping;
+  if still ambiguous, keep only high-confidence value(s) instead of forcing both.
+- Do NOT output Elastic_Modulus / elasticmodulus for this task unless the schema explicitly requests it.
 
-E) Avoid false positives in properties_of_composition
-   - Do NOT add publication metadata (year/ref/table index).
-   - Do NOT add microstructure-only numeric descriptors (e.g., lattice parameter, misorientation, local lattice strain)
-     as performance properties.
-   - Keep non-performance characterization evidence in microstructure/xrd/characterisation fields.
-   - Numeric whitelist for `value_numeric` (non-null): only use for mechanical performance properties in section D.
-     For other properties, set `value_numeric` to null or omit from properties_of_composition.
-   - Exclude chart points/legend values for external alloys in comparison figures; keep only this paper's own alloy curves/rows.
-   - Duplicate suppression rule: for the same (composition, property_name, temperature, test mode),
-     keep exactly one record. If the same value appears in table and narrative, keep one and prefer table evidence.
-   - If two conflicting values appear for the same slot, prefer the value directly aligned with table header+row labels;
-     do not keep both.
-   - Evidence priority: when table value and narrative value conflict for the same slot, prefer the table value from the same row/column.
-   - Digit integrity rule: keep decimal points/signs as written; do not concatenate nearby tokens into a new number.
-   - Temperature hallucination guard: do not create new temperatures from standalone process-condition statements.
-     If a temperature appears without an associated measured property value, do not output it as a test point.
-   - Over-generation guard: if extracted rows for a property greatly exceed table-declared temperature/sample combinations,
-     remove low-confidence duplicates and keep one value per unique slot.
+E) Range and standard deviation handling (mandatory)
+- If source value is a range (e.g., 200-230):
+  - keep `value` as original range string ("200-230"),
+  - set `value_type` = "range",
+  - set `value_numeric` = midpoint (215),
+  - set `value_range` = original range string.
+- If source value is mean ± std (e.g., 215±5):
+  - keep `value` as original string,
+  - set `value_numeric` = 215,
+  - set `value_stddev` = 5.
+- Preserve source decimal precision in `value` exactly.
 
-F) Mandatory recall rescue pass (last step before output)
-   - If any Target composition has zero mechanical properties while the paper contains mechanical tables/curves,
-     run a second pass focused on that composition and recover missing rows.
-   - For each composition-temperature slot in a mechanical table, verify at least the available core properties are captured:
-     tensile blocks -> YS/UTS/(El or UE/TE/fracture strain when provided);
-     compressive blocks -> CYS/UCS/compressive strain when provided.
-   - If 973K/1073K/1173K (or their Celsius equivalents) appear in headers/text but are absent in output, re-scan and fill them.
-   - If any chemistry variant named in a property table has no corresponding composition entry, create that composition and re-attach its rows.
-   - If 1373K/1573K are extracted, verify they come from actual test rows (not heat-treatment context); otherwise remove them.
-   - If one composition in a shared table has near-complete extraction but another composition from the same table is sparse/empty,
-     run a composition-specific recovery pass for the sparse one.
-   - Cross-variant temperature completion: if one variant has values at a temperature that is listed for all variants in the same table,
-     re-check missing variants at that temperature before final output.
-   - For paired-temperature narrative statements (e.g., RT vs 77K), bind each value to the nearest explicit temperature token and
-     do not swap value groups across temperatures.
+F) Avoid false positives in properties_of_composition
+- Do NOT add publication metadata (year/ref/table index).
+- Do NOT add microstructure-only numeric descriptors (e.g., lattice parameter, misorientation, local lattice strain)
+  as performance properties.
+- Keep non-performance characterization evidence in microstructure/xrd/characterisation fields.
+- Numeric whitelist for `value_numeric` (non-null): only use for mechanical performance properties in section D.
+  For other properties, set `value_numeric` to null or omit from properties_of_composition.
+- Exclude chart points/legend values for external alloys in comparison figures; keep only this paper's own alloy curves/rows.
+- Duplicate suppression rule: for the same (composition, property_name, temperature, test mode),
+  keep exactly one record. If the same value appears in table and narrative, keep one and prefer table evidence.
+- If two conflicting values appear for the same slot, prefer the value directly aligned with table header+row labels;
+  do not keep both.
+- Evidence priority: when table value and narrative value conflict for the same slot, prefer the table value from the same row/column.
+- Digit integrity rule: keep decimal points/signs as written; do not concatenate nearby tokens into a new number.
+- Temperature hallucination guard: do not create new temperatures from standalone process-condition statements.
+  If a temperature appears without an associated measured property value, do not output it as a test point.
+- Over-generation guard: if extracted rows for a property greatly exceed table-declared temperature/sample combinations,
+  remove low-confidence duplicates and keep one value per unique slot.
+
+G) Mandatory recall rescue pass (last step before output)
+- If any Target composition has zero mechanical properties while the paper contains mechanical tables/curves,
+  run a second pass focused on that composition and recover missing rows.
+- For each composition-temperature slot in a mechanical table, verify at least the available core properties are captured:
+  tensile blocks -> YS/UTS/(El or UE/TE/fracture strain when provided);
+  compressive blocks -> CYS/UCS/compressive strain when provided.
+- If 973K/1073K/1173K (or their Celsius equivalents) appear in headers/text but are absent in output, re-scan and fill them.
+- If any chemistry variant named in a property table has no corresponding composition entry, create that composition and re-attach its rows.
+- If 1373K/1573K are extracted, verify they come from actual test rows (not heat-treatment context); otherwise remove them.
+- If one composition in a shared table has near-complete extraction but another composition from the same table is sparse/empty,
+  run a composition-specific recovery pass for the sparse one.
+- Cross-variant temperature completion: if one variant has values at a temperature that is listed for all variants in the same table,
+  re-check missing variants at that temperature before final output.
+- For paired-temperature narrative statements (e.g., RT vs 77K), bind each value to the nearest explicit temperature token and
+  do not swap value groups across temperatures.
 ═══════════════════════════════════════════════════════════════════════════
 
 CRITICAL RULE - BUILD DIRECTION / ANISOTROPY:
@@ -241,7 +285,7 @@ Do not merge horizontal and vertical (or parallel/perpendicular) test results.
 WHEN EXTRACTING PROPERTIES:
 1. Keep one composition entry per unique sample condition.
 2. Record each property with property_name, value, value_numeric, value_type, unit, measurement_condition.
-3. Preserve inequalities/ranges in `value`; keep parsed numeric in `value_numeric` when possible.
+3. For ranges, also fill `value_range`; for ± values, also fill `value_stddev`.
 4. Use null for genuinely missing values.
 5. Keep output strictly machine-readable JSON.
 
@@ -251,8 +295,13 @@ Return valid JSON strictly matching this schema:
   "compositions": [
     {
       "composition": "string",
+      "alloy_name_raw": "string or null",
       "role": "Target or Reference",
       "composition_normalized": "string or null",
+      "nominal_composition": "object or null",
+      "nominal_composition_type": "wt%|at%|null",
+      "measured_composition": "object or null",
+      "measured_composition_type": "wt%|at%|null",
       "source_doi": "string or null",
       "main_phase": "string or null",
       "has_precipitates": "boolean",
@@ -276,6 +325,8 @@ Return valid JSON strictly matching this schema:
           "value": "string or null",
           "value_numeric": "float or null",
           "value_type": "exact|lower_bound|upper_bound|range|qualitative|missing",
+          "value_range": "string or null",
+          "value_stddev": "float or null",
           "unit": "string or null",
           "measurement_condition": "string or null",
           "additional_information": "string or null"
