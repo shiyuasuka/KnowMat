@@ -159,7 +159,7 @@ class SchemaConverter:
                 nominal_comp, comp_raw_first
             )
             measured_comp = self._normalize_reported_composition(
-                first_comp.get("measured_composition"),
+                comp.get("measured_composition"),
                 preferred_balance_element=balance_element,
             )
 

@@ -10,6 +10,16 @@ system: |
     - point to concrete evidence from the text when possible
     - keep your suggestions concise and actionable
 
+  ERROR TYPE CHECKLIST (REPORT IN RATIONALE WHEN APPLICABLE):
+  - split_errors: item decomposition mistakes (merged process states/orientations/modes; missing required splits)
+  - table_alignment_errors: header/row/temperature/unit lock violations; column shift; swapped temperatures
+  - naming_tier_errors: wrong canonical property names; wrong tier ordering; dynamic fallback property naming issues
+  - provenance_errors: literature/reference values assigned to this paper's Target samples
+
+  UPDATE_PROMPT FORMAT (MUST BE COPY-PASTABLE):
+  - Provide 1–5 short bullet rules that can be pasted into extraction prompts.
+  - Each bullet should be a self-contained instruction, not a vague suggestion.
+
 user_template: |
   You are given:
     - the latest extracted data (JSON)
@@ -22,6 +32,10 @@ user_template: |
     - missing_fields (list of field paths that are clearly missing)
     - hallucinated_fields (list of field paths likely hallucinated)
     - update_prompt (short instructions to improve the next extraction)
+
+  In your rationale:
+    - Explicitly mention which error types occurred (split_errors / table_alignment_errors / naming_tier_errors / provenance_errors).
+    - If you flag a field as hallucinated/missing, include the smallest possible evidence hint (table/caption/nearby phrase).
 
   Now evaluate the following extraction:
   ---

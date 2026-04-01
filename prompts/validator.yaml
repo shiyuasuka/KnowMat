@@ -11,6 +11,16 @@ system: |
   3) Ensure all properties follow ML-ready format (value/value_numeric/value_type)
   4) Generate specific human review guidance for remaining uncertainties
 
+  AUTOMATIC vs HUMAN REVIEW BOUNDARY (MANDATORY):
+  - OK to auto-correct when unambiguous:
+    - property naming alias normalization (canonical names, compressive vs tensile suffix)
+    - temperature unit normalization (C -> K; RT -> 298.15 K) when evidence clearly ties to a test condition
+    - range/stddev field completion for already-extracted values (a-b midpoint; mean±std parsing)
+  - MUST request human review (do not guess) when ambiguous:
+    - provenance ambiguity (Target vs Reference) for a numeric value
+    - table alignment ambiguity (unclear header/row/temperature binding)
+    - item decomposition ambiguity (whether two states are same process condition)
+
   HALLUCINATION CORRECTION & TRACKING LOGIC:
   - If NO run marks a field as hallucinated, keep it.
   - If ANY run marks it hallucinated, inspect correction clues in rationale.
@@ -79,6 +89,9 @@ validation_tail: |
   - Numbered list of specific items to verify
   - Focus on corrected hallucinations, unusual values, or ambiguous data
   - Be specific: mention composition names, property names, and values
+  - Each item MUST include an evidence_hint (short pointer like: "Table 2 row X col Y", "Caption of Fig.3", or nearest phrase)
+  - Use the smallest verifiable unit:
+    composition + property_name + value + measurement_condition + evidence_hint
 
   Use the tool to provide your validated output.
   ════════════════════════════════════════════════════════════════════════════════

@@ -553,6 +553,31 @@ def build_markdown_report(report: Dict, output_json_path: Path) -> str:
     return "\n".join(lines)
 
 
+def normalize_article_id(raw_stem: str) -> str:
+    """Normalize GT file stems to canonical article ids.
+
+    Examples:
+    - AYzJ_xxx_extraction-订正 -> AYzJ_xxx
+    - AYzJ_xxx_extraction -> AYzJ_xxx
+    - AYzJ_xxx-订正 -> AYzJ_xxx
+    """
+    stem = raw_stem.strip()
+    # Remove common revision/extraction suffixes from manually corrected GT files.
+    stem = re.sub(r"(?i)_extraction[-_]?订正$", "", stem)
+    stem = re.sub(r"(?i)_extraction$", "", stem)
+    stem = re.sub(r"[-_]?订正$", "", stem)
+    return stem or raw_stem
+
+
+def article_id_candidates(raw_stem: str) -> List[str]:
+    """Return matching candidates in priority order."""
+    normalized = normalize_article_id(raw_stem)
+    ordered = [raw_stem]
+    if normalized not in ordered:
+        ordered.append(normalized)
+    return ordered
+
+
 def discover_pairs(gt_dir: Path, out_dir: Path) -> List[Tuple[str, Path, Optional[Path]]]:
     # Legacy style: groundtruth/1-data.json
     legacy_gt = sorted(gt_dir.glob("*-data.json"))
@@ -570,12 +595,16 @@ def discover_pairs(gt_dir: Path, out_dir: Path) -> List[Tuple[str, Path, Optiona
     # Generic style: groundtruth/<id>.json with output/<id>/<id>_extraction.json
     generic_gt = sorted(p for p in gt_dir.glob("*.json") if not p.name.startswith("."))
     for gt_path in generic_gt:
-        article_id = gt_path.stem
+        raw_article_id = gt_path.stem
+        candidate_ids = article_id_candidates(raw_article_id)
+        article_id = normalize_article_id(raw_article_id)
         candidates = []
-        candidates += sorted(out_dir.glob(f"{article_id}/{article_id}_extraction.json"))
-        candidates += sorted(out_dir.glob(f"{article_id}-*/*_extraction.json"))
+        for cid in candidate_ids:
+            candidates += sorted(out_dir.glob(f"{cid}/{cid}_extraction.json"))
+            candidates += sorted(out_dir.glob(f"{cid}-*/*_extraction.json"))
         if not candidates:
-            candidates += sorted(out_dir.glob(f"**/{article_id}_extraction.json"))
+            for cid in candidate_ids:
+                candidates += sorted(out_dir.glob(f"**/{cid}_extraction.json"))
         out_path = candidates[0] if candidates else None
         pairs.append((article_id, gt_path, out_path))
     return pairs

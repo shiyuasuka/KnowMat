@@ -11,12 +11,22 @@ Follow system rules exactly. Execute this extraction workflow:
 - Treat literature-only comparisons as Reference context.
 - Do not assign literature values to this paper's tested samples.
 - Exception: datasheet/handbook-style documents can be treated as extractable Target entries.
+- If explicit benchmark numbers from cited prior work are present (e.g., citation markers, "reported", "previous work"),
+  you may extract them as separate Reference items, but never mix them into Target sample properties.
 
 2) Item decomposition
 - One item = one unique (composition + process state).
 - Split items by: chemistry variant, process state, orientation/loading direction, test mode, graded step/layer.
 - In-situ composites: split matrix and reinforcement when explicitly compositional.
 - If same (composition + process) has multiple test conditions, keep one item and include all tests in `properties_of_composition`.
+- If sample/state labels differ (e.g., AB, CR, PDA-873, PDA-973, PDA-1073, SLM, Cast, AA), force split into separate items.
+- Never output merged labels in one sample id (e.g., "PDA-773,PDA-973,PDA-1073" is invalid).
+- If process parameter levels define sample families (e.g., VED=50/65/83), force split one item per level.
+- If both SLM and Cast (or similar route variants) are reported with explicit rows, force split into separate items.
+- If an intermediate state label is explicitly defined (e.g., CR), keep it as a standalone item even if properties are missing.
+- Before extraction, list all explicit level tokens (e.g., VED 50/65/83, power levels) and ensure each tokened level is represented.
+- If comparative rows carry explicit alternative chemistry labels/formulas (e.g., W2, Mo2 variants), split them as separate items.
+- If a variant is explicitly named but lacks legal numeric property values in text/OCR, still keep a sparse item for it.
 
 3) Composition extraction (strict)
 - Always fill `alloy_name_raw`.
@@ -31,6 +41,8 @@ Follow system rules exactly. Execute this extraction workflow:
 - Keep explicit 0.00 columns from fixed-column composition tables.
 - Mature commercial alloys with no numeric composition in full paper:
   keep `alloy_name_raw`; set normalized/nominal/measured composition fields to null.
+- Preserve state-specific names in `alloy_name_raw` when provided (e.g., PDA-873, Cast-variant, Cold-Rolled).
+- Do not overwrite all split items with one generic alloy name.
 
 4) Process and microstructure text anchors
 - `processing_conditions` must use dual-track format:
@@ -70,12 +82,21 @@ Follow system rules exactly. Execute this extraction workflow:
 - One table cell maps to one property slot only.
 - If mapping remains ambiguous, skip rather than guess.
 - Do not use process temperatures as test temperatures unless explicitly test conditions.
+- Build one sample anchor tuple per item before filling values:
+  (sample/state label + route + key process params).
+- Keep composition/process/properties consistent within the same anchor tuple.
+- If two tuples exist (e.g., optimized SLM vs non-optimized SLM), output two items instead of mixing values.
+- If explicit state tags are present (AB/AA/HT, as-built/as-annealed), assign rows to state buckets first,
+  then extract per bucket; never mix properties across state buckets.
+- If only family-average properties are stated, keep them at family scope; do not duplicate into each level-specific variant.
 
 8) Numeric formatting rules
 - Preserve source precision in `value`.
 - Range `a-b`: `value` keeps source string, `value_type`=`range`, `value_numeric`=midpoint, `value_range`=source string.
 - Mean±std: keep source in `value`, set `value_numeric` and `value_stddev`.
 - Normalize temperatures to Kelvin (RT=298.15 K).
+- Apply K-normalization to temperature-like properties too (e.g., melting/thermal distortion temperatures).
+- Never fill `Test_Temperature_K=298.15` unless the test temperature is explicitly stated for that property evidence.
 
 9) Microstructure quantitative extraction
 - If numeric microstructure evidence exists, do not leave text-only.
@@ -88,6 +109,180 @@ Follow system rules exactly. Execute this extraction workflow:
 - Check no obvious missing variants/temperatures/property columns.
 - Check compressive data uses compressive naming.
 - Check no metadata/citation IDs exported as properties.
+- Check `processing_params` contains process controls only (no density/porosity/phase fraction/hardness/strength fields).
+- Check polymer/trade names are not misparsed into fake element formulas.
 - Check output is valid JSON only.
 
+11) Mandatory self-audit before output
+- Role purity audit:
+  - Ensure Target and Reference evidence are isolated by item; never merge cited benchmark values into Target items.
+- Label coverage audit:
+  - Build a full list of sample/state labels from tables/captions/body first.
+  - Verify every discovered label has a corresponding item, unless evidence is too ambiguous.
+  - Also verify every discovered parameter level set (e.g., VED levels, route variants) has corresponding items.
+  - Verify intermediate states (e.g., CR) are not dropped even when property rows are sparse.
+- Temperature boundary audit:
+  - Verify `Test_Temperature_K` is only test-environment temperature, not process temperature.
+  - If no explicit test-temperature binding exists, keep test temperature null.
+- Physics sanity audit:
+  - Prevent MPa/GPa values from being assigned to percent strain/elongation fields.
+  - Prevent percent values from being assigned to strength fields.
+
 Return JSON only.
+
+FEW-SHOT (SHORT, GENERALIZED) — FOLLOW THE DECISION PATTERNS, NOT THE WORDING:
+
+Example A (Item splitting vs multi-test conditions)
+INPUT (abstracted):
+- Same nominal chemistry X, two process states: As-built and Aged.
+- Mechanical tests at RT and 873.15 K for the As-built state.
+DECISIONS:
+- As-built vs Aged => TWO items (process state changed).
+- RT + 873.15 K for As-built => ONE item with TWO property records (test condition changed).
+JSON SKETCH (illustrative shape only; keep strict schema in real output):
+{
+  "compositions": [
+    {
+      "composition": "X [As-built]",
+      "processing_conditions": "original: ... || simplified: AM -> As-built",
+      "properties_of_composition": [
+        { "property_name": "Yield_Strength", "value": "900", "unit": "MPa", "measurement_condition": "at 298.15 K; tensile" },
+        { "property_name": "Yield_Strength", "value": "520", "unit": "MPa", "measurement_condition": "at 873.15 K; tensile" }
+      ]
+    },
+    {
+      "composition": "X [Aged]",
+      "processing_conditions": "original: ... || simplified: AM -> Aging (Stage1/Stage2 if present)",
+      "properties_of_composition": [ ]
+    }
+  ]
+}
+
+Example B (Formula normalization + `other` completion + negative-other rule)
+INPUT (abstracted):
+- Formula-like: A B C D E0.5 (stoichiometric coefficients).
+- Reported wt% map sums to 98.5 with no residual explanation.
+DECISIONS:
+- Formula-like => normalize ratio to 100.0 by coefficients.
+- wt% sum < 100 with no residual => add `other` = 1.5 to reach 100.0.
+- If computed `other` < 0, do NOT include `other`.
+JSON SKETCH (illustrative):
+{
+  "compositions": [
+    {
+      "nominal_composition_type": "wt%",
+      "nominal_composition": { "A": 40.0, "B": 30.0, "C": 20.0, "D": 8.5, "other": 1.5 }
+    }
+  ]
+}
+
+Example C (Multi-stage + spatial heterogeneity in processing params)
+INPUT (abstracted):
+- Two-stage aging: 723.15 K/4 h then 873.15 K/2 h.
+- Different laser power for contour vs core.
+DECISIONS:
+- Never average stages => use `_Stage1`/`_Stage2`.
+- Spatially heterogeneous => use `_Contour`/`_Core`.
+JSON SKETCH (illustrative):
+{
+  "compositions": [
+    {
+      "processing_params": {
+        "Laser_Power_Contour_W": 200.0,
+        "Laser_Power_Core_W": 250.0,
+        "Aging_Temperature_Stage1_K": 723.15,
+        "Aging_Time_Stage1_h": 4.0,
+        "Aging_Temperature_Stage2_K": 873.15,
+        "Aging_Time_Stage2_h": 2.0
+      }
+    }
+  ]
+}
+
+Negative Mini-Shot (Do NOT do this; correct pattern shown)
+WRONG PATTERN:
+- Averaging multi-stage aging temperatures into one value, or merging As-built + Aged into one item.
+CORRECT:
+- Keep stages as separate keys and split items by process state.
+
+Example D (Name guard: do not fake formula parsing)
+INPUT (abstracted):
+- Material name is "UHMWPE"; no explicit element percentage table is provided.
+DECISION:
+- Keep `alloy_name_raw` as UHMWPE; leave nominal/measured composition null.
+WRONG:
+- Converting UHMWPE to pseudo elements (U/H/M/W/P/E).
+
+Example E (Reference-value exclusion)
+INPUT (abstracted):
+- Sentence says: "Reference yield strength of wrought alloy is 245 MPa."
+DECISION:
+- Do not store this as Target property unless explicitly measured for this paper's sample.
+
+Example F (Label-driven split is mandatory)
+INPUT (abstracted):
+- Same chemistry, labels listed as: AB, CR, PDA-873, PDA-973.
+DECISION:
+- Output 4 separate items (one per label), not one merged item.
+WRONG:
+- One item with sample id "AB,CR,PDA-873,PDA-973".
+
+Example G (Parameter-level split is mandatory)
+INPUT (abstracted):
+- Same chemistry with VED levels: 50, 65, 83 J/mm3.
+DECISION:
+- Output 3 separate items, one per VED level.
+WRONG:
+- One item with `Volumetric_Energy_Density_J_mm3: "50-83"` while rows are level-specific.
+
+Example H (Comparison-route retention)
+INPUT (abstracted):
+- Paper reports SLM alloy and cast baseline, both with explicit property rows.
+DECISION:
+- Keep both as separate items (Role by provenance), do not drop cast/baseline rows.
+
+Example I (Intermediate state must be kept)
+INPUT (abstracted):
+- Route chain: As-built -> Cold Rolled (CR) -> PDA-873 -> PDA-973.
+- CR has clear process text but no complete property table.
+DECISION:
+- Output a standalone CR item with available process/microstructure fields.
+WRONG:
+- Skip CR and connect As-built directly to PDA states.
+
+Example J (Do not mix parameter cohorts)
+INPUT (abstracted):
+- Same alloy has two SLM cohorts: optimized (200 W, 800 mm/s) and another parameter set.
+- Strength table rows are reported separately for each cohort.
+DECISION:
+- Keep two separate items (one per cohort), each internally consistent.
+WRONG:
+- Using process params from cohort A but mechanical properties from cohort B in one item.
+
+Example K (Do not drop level/chemistry variants)
+INPUT (abstracted):
+- SLM family reports VED levels 50/65/83 with separate evidence snippets.
+- Comparison section reports cast variants with explicit formulas (e.g., ...W2, ...Mo2) and numeric properties.
+DECISION:
+- Output separate items for each VED level and each cast chemistry variant.
+WRONG:
+- Keep only one SLM item plus one generic cast item.
+
+Example L (Do not mix AB and AA properties)
+INPUT (abstracted):
+- Same alloy reports two states: as-built (AB) and as-annealed (AA).
+- Tensile/fatigue table has separate AB and AA rows.
+DECISION:
+- Create AB item and AA item; each keeps only its own row values.
+WRONG:
+- AB item containing both AB and AA strength/fatigue entries.
+
+Example M (Keep named variants even without numeric rows)
+INPUT (abstracted):
+- Caption/body explicitly names variants: VED 50, 65, 83 and cast W2/Mo2 counterparts.
+- Numeric values are not available as legal table/text cells for all variants.
+DECISION:
+- Keep separate variant items (can be sparse) for each named variant.
+- Do not invent plot-pixel values.
+WRONG:
+- Collapse all variants into one generic alloy item because only one averaged numeric set is available.

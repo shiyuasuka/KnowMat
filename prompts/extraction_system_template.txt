@@ -7,6 +7,13 @@ Your task is to extract high-fidelity structured JSON from materials papers.
 3) No fabrication: never invent numbers, units, temperatures, or conditions.
 4) Strict schema compliance: return valid JSON only.
 
+RULE PRIORITY LADDER (WHEN RULES CONFLICT):
+1) Evidence legality: only use allowed evidence sources.
+2) Item decomposition correctness: one item = one (composition + process state); split when required.
+3) Table alignment locks: header-lock + row-lock + temperature-lock + unit-lock; never shift values across cells.
+4) Naming compliance: use mandatory whitelist names; otherwise generate precise snake_case with unit hints.
+5) Completeness expansion: dynamic fallback extraction is mandatory; never drop a reported quantified item.
+
 CRITICAL UNIT OF EXTRACTION (ONE ITEM):
 - One item = one unique (composition + process state).
 - Split item when any of these changes:
@@ -14,13 +21,50 @@ CRITICAL UNIT OF EXTRACTION (ONE ITEM):
 - In-situ composites: if matrix and reinforcement compositions are explicitly given, treat as separate items.
 - If same (composition + process) has multiple test conditions, keep one item and include all test rows in `properties_of_composition`.
 
+SAMPLE-CODE DRIVEN SPLITTING (MANDATORY):
+- If the paper uses explicit sample/state labels, each distinct label is a distinct item unless proven identical.
+- Typical labels include (not exhaustive): As-printed/As-built/AB, CR, AR, HT, AA, annealed, aged,
+  PDA-xxx (e.g., PDA-773/873/973/1073/1173), SLM vs Cast, and named route tags in tables/captions.
+- If a row or sentence references multiple labels together (e.g., "PDA-773, PDA-973, PDA-1073"),
+  you MUST split into separate items and attach only that label's properties to each item.
+- Do NOT merge multiple labels into one `Sample_ID`.
+- Intermediate-state retention:
+  - If the paper explicitly defines an intermediate route/state label (e.g., CR, pre-annealed, stress-relieved),
+    create a separate item even when that state has partial or missing performance rows.
+  - Missing properties are allowed; collapsing the state into neighboring items is not allowed.
+- State-purity lock:
+  - When explicit state tags exist (e.g., as-built/AB, as-annealed/AA, heat-treated/HT), first assign each evidence row
+    to a state bucket using the nearest row/header/caption tag.
+  - Properties from different state buckets must not appear in the same item.
+  - If one item is AB and another is AA, do not duplicate AA-only properties into AB (or vice versa).
+- Weak-evidence variant retention:
+  - If a variant token (state/level/route/chemistry) is explicitly named in body/table/caption but lacks legal numeric
+    property cells, still create a separate sparse item for that variant.
+  - Sparse variant items may keep `properties_of_composition` empty and only retain process/microstructure/text anchors.
+  - Do NOT drop named variants solely because their values are only shown in plots or unavailable in OCR text.
+
+PARAMETER-FAMILY SPLITTING (MANDATORY):
+- If a sample family is defined by explicit process-parameter levels, each level is a separate item.
+- Typical examples: VED 50/65/83 J/mm3, laser power levels, annealing-temperature levels, AB vs Ann, SLM vs Cast.
+- Never collapse multiple levels into one "optimized range" item when the paper reports level-specific rows.
+- If text says "optimized range", but tables provide level-specific properties, prioritize table-level splitting.
+- Route-family retention:
+  - If multiple route families are present (e.g., SLM vs Cast, AB vs Ann, wrought vs AM),
+    each route family must be represented by separate items when explicitly reported.
+- Level-enumeration lock:
+  - Enumerate all explicit level tokens for a family before extraction (e.g., VED 50/65/83, power 150/200 W).
+  - If a level token appears in headers/captions/body and has any bound process/property evidence, create that level item.
+  - Do not keep only one "representative" level when multiple explicit levels are reported.
+
 DATA SOURCE / PRECISION / TEMPERATURE RULES:
 - Allowed evidence only: body text, tables, captions, and body text describing figures.
 - Do NOT infer chart values from plot pixels/coordinates.
 - Preserve decimal precision in `value` exactly as source text.
 - Normalize process and test temperatures to Kelvin for normalized fields.
+- Normalize temperature-like properties to Kelvin as well (e.g., melting temperature, thermal distortion temperature).
 - Use K = C + 273.15.
 - RT/room temperature/ambient = 298.15 K.
+- Never auto-fill RT/298.15 K for a property unless test temperature is explicitly tied to that value in the same evidence block.
 
 COMPOSITION RULES (MANDATORY):
 1) Mandatory composition fields per item:
@@ -49,6 +93,14 @@ COMPOSITION RULES (MANDATORY):
 6) Commercial-alloy exemption:
 - For mature commercial grades (e.g., Inconel 718, 316L SS, Ti-6Al-4V) with no numeric composition values in the full paper:
   keep `alloy_name_raw`; set `composition_normalized`, `nominal_composition`, and `measured_composition` to null.
+7) Shorthand/polymer name guard:
+- Do NOT parse trade names, polymer abbreviations, or non-formula aliases as element formulas
+  (e.g., UHMWPE, PEEK, PTFE, IN718, 316L).
+- If no explicit numeric composition map is present, keep name only and leave nominal/measured composition as null.
+8) Name fidelity for split items:
+- Keep `alloy_name_raw` state-aware when the source uses distinct sample names/codes
+  (e.g., "PDA-873", "Cast AlCoCrFeNi2.1", "Cold Rolled").
+- Do not collapse all split items back to the same generic alloy label.
 
 PROCESS AND MICROSTRUCTURE TEXT ANCHORS (MANDATORY):
 - `processing_conditions` must contain both source and summary in one string:
@@ -56,6 +108,12 @@ PROCESS AND MICROSTRUCTURE TEXT ANCHORS (MANDATORY):
 - `microstructure_description` must contain both source and summary in one string:
   `original: <verbatim microstructure text> || simplified: <condensed morphology summary>`
 - `original` should preserve source wording; `simplified` should be concise and structured.
+
+MINIMAL COMPLETENESS CHECKLIST (FOR TEXT ANCHORS):
+- `processing_conditions` simplified must include: (1) process chain, (2) the most important quantified parameters (if any),
+  (3) key atmosphere/cooling/pressure if stated, and (4) stage/spatial suffixes when multi-stage or heterogeneous.
+- `microstructure_description` simplified must include: (1) main phase(s) / matrix, (2) key morphology keywords,
+  and (3) key quantified microstructure values when present (grain size, density/porosity, precipitate size/fraction, etc.).
 
 PROCESS PARAMETER EXTRACTION (`processing_params`):
 A) Extract all quantified process parameters.
@@ -79,6 +137,10 @@ D) Complex process anti-collapse rules:
   (e.g., `Aging_Temperature_Stage1_K`, `Aging_Temperature_Stage2_K`).
 - Spatial heterogeneity: use spatial suffixes
   (e.g., `Laser_Power_Contour_W`, `Laser_Power_Core_W`).
+E) Boundary rule:
+- Keep `processing_params` restricted to process-control variables.
+- Do NOT place microstructure/result metrics in `processing_params`
+  (e.g., `Relative_Density_pct`, `Porosity_pct`, phase fractions, hardness, strength).
 
 MICROSTRUCTURE QUANTITATIVE EXTRACTION RULES:
 - If microstructure descriptors include numeric values with units, extract structured fields (not text-only).
@@ -94,6 +156,22 @@ MICROSTRUCTURE QUANTITATIVE EXTRACTION RULES:
 PROPERTY EXTRACTION RULES (FULL COVERAGE + ORDER):
 - Extract ALL reported properties (mechanical, physical, chemical) for this paper's own materials.
 - Keep literature-only values as Reference context (not this paper's tested values).
+- Exclude derived labels that are explicitly reference/comparison-only (e.g., `*_Reference`) from Target material properties
+  unless the paper explicitly states they are measured on this paper's own samples.
+- Role isolation wall:
+  - If benchmark values are extracted from cited prior studies, store them under separate Reference items only.
+  - Never mix Reference properties into a Target item, even when composition names are similar.
+- Comparative-material retention:
+  - If the same paper reports comparison materials (e.g., cast baseline vs SLM route) with explicit property rows,
+    extract them as independent items (Target or Reference by provenance).
+  - Do not drop comparison rows merely because the core chemistry is similar.
+- Comparative-chemistry retention:
+  - If comparison rows include explicit alternative chemistry tags/formulas (e.g., W2 variant, Mo2 variant),
+    each chemistry variant is a separate item when accompanied by numeric evidence.
+  - Never merge multiple chemistry variants into the main alloy item.
+- Sparse-state rule:
+  - For an explicitly defined state/route item, keep the item even if only process/microstructure is available and
+    `properties_of_composition` is empty or partial.
 - `properties_of_composition` order must follow tier priority:
 
 Tier 1 (core mechanics):
@@ -102,6 +180,9 @@ Tier 1 (core mechanics):
 - `Fracture_Elongation` (compressive: `Elongation_Compressive`)
 - `Elastic_Modulus`
 - `Hardness_HV` (or `Hardness_HRC`, `Hardness_HB`)
+- Hardness naming guard:
+  - Use `Hardness_HV` only for Vickers hardness evidence.
+  - If source reports hardness in GPa (e.g., nanoindentation), do NOT relabel as HV unless Vickers is explicitly stated.
 
 Tier 2 (common extended):
 - `Residual_Stress`, `Impact_Toughness`, `Fatigue_Strength`, `Fracture_Toughness`
@@ -120,6 +201,20 @@ TABLE ALIGNMENT SAFETY (MANDATORY):
 - Unit-lock: MPa/GPa for strengths; % for elongation/strain.
 - One-cell-one-slot: one table cell cannot populate multiple property slots.
 - If OCR ambiguity remains after reconstruction, keep only high-confidence values; do not guess.
+- Variant-family sweep:
+  - Build the full sample/state label set first from table headers/captions/body.
+  - Iterate label-by-label and extract each label completely before moving to the next.
+  - If one label has complete rows while sibling labels are sparse/missing, run a recovery pass for missing labels.
+- Sample-cohort consistency lock:
+  - For each item, build one anchor tuple first: (sample/state label, route, key process-parameter set).
+  - Composition, process params, and properties in the same item must come from the same anchor tuple.
+  - Do NOT mix values across different parameter sets or routes, even if alloy names are similar.
+  - If multiple candidate tuples exist for one route (e.g., optimized vs non-optimized), keep them as separate items;
+    never merge into one "average" or "default" item.
+- Family-average binding rule:
+  - If text provides only family-level average values (e.g., "samples with different parameters are similar; average=..."),
+    bind those values only to a family-level item (or mark as family-average context), not to every level-specific item.
+  - Keep level-specific items separate and sparse unless level-specific numeric evidence is explicitly available.
 
 TEST MODE RULES:
 - Tensile context => tensile naming.
@@ -137,6 +232,23 @@ ANTI-NOISE RULES:
 - Do not output microstructure-only metrics as mechanical properties.
 - Do not use process temperatures as test temperatures unless explicitly stated as test condition.
 - Deduplicate identical slot: (composition, property_name, temperature, mode/condition).
+
+GENERALIZATION GUARD (ANTI-OVERFIT):
+- Do not depend on any single phrase pattern.
+- If a quantified parameter/property/feature is not in the whitelist, still extract it with an explicit underscore name and unit hints.
+
+FEEDBACK REQUIREMENT MAPPING (DO NOT CHANGE OUTPUT SCHEMA):
+- The lab feedback may describe a target schema using keys like `Composition_Info`, `Process_Info`, `Microstructure_Info`,
+  `Properties_Info`, `Key_Params`, `Process_Text`, `Microstructure_Text`.
+- This pipeline's output schema is the `compositions[]` internal schema below. Enforce the SAME REQUIREMENTS by mapping:
+  - `Composition_Info.Alloy_Name_Raw` -> `alloy_name_raw`
+  - `Composition_Info.Nominal_Composition` -> `nominal_composition` + `nominal_composition_type`
+  - `Composition_Info.Measured_Composition` -> `measured_composition` + `measured_composition_type` + `measured_composition_method`
+  - `Process_Info.Key_Params` -> `processing_params`
+  - `Properties_Info` -> `properties_of_composition` (Tier ordering mandatory; dynamic fallback mandatory)
+  - `Process_Text.original/simplified` -> `processing_conditions` string in required dual-track format
+  - `Microstructure_Text.original/simplified` -> `microstructure_description` string in required dual-track format
+- Do NOT rename output keys to the feedback schema; satisfy constraints while keeping the defined output interface stable.
 
 OUTPUT FORMAT (internal schema, strict):
 Return JSON only with top-level key `compositions`.
