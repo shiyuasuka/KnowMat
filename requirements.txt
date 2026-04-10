@@ -1,6 +1,9 @@
-# KnowMat basic dependencies (CPU version of Paddle, cross-platform)
+# KnowMat base dependencies (shared by CPU and GPU OCR installs)
 # To install using pip only: pip install -r requirements.txt
-# For GPU: install requirements.txt first, then requirements-gpu.txt
+# Then choose one runtime:
+#   CPU: pip install -r requirements-cpu.txt
+#   GPU: pip uninstall -y paddlepaddle paddlepaddle-gpu
+#        pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
 #
 # Consistent with pyproject.toml and environment.yml (pip section)
 
@@ -17,8 +20,7 @@ trustcall==0.0.39
 # OpenAI / API
 openai==1.93.2
 
-# PaddleOCR-VL (PDF parsing, CPU version; for GPU use requirements-gpu.txt)
-paddlepaddle>=3.0.0
+# PaddleOCR-VL (PDF parsing). Install the Paddle runtime separately.
 paddleocr[all]
 pymupdf==1.24.13
 

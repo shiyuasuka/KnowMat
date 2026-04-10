@@ -45,22 +45,27 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# 3. GPU optional: Override to GPU version of Paddle + PaddleOCR
-# (environment.yml already installed CPU version, upgrade here if needed)
+# 3. Install exactly one Paddle runtime (CPU or GPU)
 Write-Host ""
 if ($CPU) {
-    Write-Host "==> Keeping CPU version of Paddle (installed by environment.yml)" -ForegroundColor Gray
+    Write-Host "==> Installing CPU version of Paddle runtime" -ForegroundColor Gray
+    & conda run -n $EnvName python -m pip uninstall -y paddlepaddle paddlepaddle-gpu 2>$null | Out-Null
+    & conda run -n $EnvName python -m pip install -r requirements-cpu.txt --quiet
 } else {
-    Write-Host "==> Installing GPU version of Paddle + PaddleOCR (cu129, compatible with CUDA 12.x)" -ForegroundColor Yellow
-    & conda run -n $EnvName python -m pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/ --quiet
-    & conda run -n $EnvName python -m pip install "paddleocr[all]" --quiet
+    Write-Host "==> Installing GPU version of Paddle runtime (cu129, compatible with CUDA 12.x)" -ForegroundColor Yellow
+    & conda run -n $EnvName python -m pip uninstall -y paddlepaddle paddlepaddle-gpu 2>$null | Out-Null
+    & conda run -n $EnvName python -m pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/ --quiet
 }
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "[Warning] Paddle/PaddleOCR installation may be incomplete, you can manually run later:" -ForegroundColor Yellow
+    Write-Host "[Warning] Paddle runtime installation may be incomplete, you can manually run later:" -ForegroundColor Yellow
     Write-Host "  conda activate $EnvName" -ForegroundColor Gray
-    Write-Host "  python -m pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/" -ForegroundColor Gray
-    Write-Host "  python -m pip install `"paddleocr[all]`"" -ForegroundColor Gray
+    Write-Host "  python -m pip uninstall -y paddlepaddle paddlepaddle-gpu" -ForegroundColor Gray
+    if ($CPU) {
+        Write-Host "  python -m pip install -r requirements-cpu.txt" -ForegroundColor Gray
+    } else {
+        Write-Host "  python -m pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/" -ForegroundColor Gray
+    }
 }
 
 # 4. Optional: Install cuDNN 9 (conda, install if OCR reports cudnn64_9.dll error)

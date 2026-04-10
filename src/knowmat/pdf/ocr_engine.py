@@ -14,6 +14,7 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from importlib.metadata import PackageNotFoundError, version as dist_version
 from pathlib import Path
 from statistics import median
 from typing import Any, Callable, List, Optional, Sequence, Tuple, TypeVar
@@ -240,6 +241,66 @@ def ensure_paddle_device_from_env() -> None:
         _warm_paddle_gpu_context(device)
 
 
+def _installed_dist_version(name: str) -> Optional[str]:
+    try:
+        return dist_version(name)
+    except PackageNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+def _validate_paddle_ocr_runtime() -> None:
+    """Fail fast on broken Paddle CPU/GPU combinations."""
+    try:
+        import paddle  # type: ignore
+    except ImportError:
+        return
+
+    requested = (os.getenv("KNOWMAT_OCR_DEVICE") or "").strip().lower()
+    wants_gpu = requested.startswith(("gpu", "cuda"))
+
+    try:
+        has_cuda = bool(paddle.device.is_compiled_with_cuda())
+    except Exception:
+        has_cuda = False
+
+    cpu_pkg = _installed_dist_version("paddlepaddle")
+    gpu_pkg = _installed_dist_version("paddlepaddle-gpu")
+
+    if has_cuda:
+        return
+
+    if wants_gpu:
+        raise RuntimeError(
+            "KNOWMAT_OCR_DEVICE requests GPU OCR, but the imported Paddle runtime is CPU-only "
+            f"(compiled_with_cuda=False). Installed packages: paddlepaddle={cpu_pkg or 'not installed'}, "
+            f"paddlepaddle-gpu={gpu_pkg or 'not installed'}. "
+            "Remove the CPU paddlepaddle package, reinstall paddlepaddle-gpu, and verify "
+            "`python -c \"import paddle; print(paddle.device.is_compiled_with_cuda())\"` returns True."
+        )
+
+    if cpu_pkg and gpu_pkg:
+        raise RuntimeError(
+            "Detected both paddlepaddle=%s and paddlepaddle-gpu=%s, but the imported Paddle runtime "
+            "reports compiled_with_cuda=False. This usually means the CPU package overwrote the GPU "
+            "runtime. Remove `paddlepaddle`, reinstall `paddlepaddle-gpu`, and verify "
+            "`python -c \"import paddle; print(paddle.device.is_compiled_with_cuda())\"` returns True."
+            % (cpu_pkg, gpu_pkg)
+        )
+    elif gpu_pkg:
+        logger.error(
+            "paddlepaddle-gpu=%s is installed, but imported Paddle reports compiled_with_cuda=False. "
+            "Check CUDA/cuDNN compatibility and reinstall the GPU runtime.",
+            gpu_pkg,
+        )
+    else:
+        logger.warning(
+            "Paddle OCR runtime is CPU-only (paddlepaddle=%s). Install paddlepaddle-gpu to enable GPU OCR.",
+            cpu_pkg or "not installed",
+        )
+
+
 def _legacy_paddleocr_allowed() -> bool:
     """Explicit opt-in for legacy engine only (debug / broken VL installs)."""
     v = (os.getenv("KNOWMAT_ALLOW_LEGACY_PADDLEOCR") or "").strip().lower()
@@ -264,6 +325,7 @@ def create_ocr_engine(model_dir: Path) -> Tuple[Any, str]:
     """
     _prepare_ocr_home(model_dir)
     ensure_paddle_device_from_env()
+    _validate_paddle_ocr_runtime()
     legacy_ok = _legacy_paddleocr_allowed()
 
     try:
@@ -271,13 +333,13 @@ def create_ocr_engine(model_dir: Path) -> Tuple[Any, str]:
     except ImportError as exc:
         if legacy_ok:
             logger.warning(
-                "PaddleOCRVL 不可用；因已设置 KNOWMAT_ALLOW_LEGACY_PADDLEOCR，将使用传统 PaddleOCR。"
+                "PaddleOCRVL is unavailable; KNOWMAT_ALLOW_LEGACY_PADDLEOCR is set, so KnowMat will fall back to legacy PaddleOCR."
             )
         else:
             raise ImportError(
-                "未找到 PaddleOCRVL。请安装 OCR 依赖（例如 pip install 'knowmat[ocr]'），"
-                "并确保 paddleocr 版本包含 PaddleOCR-VL。"
-                "若仅作调试，可设置 KNOWMAT_ALLOW_LEGACY_PADDLEOCR=1 以允许降级。"
+                "PaddleOCRVL is not available. Install CPU OCR with `pip install -r requirements.txt`, "
+                "or GPU OCR with `pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/`. "
+                "For temporary debugging only, set KNOWMAT_ALLOW_LEGACY_PADDLEOCR=1 to allow fallback."
             ) from exc
     else:
         version = (os.getenv("PADDLEOCRVL_VERSION", "1.5") or "1.5").strip()
@@ -325,23 +387,25 @@ def create_ocr_engine(model_dir: Path) -> Tuple[Any, str]:
         if last_vl_error is not None:
             if legacy_ok:
                 logger.error(
-                    "PaddleOCR-VL 全部候选均失败（%s: %s）；因 KNOWMAT_ALLOW_LEGACY_PADDLEOCR 已启用而降级。",
+                    "All PaddleOCR-VL initialization candidates failed (%s: %s); falling back because KNOWMAT_ALLOW_LEGACY_PADDLEOCR is enabled.",
                     type(last_vl_error).__name__,
                     last_vl_error,
                 )
             else:
                 raise RuntimeError(
-                    "PaddleOCR-VL 初始化失败；KnowMat 默认不再降级到传统 PaddleOCR（无法使用 PP-StructureV3 管线）。"
-                    f" 最后错误: {type(last_vl_error).__name__}: {last_vl_error}。"
-                    " 可尝试：设置 KNOWMAT_OCR_DEVICE=gpu:0（或 cpu）、检查 CUDA/Paddle 版本、"
-                    "在上一份 PDF 处理后确保显存已释放。"
-                    "仅调试时可设 KNOWMAT_ALLOW_LEGACY_PADDLEOCR=1。"
+                    "PaddleOCR-VL initialization failed and KnowMat will not silently fall back to legacy PaddleOCR. "
+                    f"Last error: {type(last_vl_error).__name__}: {last_vl_error}. "
+                    "Try setting KNOWMAT_OCR_DEVICE=gpu:0 (or cpu), check your CUDA/Paddle install, and make sure GPU memory was released after the previous PDF. "
+                    "For debugging only, set KNOWMAT_ALLOW_LEGACY_PADDLEOCR=1."
                 ) from last_vl_error
 
     try:
         from paddleocr import PaddleOCR  # type: ignore
     except ImportError as exc:
-        raise ImportError("PaddleOCR is not installed. Install with: pip install knowmat[ocr]") from exc
+        raise ImportError(
+            "PaddleOCR is not installed. Install CPU OCR with `pip install -r requirements.txt`, "
+            "or GPU OCR with `pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/`."
+        ) from exc
 
     init_candidates = (
         {"use_angle_cls": True, "lang": "en"},
@@ -353,7 +417,7 @@ def create_ocr_engine(model_dir: Path) -> Tuple[Any, str]:
         try:
             logger.warning(
                 "Using legacy PaddleOCR engine (not PaddleOCR-VL); "
-                "PP-StructureV3 仍会通过版面种子与 route_and_reocr 参与表格/公式精修。"
+                "PP-StructureV3 will still contribute layout seeding and route_and_reocr refinement."
             )
             return PaddleOCR(**kwargs), "paddleocr"
         except TypeError as exc:
@@ -456,7 +520,7 @@ def check_gpu_memory_and_downgrade(threshold_gb: float = 1.5) -> bool:
     if free_gb < threshold_gb:
         logger.warning(
             "Low GPU memory detected: %.1f GB free of %.1f GB (threshold: %.1f GB). "
-            "Reducing OCR_BATCH_SIZE and releasing Paddle cache (PP-StructureV3 仍默认开启).",
+            "Reducing OCR_BATCH_SIZE and releasing Paddle cache (PP-StructureV3 remains enabled).",
             free_gb,
             total_gb,
             threshold_gb,

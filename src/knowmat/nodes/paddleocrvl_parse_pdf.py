@@ -139,16 +139,24 @@ def _append_missing_paragraph_hints(
 
 
 def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
     try:
-        return int(os.getenv(name, str(default)).strip())
+        return int(raw.strip())
     except ValueError:
+        logger.warning("%s=%r is not a valid integer; using %d.", name, raw, default)
         return default
 
 
 def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
     try:
-        return float(os.getenv(name, str(default)).strip())
+        return float(raw.strip())
     except ValueError:
+        logger.warning("%s=%r is not a valid float; using %s.", name, raw, default)
         return default
 
 

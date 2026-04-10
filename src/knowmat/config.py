@@ -12,23 +12,12 @@ In addition, this module can configure LangSmith tracing when a
 
 import os
 import sys
-from dotenv import load_dotenv, find_dotenv
+
+from knowmat.env_loader import load_project_dotenv
 
 
-# Try to locate a .env file.  The search order is:
-# 1) A .env in the current working directory
-# 2) A path specified by KNOWMAT2_ENV_FILE
-# 3) The first .env found upwards from cwd
-_cwd_dotenv = os.path.join(os.getcwd(), ".env")
-if os.path.isfile(_cwd_dotenv):
-    _env_path = _cwd_dotenv
-else:
-    _env_path = os.getenv("KNOWMAT2_ENV_FILE", "")
-    if not _env_path:
-        _env_path = find_dotenv(usecwd=True) or ""
-
-if _env_path:
-    load_dotenv(_env_path, override=False)
+# Try to locate and validate a .env file before loading it.
+_env_path = load_project_dotenv(override=False) or ""
 
 
 def _set_env(var: str, required: bool = True) -> None:

@@ -55,15 +55,16 @@ else
   conda env create -f "$YML" -n "$ENV_NAME"
 fi
 
-# 3. GPU optional: Override to GPU version of Paddle + PaddleOCR
-# (environment.yml already installed CPU version, upgrade here if needed)
+# 3. Install exactly one Paddle runtime (CPU or GPU)
 echo ""
 if $CPU; then
-  echo "==> Keeping CPU version of Paddle (installed by environment.yml)"
+  echo "==> Installing CPU version of Paddle runtime"
+  conda run -n "$ENV_NAME" python -m pip uninstall -y paddlepaddle paddlepaddle-gpu >/dev/null 2>&1 || true
+  conda run -n "$ENV_NAME" python -m pip install -r requirements-cpu.txt -q
 else
-  echo "==> Installing GPU version of Paddle + PaddleOCR (cu129)"
-  conda run -n "$ENV_NAME" python -m pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/ -q
-  conda run -n "$ENV_NAME" python -m pip install "paddleocr[all]" -q
+  echo "==> Installing GPU version of Paddle runtime (cu129)"
+  conda run -n "$ENV_NAME" python -m pip uninstall -y paddlepaddle paddlepaddle-gpu >/dev/null 2>&1 || true
+  conda run -n "$ENV_NAME" python -m pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/ -q
 fi
 
 # 4. Optional: Install cuDNN 9 (conda)

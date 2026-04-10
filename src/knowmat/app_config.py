@@ -12,14 +12,13 @@ Environment variables are prefixed with ``KNOWMAT2_``.  For example,
 """
 
 import os
-from dotenv import load_dotenv, find_dotenv
 from pydantic_settings import BaseSettings
 from pydantic import ConfigDict
 
+from knowmat.env_loader import load_project_dotenv
+
 # Load .env early so model defaults can read LLM_MODEL before settings instantiation.
-_env_path = find_dotenv(usecwd=True)
-if _env_path:
-    load_dotenv(_env_path, override=False)
+load_project_dotenv(override=False)
 
 DEFAULT_LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5")
 
