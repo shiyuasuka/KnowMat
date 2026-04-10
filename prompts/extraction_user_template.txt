@@ -21,6 +21,7 @@ Step 2: Item decomposition
 - One item = one unique combination of composition + process.
 - Split whenever composition, process state, sample/state label, route, orientation/loading mode, or parameter level changes.
 - Give each item a stable `Sample_ID`; all tests that belong to the same specimen must share that id.
+- If the paper defines an abbreviated sample nomenclature table and then reports direction/state-specific rows (for example `3090` in the process table and `B3090` / `S3090` in the property table), you must output one item per explicit row/state.
 - For gradient materials, prefer one item with `Gradient_Material = true` unless the paper explicitly reports layer-specific independent data.
 - Only split a gradient specimen into multiple items when independent per-layer or per-step data is explicit. In that case, keep `Gradient_Material = true` and link all split items with the same `Gradient_Group_ID`.
 - If the same item has multiple testing conditions, keep one item and place all tests in that item's `Properties_Info`.

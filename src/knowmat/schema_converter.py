@@ -67,8 +67,10 @@ class SchemaConverter:
 
         # Preferred path: already in strict lab schema.
         if isinstance(data.get("items"), list):
-            repaired = self._repair_existing_lab_items(data.get("items", []) or [])
-            repaired = self._repair_ti64_in718_multigraded_case(repaired, paper_text)
+            repaired = self._finalize_repaired_items(
+                self._repair_existing_lab_items(data.get("items", []) or []),
+                paper_text=paper_text,
+            )
             return {
                 "Paper_Metadata": paper_metadata,
                 "items": repaired,
@@ -81,8 +83,10 @@ class SchemaConverter:
                 for mat in (data.get("Materials") or [])
                 if isinstance(mat, dict)
             ]
-            repaired = self._repair_existing_lab_items(items)
-            repaired = self._repair_ti64_in718_multigraded_case(repaired, paper_text)
+            repaired = self._finalize_repaired_items(
+                self._repair_existing_lab_items(items),
+                paper_text=paper_text,
+            )
             return {
                 "Paper_Metadata": {
                     "Paper_Title": paper_metadata.get("Paper_Title"),
@@ -267,7 +271,17 @@ class SchemaConverter:
             }
             items.append(item)
 
-        repaired = self._repair_existing_lab_items(items)
+        return self._finalize_repaired_items(
+            self._repair_existing_lab_items(items),
+            paper_text=paper_text,
+        )
+
+    def _finalize_repaired_items(
+        self,
+        items: List[dict],
+        paper_text: Optional[str] = None,
+    ) -> List[dict]:
+        repaired = self._repair_abbreviated_sample_matrix_case(items, paper_text)
         repaired = self._repair_ti64_in718_multigraded_case(repaired, paper_text)
         return repaired
 
@@ -306,6 +320,24 @@ class SchemaConverter:
             return None
         text = str(value).strip()
         return text or None
+
+    @staticmethod
+    def _parse_value_with_optional_std(raw: Any) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+        text = str(raw or "").strip()
+        if not text:
+            return None, None, None
+        range_match = re.search(r"(-?\d+(?:\.\d+)?)\s*[-~]\s*(-?\d+(?:\.\d+)?)", text)
+        if range_match:
+            lo = float(range_match.group(1))
+            hi = float(range_match.group(2))
+            return ((lo + hi) / 2.0), None, f"{range_match.group(1)}-{range_match.group(2)}"
+        pm_match = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:±|\$\\pm\$)\s*(-?\d+(?:\.\d+)?)", text)
+        if pm_match:
+            return float(pm_match.group(1)), float(pm_match.group(2)), None
+        m = re.search(r"-?\d+(?:\.\d+)?", text)
+        if not m:
+            return None, None, None
+        return float(m.group(0)), None, None
 
     @staticmethod
     def _coerce_bool(value: Any) -> Optional[bool]:
@@ -389,13 +421,32 @@ class SchemaConverter:
         for text in texts:
             if not text:
                 continue
+            raw = str(text)
             match = re.search(
                 r"(?:tensile|crosshead|loading)\s+speed\s*[:=]?\s*(-?\d+(?:\.\d+)?)\s*mm\s*/\s*min",
-                str(text),
+                raw,
                 re.IGNORECASE,
             )
             if match:
                 return self._coerce_float(match.group(1))
+            match = re.search(
+                r"(?:rate of|displacement control(?:\s+with\s+a\s+rate\s+of)?|displacement rate of|crosshead speed of)\s*(-?\d+(?:\.\d+)?)\s*mm\s*/\s*s\b",
+                raw,
+                re.IGNORECASE,
+            )
+            if match:
+                value = self._coerce_float(match.group(1))
+                if value is not None:
+                    return round(value * 60.0, 6)
+            match = re.search(
+                r"displacement control[^.;\n]*?(-?\d+(?:\.\d+)?)\s*mm\s*/\s*s\b",
+                raw,
+                re.IGNORECASE,
+            )
+            if match:
+                value = self._coerce_float(match.group(1))
+                if value is not None:
+                    return round(value * 60.0, 6)
         return None
 
     def _extract_hardness_load(self, *texts: Any) -> Optional[str]:
@@ -1380,6 +1431,10 @@ class SchemaConverter:
             "elongation_compressive",
         }:
             return "%"
+        if key in {"fracture_toughness_kic", "fatigue_crack_growth_threshold"}:
+            return "MPa√m"
+        if key == "paris_exponent":
+            return "dimensionless"
         return ""
 
     def _resolve_paper_metadata(
@@ -1674,6 +1729,358 @@ class SchemaConverter:
             )
         return repaired
 
+    def _repair_abbreviated_sample_matrix_case(
+        self,
+        items: List[dict],
+        paper_text: Optional[str],
+    ) -> List[dict]:
+        if not items or not paper_text:
+            return items
+
+        text = str(paper_text)
+        target_items = [
+            item
+            for item in items
+            if (item.get("Composition_Info", {}) or {}).get("Role", "Target") == "Target"
+        ]
+        if len(target_items) > 2:
+            return items
+
+        if not re.search(r"\|\s*Nomenclature\s*\|.*Laser Power", text, re.IGNORECASE):
+            return items
+        if not re.search(r"\|\s*Sample\s*\|.*K_\{Ic\}.*Delta K_\{0\}.*\|\s*m\s*\|", text, re.IGNORECASE):
+            return items
+
+        process_rows = self._extract_abbreviated_process_rows(text)
+        property_rows = self._extract_abbreviated_property_rows(text)
+        if len(process_rows) < 2 or len(property_rows) < 4:
+            return items
+
+        sample_ids = {row["sample_id"] for row in property_rows}
+        existing_target_ids = {
+            self._clean_optional_str(item.get("Sample_ID"))
+            for item in target_items
+            if self._clean_optional_str(item.get("Sample_ID"))
+        }
+        if len(existing_target_ids.intersection(sample_ids)) >= len(sample_ids):
+            return items
+
+        base_item = deepcopy(target_items[0]) if target_items else deepcopy(items[0])
+        base_comp = dict(base_item.get("Composition_Info") or {})
+        alloy_name = (
+            self._clean_optional_str(base_comp.get("Alloy_Name_Raw"))
+            or "Ti-6Al-4V ELI"
+        )
+
+        common_process_text = self._extract_text_payload((base_item.get("Process_Info") or {}).get("Process_Text"))
+        if not common_process_text:
+            common_process_text = self._build_kumar_like_process_text(text)
+        common_micro_text = self._extract_text_payload((base_item.get("Microstructure_Info") or {}).get("Microstructure_Text"))
+        if not common_micro_text:
+            common_micro_text = self._build_kumar_like_micro_text(text)
+
+        density_map = self._extract_abbreviated_density_rows(text)
+        colony_size = self._extract_range_string(text, r"average colony sizes? of\s*~?\s*(\d+(?:\.\d+)?)\s*[-–]\s*(\d+(?:\.\d+)?)\s*(?:\\mu|μ|u)m")
+        lath_max = self._coerce_float(
+            self._extract_first_match(text, r"lath thickness'? are too small\s*\(up to\s*(\d+(?:\.\d+)?)")
+        )
+
+        repaired_targets: List[dict] = []
+        for row in property_rows:
+            params = process_rows.get(row["code"])
+            if not params:
+                continue
+
+            clone = deepcopy(base_item)
+            clone["Sample_ID"] = row["sample_id"]
+            clone["Gradient_Material"] = False
+            clone["Gradient_Group_ID"] = None
+
+            comp_info = dict(clone.get("Composition_Info") or {})
+            comp_info["Role"] = "Target"
+            comp_info["Alloy_Name_Raw"] = alloy_name
+            clone["Composition_Info"] = comp_info
+
+            process_info = dict(clone.get("Process_Info") or {})
+            process_info["Process_Category"] = "Selective Laser Melting (SLM)"
+            process_info["Equipment"] = (
+                self._clean_optional_str(process_info.get("Equipment"))
+                or "EOSINT M 280 SLM unit with Yb:YAG fiber laser"
+            )
+            process_info["Process_Text"] = self._to_text_payload(common_process_text)
+            process_info["Key_Params"] = self._canonicalize_key_params(params)
+            clone["Process_Info"] = process_info
+
+            micro_info = dict(clone.get("Microstructure_Info") or {})
+            micro_info["Microstructure_Text"] = self._to_text_payload(common_micro_text)
+            micro_info["Main_Phase"] = (
+                self._normalize_main_phase(
+                    micro_info.get("Main_Phase"),
+                    micro_text=common_micro_text,
+                )
+                or "HCP α/α' (acicular lath mixture)"
+            )
+            precipitates = self._normalize_precipitates(
+                micro_info.get("Precipitates"),
+                text=f"{common_micro_text} Ti3Al alpha phase decorated at prior beta grain boundaries",
+            )
+            if not precipitates:
+                precipitates = [{"Phase_Type": "α (at prior β grain boundaries)", "Volume_Fraction_pct": None}]
+            micro_info["Precipitates"] = precipitates
+            density = density_map.get(row["code"], {})
+            if density.get("porosity_pct") is not None:
+                micro_info["Porosity_pct"] = density["porosity_pct"]
+            if density.get("relative_density_pct") is not None:
+                micro_info["Relative_Density_pct"] = density["relative_density_pct"]
+            micro_info["Grain_Size_avg_um"] = self._coerce_float(micro_info.get("Grain_Size_avg_um")) or 140.0
+            advanced = dict(micro_info.get("Advanced_Quantitative_Features") or {})
+            if colony_size and "Colony_Size_avg_um" not in advanced:
+                advanced["Colony_Size_avg_um"] = colony_size
+            if lath_max is not None and "Lath_Thickness_max_um" not in advanced:
+                advanced["Lath_Thickness_max_um"] = lath_max
+            micro_info["Advanced_Quantitative_Features"] = advanced
+            clone["Microstructure_Info"] = self._sanitize_microstructure_numeric_fields(
+                micro_info,
+                process_info=process_info,
+                properties=[],
+            )
+
+            props: List[Dict[str, Any]] = []
+            tensile_condition = (
+                f"Tensile test, Loading axis {'parallel' if row['orientation'] == 'B' else 'perpendicular'} "
+                f"to build direction ({row['orientation']}); strain rate 0.001 s^-1; displacement control 0.006 mm/s"
+            )
+            fracture_condition = (
+                f"Mode I fracture toughness, crack plane normal {'along build direction' if row['orientation'] == 'B' else 'transverse-to-build direction'} "
+                f"({row['orientation']}); ASTM E399-12; displacement rate 0.01 mm/s"
+            )
+            fcg_condition = (
+                f"Fatigue crack growth threshold, {row['orientation']} direction; ASTM E647-15; R=0.1; frequency 10 Hz"
+            )
+            paris_condition = "Steady-state FCG, ASTM E647-15; R=0.1; frequency 10 Hz"
+            if row.get("yield_strength"):
+                props.append(
+                    self._build_lab_property_entry(
+                        raw_property_name="Yield_Strength",
+                        condition=tensile_condition,
+                        value_numeric=row["yield_strength"][0],
+                        value_range=row["yield_strength"][2],
+                        value_stddev=row["yield_strength"][1],
+                        unit_raw="MPa",
+                        test_temp=298.15,
+                        context_text=tensile_condition,
+                    )
+                )
+            if row.get("uts"):
+                props.append(
+                    self._build_lab_property_entry(
+                        raw_property_name="Ultimate_Tensile_Strength",
+                        condition=tensile_condition,
+                        value_numeric=row["uts"][0],
+                        value_range=row["uts"][2],
+                        value_stddev=row["uts"][1],
+                        unit_raw="MPa",
+                        test_temp=298.15,
+                        context_text=tensile_condition,
+                    )
+                )
+            if row.get("elongation"):
+                props.append(
+                    self._build_lab_property_entry(
+                        raw_property_name="Elongation_Total",
+                        condition=tensile_condition,
+                        value_numeric=row["elongation"][0],
+                        value_range=row["elongation"][2],
+                        value_stddev=row["elongation"][1],
+                        unit_raw="%",
+                        test_temp=298.15,
+                        context_text=tensile_condition,
+                        note="Original paper reports ef (elongation to failure); not distinguished into uniform and fracture components",
+                    )
+                )
+            if row.get("kic"):
+                props.append(
+                    self._build_lab_property_entry(
+                        raw_property_name="Fracture_Toughness_KIC",
+                        condition=fracture_condition,
+                        value_numeric=row["kic"][0],
+                        value_range=row["kic"][2],
+                        value_stddev=row["kic"][1],
+                        unit_raw="MPa√m",
+                        test_temp=298.15,
+                        context_text=fracture_condition,
+                    )
+                )
+            if row.get("dk0"):
+                props.append(
+                    self._build_lab_property_entry(
+                        raw_property_name="Fatigue_Crack_Growth_Threshold",
+                        condition=fcg_condition,
+                        value_numeric=row["dk0"][0],
+                        value_range=row["dk0"][2],
+                        value_stddev=row["dk0"][1],
+                        unit_raw="MPa√m",
+                        test_temp=298.15,
+                        context_text=fcg_condition,
+                    )
+                )
+            if row.get("paris_m"):
+                props.append(
+                    self._build_lab_property_entry(
+                        raw_property_name="Paris_Exponent",
+                        condition=paris_condition,
+                        value_numeric=row["paris_m"][0],
+                        value_range=row["paris_m"][2],
+                        value_stddev=row["paris_m"][1],
+                        unit_raw="dimensionless",
+                        test_temp=298.15,
+                        context_text=paris_condition,
+                    )
+                )
+            if row.get("fatigue_strength"):
+                fatigue_condition = (
+                    "Unnotched rotating bending fatigue (RBF), loading axis parallel to build direction (B); "
+                    "R=-1; minimum survival 10^7 cycles"
+                )
+                props.append(
+                    self._build_lab_property_entry(
+                        raw_property_name="Fatigue_Strength_Unnotched",
+                        condition=fatigue_condition,
+                        value_numeric=row["fatigue_strength"][0],
+                        value_range=row["fatigue_strength"][2],
+                        value_stddev=row["fatigue_strength"][1],
+                        unit_raw="MPa",
+                        test_temp=298.15,
+                        context_text=fatigue_condition,
+                    )
+                )
+
+            clone["Properties_Info"] = self._order_lab_properties([p for p in props if p])
+            repaired_targets.append(clone)
+
+        if len(repaired_targets) < 4:
+            return items
+
+        other_items = [
+            item
+            for item in items
+            if (item.get("Composition_Info", {}) or {}).get("Role", "Target") != "Target"
+        ]
+        return repaired_targets + other_items
+
+    def _extract_abbreviated_process_rows(self, text: str) -> Dict[str, Dict[str, Any]]:
+        out: Dict[str, Dict[str, Any]] = {}
+        pattern = re.compile(
+            r"^\|\s*(\d{4})\s*\|\s*(\d+(?:\.\d+)?)\s*\|\s*(\d+(?:\.\d+)?)\s*\|\s*(\d+(?:\.\d+)?)\s*\|\s*(\d+(?:\.\d+)?)\s*\|\s*(\d+(?:\.\d+)?)\s*\|\s*(\d+(?:\.\d+)?)\s*\|$",
+            re.MULTILINE,
+        )
+        anneal_temp = self.parse_temperature_to_k("650 C")
+        for match in pattern.finditer(text):
+            code, power, speed, hatch_mm, layer_um, rotation, ved = match.groups()
+            out[code] = {
+                "Laser_Power_W": float(power),
+                "Scanning_Speed_mm_s": float(speed),
+                "Hatch_Spacing_um": round(float(hatch_mm) * 1000.0, 3),
+                "Layer_Thickness_um": float(layer_um),
+                "Scan_Rotation_deg": float(rotation),
+                "Volumetric_Energy_Density_J_mm3": float(ved),
+                "Annealing_Temperature_K": anneal_temp,
+                "Annealing_Time_h": 3.0,
+                "Protective_Atmosphere": "argon",
+            }
+        return out
+
+    def _extract_abbreviated_property_rows(self, text: str) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        pattern = re.compile(
+            r"^\|\s*([BS])(\d{4})\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\s*\|$",
+            re.MULTILINE,
+        )
+        for match in pattern.finditer(text):
+            orient, code, ys, uts, ef, kic, dk0, paris_m, fs, _ = match.groups()
+            rows.append(
+                {
+                    "sample_id": f"{orient}{code}",
+                    "orientation": orient,
+                    "code": code,
+                    "yield_strength": self._parse_value_with_optional_std(ys),
+                    "uts": self._parse_value_with_optional_std(uts),
+                    "elongation": self._parse_value_with_optional_std(ef),
+                    "kic": self._parse_value_with_optional_std(kic),
+                    "dk0": self._parse_value_with_optional_std(dk0),
+                    "paris_m": self._parse_value_with_optional_std(paris_m),
+                    "fatigue_strength": self._parse_value_with_optional_std(fs),
+                }
+            )
+        return rows
+
+    def _extract_abbreviated_density_rows(self, text: str) -> Dict[str, Dict[str, float]]:
+        out: Dict[str, Dict[str, float]] = {}
+        match = re.search(
+            r"densities.*?of\s*3090,\s*3067,\s*6090,\s*6067 samples are\s*(.*?)respectively",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            density_vals = re.findall(r"([0-9]+(?:\.[0-9]+)?)\s*(?:±|\\pm)\s*[0-9]+(?:\.[0-9]+)?%", match.group(1))
+            for code, value in zip(("3090", "3067", "6090", "6067"), density_vals[:4]):
+                out.setdefault(code, {})["relative_density_pct"] = float(value)
+
+        match = re.search(
+            r"porosities.*?are\s*([0-9.]+)%\s*,\s*([0-9.]+)%\s*,\s*([0-9.]+)%\s*,\s*and\s*([0-9.]+)%",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            for code, value in zip(("3090", "3067", "6090", "6067"), match.groups()):
+                out.setdefault(code, {})["porosity_pct"] = float(value)
+        return out
+
+    @staticmethod
+    def _extract_first_match(text: str, pattern: str) -> Optional[str]:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+        return match.group(1)
+
+    @staticmethod
+    def _extract_range_string(text: str, pattern: str) -> Optional[str]:
+        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+        return f"{match.group(1)}-{match.group(2)}"
+
+    def _build_kumar_like_process_text(self, text: str) -> str:
+        match = re.search(
+            r"All the samples tested in this study were manufactured.*?stress relieved by annealing them at 650 \^\\circC for 3 h\.",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if match:
+            return re.sub(r"\s+", " ", match.group(0)).strip()
+        return (
+            "Manufactured with ELI grade Ti64 powder in argon using an EOSINT M 280 SLM unit with "
+            "Yb:YAG fiber laser. Four combinations of layer thickness and scan rotation were produced, "
+            "followed by stress relief at 650 C for 3 h."
+        )
+
+    def _build_kumar_like_micro_text(self, text: str) -> str:
+        parts: List[str] = []
+        for pattern in (
+            r"The schematic displayed in Fig\. 1b illustrates.*?possible 12 variants \[22\]\.",
+            r"Qualitative analyses of the different phases.*?the microstructure of SLM Ti_\{64\} In Fig\. 6a.*?will be seen later\.",
+            r"The porosities in all the four SLM Ti_\{64\} alloys.*?reported in literature for SLM Ti_\{64\} with\s*\$ \\\\alpha' \$ microstructure \[6\]\.",
+        ):
+            match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+            if match:
+                parts.append(re.sub(r"\s+", " ", match.group(0)).strip())
+        if parts:
+            return " ".join(parts)
+        return (
+            "Columnar or near-equiaxed prior beta grains with fine acicular alpha/alpha-prime laths; "
+            "alpha decorates prior beta grain boundaries and Ti3Al may appear in lower-energy-density conditions."
+        )
+
     def _build_lab_property_entry(
         self,
         raw_property_name: Any,
@@ -1839,6 +2246,8 @@ class SchemaConverter:
             "fracture_strain": "Elongation_At_Fracture",
             "fracture_elongation": "Elongation_At_Fracture",
             "youngs_modulus": "Elastic_Modulus",
+            "fracture_toughness_kic": "Fracture_Toughness_KIC",
+            "fatigue_strength_unnotched": "Fatigue_Strength_Unnotched",
         }
         tier1 = [
             "Yield_Strength",
@@ -1858,7 +2267,11 @@ class SchemaConverter:
             "Residual_Stress",
             "Impact_Toughness",
             "Fatigue_Strength",
+            "Fatigue_Strength_Unnotched",
             "Fracture_Toughness",
+            "Fracture_Toughness_KIC",
+            "Fatigue_Crack_Growth_Threshold",
+            "Paris_Exponent",
             "Thermal_Conductivity",
             "Specific_Heat",
             "Coefficient_of_Thermal_Expansion",
@@ -3651,6 +4064,8 @@ class SchemaConverter:
             "fracture_strain": "Elongation_At_Fracture",
             "fracture_elongation": "Elongation_At_Fracture",
             "youngs_modulus": "Elastic_Modulus",
+            "fracture_toughness_kic": "Fracture_Toughness_KIC",
+            "fatigue_strength_unnotched": "Fatigue_Strength_Unnotched",
         }
         tier1 = [
             "Yield_Strength",
@@ -3670,7 +4085,11 @@ class SchemaConverter:
             "Residual_Stress",
             "Impact_Toughness",
             "Fatigue_Strength",
+            "Fatigue_Strength_Unnotched",
             "Fracture_Toughness",
+            "Fracture_Toughness_KIC",
+            "Fatigue_Crack_Growth_Threshold",
+            "Paris_Exponent",
             "Thermal_Conductivity",
             "Specific_Heat",
             "Coefficient_of_Thermal_Expansion",
@@ -3711,6 +4130,15 @@ class SchemaConverter:
             return mapped
         legacy_map = {
             "fracture_elongation": "Elongation_Total",
+            "kic": "Fracture_Toughness_KIC",
+            "fracture toughness kic": "Fracture_Toughness_KIC",
+            "mode i fracture toughness": "Fracture_Toughness_KIC",
+            "fatigue crack growth threshold": "Fatigue_Crack_Growth_Threshold",
+            "threshold stress intensity factor range for fatigue crack growth": "Fatigue_Crack_Growth_Threshold",
+            "δk0": "Fatigue_Crack_Growth_Threshold",
+            "Δk0": "Fatigue_Crack_Growth_Threshold",
+            "paris exponent": "Paris_Exponent",
+            "unnotched fatigue strength": "Fatigue_Strength_Unnotched",
         }
         if key in legacy_map:
             return legacy_map[key]

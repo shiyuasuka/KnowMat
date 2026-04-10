@@ -21,6 +21,7 @@ Item Definition:
 - One item = one unique combination of Composition + Process.
 - Split into a new item whenever composition, process state, explicit sample/state label, route, build/loading orientation, or parameter level changes.
 - Each lab item should carry a stable `Sample_ID`; all tests belonging to the same specimen share that id.
+- If the paper defines an abbreviated nomenclature table or sample matrix (for example `3090`, `3067`, `B3090`, `S3090`), enumerate that matrix first and emit one item per explicit row/state. Never keep only one representative row from such a matrix.
 - Gradient materials: prefer one item with `Gradient_Material = true` when the paper describes one graded specimen overall.
 - Only split a gradient specimen into multiple items when the paper explicitly reports layer-specific or step-specific independent data. In that case, keep `Gradient_Material = true` for each split item and link them with the same `Gradient_Group_ID`.
 - In-situ composites: treat matrix and reinforcement as separate items when composition is explicitly defined.
@@ -33,6 +34,7 @@ Table / provenance safety rules:
 - One table cell maps to one property slot only.
 - If ambiguity remains, skip rather than guess.
 - Build the full list of sample/state labels and parameter levels before extraction, then verify each has a corresponding item unless evidence is too ambiguous.
+- When a process table defines base sample codes and a property table adds direction/state prefixes or suffixes, combine them deterministically (for example process code `3090` plus tensile direction `B/S` means `B3090` and `S3090` are distinct items).
 - Never merge properties from different state buckets such as AB vs AA, SLM vs Cast, or different annealing levels.
 
 Composition Extraction (`Composition_Info`):

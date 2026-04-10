@@ -301,3 +301,129 @@ def test_parse_key_params_preserves_heat_treatment_ranges():
     assert params["Solution_Time_h"] == "2-4"
     assert params["Aging_Temperature_K"] == "973-1023"
     assert params["Aging_Time_h"] == "8-10"
+
+
+def test_extract_tensile_speed_mm_min_converts_mm_per_s():
+    value = converter._extract_tensile_speed_mm_min(
+        "These tests were performed under displacement control with a rate of 0.006 mm/s."
+    )
+    assert math.isclose(value, 0.36, rel_tol=1e-9, abs_tol=1e-9)
+
+
+def test_convert_repairs_abbreviated_sample_matrix_from_paper_text():
+    data = {
+        "items": [
+            {
+                "Sample_ID": "S3090",
+                "Gradient_Material": False,
+                "Gradient_Group_ID": None,
+                "Composition_Info": {
+                    "Role": "Target",
+                    "Alloy_Name_Raw": "Ti-6Al-4V ELI",
+                    "Nominal_Composition": {
+                        "Composition_Type": "wt%",
+                        "Elements_Normalized": {"Ti": 90.0, "Al": 6.0, "V": 4.0},
+                    },
+                    "Measured_Composition": {
+                        "Composition_Type": None,
+                        "Elements_Normalized": None,
+                        "Measurement_Method": None,
+                    },
+                    "Note": "ELI grade Ti64 powder",
+                },
+                "Process_Info": {
+                    "Process_Category": "AM_SLM",
+                    "Process_Text": {
+                        "original": "Selective laser melting in argon; post-SLM stress relief annealing at 650 C for 3 h.",
+                        "simplified": "SLM + stress relief",
+                    },
+                    "Equipment": "EOSINT M 280 (Yb:YAG fiber laser)",
+                    "Key_Params": {
+                        "Laser_Power_W": 280,
+                        "Scanning_Speed_mm_s": 1200,
+                        "Hatch_Spacing_um": 140,
+                        "Layer_Thickness_um": 30,
+                        "Scan_Rotation_deg": 90,
+                        "Volumetric_Energy_Density_J_mm3": 55.6,
+                    },
+                },
+                "Microstructure_Info": {
+                    "Microstructure_Text": {
+                        "original": "Fine acicular alpha/alpha prime laths within prior beta grains.",
+                        "simplified": "Acicular alpha/alpha prime laths",
+                    },
+                    "Main_Phase": "alpha/alpha prime lath structure",
+                    "Precipitates": [],
+                    "Porosity_pct": 0.37,
+                    "Relative_Density_pct": None,
+                    "Grain_Size_avg_um": 140.0,
+                    "Precipitate_Size_avg_nm": None,
+                    "Precipitate_Volume_Fraction_pct": None,
+                    "Phase_Fraction_pct": None,
+                    "Advanced_Quantitative_Features": {},
+                },
+                "Properties_Info": [
+                    {
+                        "Property_Name": "Yield_Strength",
+                        "Test_Condition": "at 298.15 K; strain rate 0.001 s^-1; displacement control 0.006 mm/s",
+                        "Value_Numeric": 1029.0,
+                        "Value_Range": None,
+                        "Value_StdDev": 8.0,
+                        "Unit": "MPa",
+                        "Test_Temperature_K": 298.15,
+                    }
+                ],
+            }
+        ]
+    }
+    paper_text = """
+Different combinations of SLM process parameters utilized for manufacturing the Ti-6Al-4V alloy coupons that were examined in this study.
+| Nomenclature | Laser Power (w) | Scan Speed (v) (mm/s) | Scan spacing(l) (mm) | Layer Thickness(t) ( $ \\mu $m) | Scan rotation ( $ ^{\\circ} $) | Energy Density (J) (J/mm $ ^{3} $) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 3090 | 280 | 1200 | 0.14 | 30 | 90 | 55.6 |
+| 3067 | 280 | 1200 | 0.14 | 30 | 67 | 55.6 |
+| 6090 | 340 | 1250 | 0.12 | 60 | 90 | 37.8 |
+| 6067 | 340 | 1250 | 0.12 | 60 | 67 | 37.8 |
+
+Summary of the mechanical properties of SLM Ti64 examined in this study.
+| Sample | $ \\sigma_{Y} $ (MPa) | $ \\sigma_{U} $ (MPa) | $ e_{f} $ (%) | $ K_{Ic} $ (MPa  $ \\sqrt{m} $) | $ \\Delta K_{0} $ (MPa  $ \\sqrt{m} $) | m | FS (MPa) | FS/ $ \\sigma_{U} $ |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| B3090 | 1161  $ \\pm $ 30 | 1237  $ \\pm $ 30 | 7.6  $ \\pm $ 1 | 52 | 5.6 | 2.53 | 340 | 0.28 |
+| S3090 | 1029  $ \\pm $ 8 | 1091  $ \\pm $ 6 | 7.8  $ \\pm $ 0.8 | 55 | 5.7 | 3.31 |  |  |
+| B3067 | 1121  $ \\pm $ 42 | 1186  $ \\pm $ 42 | 8.1  $ \\pm $ 0.6 | 48 | 5.3 | 3.55 | 340 | 0.29 |
+| S3067 | 1121  $ \\pm $ 9 | 1202  $ \\pm $ 11 | 10.1  $ \\pm $ 0.3 | 54 | 5.7 | 3.08 |  |  |
+| B6090 | 1151  $ \\pm $ 11 | 1222  $ \\pm $ 25 | 9.8  $ \\pm $ 1.1 | 51 | 5.8 | 2.87 | 453 | 0.37 |
+| S6090 | 1115  $ \\pm $ 18 | 1183  $ \\pm $ 22 | 9.7  $ \\pm $ 0.3 | 52 | 5.8 | 2.89 |  |  |
+| B6067 | 1102  $ \\pm $ 16 | 1145  $ \\pm $ 14 | 12.5  $ \\pm $ 1.4 | 58 | 5.4 | 3.51 | 475 | 0.41 |
+| S6067 | 1063  $ \\pm $ 17 | 1137  $ \\pm $ 23 | 12.8  $ \\pm $ 0.9 | 58 | 5.7 | 3.48 |  |  |
+
+These tests were performed under displacement control with a rate of 0.006 mm/s, which corresponds to a nominal strain rate of 0.001 s^-1.
+For the FCG measurements, the tensile load was applied on the sample in sinusoidal wave form at a frequency of 10 Hz at constant R (0.1).
+For the fracture toughness measurements, the specimens were precracked such that the a/W ratio is ~0.45-0.55, before being fractured at a displacement rate of 0.01 mm/s.
+The calculated apparent densities, rho, of 3090, 3067, 6090, 6067 samples are 99.76 ± 0.16%, 99.83 ± 0.08%, 99.83 ± 0.07% and 99.77 ± 0.15%, respectively. The corresponding porosities, measured using X-ray tomography, are 0.37%, 0.39%, 0.29%, and 0.17% respectively.
+The lath thickness' are too small (up to 2 um) than these estimated rp. On the other hand, the average colony sizes of ~10-15 um are in the similar range of interaction.
+"""
+
+    out = converter.convert(data, "kumar_like.md", paper_text=paper_text)
+
+    assert len(out["items"]) == 8
+    sample_ids = [item["Sample_ID"] for item in out["items"]]
+    assert sample_ids == ["B3090", "S3090", "B3067", "S3067", "B6090", "S6090", "B6067", "S6067"]
+
+    b3090 = next(item for item in out["items"] if item["Sample_ID"] == "B3090")
+    assert b3090["Process_Info"]["Process_Category"] == "Selective Laser Melting (SLM)"
+    assert b3090["Process_Info"]["Key_Params"]["Annealing_Temperature_K"] == 923.15
+    assert b3090["Microstructure_Info"]["Relative_Density_pct"] == 99.76
+    assert b3090["Microstructure_Info"]["Porosity_pct"] == 0.37
+    assert b3090["Microstructure_Info"]["Advanced_Quantitative_Features"]["Colony_Size_avg_um"] == "10-15"
+    assert b3090["Microstructure_Info"]["Advanced_Quantitative_Features"]["Lath_Thickness_max_um"] == 2.0
+
+    ys = next(prop for prop in b3090["Properties_Info"] if prop["Property_Name"] == "Yield_Strength")
+    kic = next(prop for prop in b3090["Properties_Info"] if prop["Property_Name"] == "Fracture_Toughness_KIC")
+    fs = next(prop for prop in b3090["Properties_Info"] if prop["Property_Name"] == "Fatigue_Strength_Unnotched")
+    assert ys["Tensile_Speed_mm_min"] == 0.36
+    assert kic["Unit"] == "MPa√m"
+    assert fs["Value_Numeric"] == 340.0
+
+    s3090 = next(item for item in out["items"] if item["Sample_ID"] == "S3090")
+    assert not any(prop["Property_Name"] == "Fatigue_Strength_Unnotched" for prop in s3090["Properties_Info"])

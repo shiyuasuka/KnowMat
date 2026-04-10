@@ -1,0 +1,1982 @@
+{
+  "Paper_Metadata": {
+    "Paper_Title": "Micro-and meso-structures and their influence on mechanical properties of selectively laser melted Ti-6Al-4V",
+    "DOI": "10.1016/j.actamat.2018.05.044"
+  },
+  "items": [
+    {
+      "Sample_ID": "B3090",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Target",
+        "Alloy_Name_Raw": "Ti-6Al-4V ELI",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Commercial ELI grade Ti-6Al-4V powder; specific composition values not provided in text"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM)",
+        "Process_Text": {
+          "original": "Manufactured with ELI grade Ti-6Al-4V powder in an argon gas environment in an EOSINT M 280 SLM unit equipped with a Yb:YAG fiber laser. Process parameters: laser power 280 W, scan speed 1200 mm/s, scan spacing 0.14 mm, layer thickness 30 μm, scan rotation 90° between successive layers, energy density 55.6 J/mm³. Square cross-section coupons (64×64 mm², 14 mm thickness) and cylindrical samples (9 mm diameter, 64 mm long) were produced. Post-SLM stress relief annealing at 650°C for 3 h.",
+          "simplified": "SLM (EOSINT M 280, Yb:YAG laser): P=280W, v=1200mm/s, h=0.14mm, t=30μm, φ=90°, J=55.6 J/mm³. Stress relieved at 650°C/3h in argon."
+        },
+        "Equipment": "EOSINT M 280 SLM unit with Yb:YAG fiber laser",
+        "Key_Params": {
+          "Laser_Power_W": 280,
+          "Scanning_Speed_mm_s": 1200,
+          "Hatch_Spacing_um": 140,
+          "Layer_Thickness_um": 30,
+          "Scan_Rotation_deg": 90,
+          "Volumetric_Energy_Density_J_mm3": 55.6,
+          "Annealing_Temperature_K": 923.15,
+          "Annealing_Time_h": 3,
+          "Protective_Atmosphere": "argon"
+        }
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Columnar prior β grains with square cross-section in B-plane (side length ~140 μm, approximately equal to scan spacing), spanning the entire height in S-plane. Fine acicular α/α' lath structure within prior β grains, with α phase decorating grain boundaries. Laths oriented at ~45° to build direction due to Burger's orientation relationships between cubic prior β and hexagonal α'. Epitaxial growth results in columnar grains growing in ⟨001⟩β directions normal to deposited layers. High energy density (55.6 J/mm³) melts all powder, eliminating heterogeneous nucleation sites, leading to full-height columnar grain growth. Both α and α' phases present (confirmed by TEM/SAED), with α' having lower c/a ratio (1.58) compared to α (1.59-1.6).",
+          "simplified": "Columnar prior β grains (~140μm, full height), fine acicular α/α' laths at ~45° to BD, α at GBs. Epitaxial growth, no equiaxed grains."
+        },
+        "Main_Phase": "HCP α/α' (acicular lath mixture)",
+        "Precipitates": [
+          {
+            "Phase_Type": "α (at prior β grain boundaries)",
+            "Volume_Fraction_pct": null
+          }
+        ],
+        "Porosity_pct": 0.37,
+        "Relative_Density_pct": 99.76,
+        "Grain_Size_avg_um": 140,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {
+          "Colony_Size_avg_um": "10-15",
+          "Lath_Thickness_max_um": 2.0
+        }
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Yield_Strength",
+          "Test_Condition": "Tensile test, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 1161,
+          "Value_Range": null,
+          "Value_StdDev": 30,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Ultimate_Tensile_Strength",
+          "Test_Condition": "Tensile test, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 1237,
+          "Value_Range": null,
+          "Value_StdDev": 30,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Elongation_Total",
+          "Test_Condition": "Tensile test, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 7.6,
+          "Value_Range": null,
+          "Value_StdDev": 1,
+          "Unit": "%",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": "Original paper reports ef (elongation to failure); not distinguished into uniform and fracture components"
+        },
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 52,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), 12mm thick, 24mm wide, precracked to a/W~0.45-0.55, fractured at 0.01 mm/s, ASTM E399-12",
+          "Note": null
+        },
+        {
+          "Property_Name": "Fatigue_Crack_Growth_Threshold",
+          "Test_Condition": "FCG threshold, Loading axis parallel to build direction (B), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 5.6,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), precracked to a/W~0.45-0.55, ASTM E647-15",
+          "Note": "ΔK₀ determined by load shedding method until da/dN=2×10⁻⁹ m/cycle"
+        },
+        {
+          "Property_Name": "Paris_Exponent",
+          "Test_Condition": "Steady-state FCG, Loading axis parallel to build direction (B), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 2.53,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "dimensionless",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), ASTM E647-15",
+          "Note": "Paris equation: da/dN = C(ΔK)^m"
+        },
+        {
+          "Property_Name": "Fatigue_Strength_Unnotched",
+          "Test_Condition": "Rotating bending fatigue (RBF), R=-1 (fully reversed), specimen axis along build direction, survival criterion 10^7 cycles",
+          "Value_Numeric": 340,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Hourglass RBF specimen, gauge length 22mm, min diameter ~5mm",
+          "Note": "FS/σU = 0.28"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "S3090",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Target",
+        "Alloy_Name_Raw": "Ti-6Al-4V ELI",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Commercial ELI grade Ti-6Al-4V powder; specific composition values not provided in text"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM)",
+        "Process_Text": {
+          "original": "Manufactured with ELI grade Ti-6Al-4V powder in an argon gas environment in an EOSINT M 280 SLM unit equipped with a Yb:YAG fiber laser. Process parameters: laser power 280 W, scan speed 1200 mm/s, scan spacing 0.14 mm, layer thickness 30 μm, scan rotation 90° between successive layers, energy density 55.6 J/mm³. Square cross-section coupons (64×64 mm², 14 mm thickness) and cylindrical samples (9 mm diameter, 64 mm long) were produced. Post-SLM stress relief annealing at 650°C for 3 h.",
+          "simplified": "SLM (EOSINT M 280, Yb:YAG laser): P=280W, v=1200mm/s, h=0.14mm, t=30μm, φ=90°, J=55.6 J/mm³. Stress relieved at 650°C/3h in argon."
+        },
+        "Equipment": "EOSINT M 280 SLM unit with Yb:YAG fiber laser",
+        "Key_Params": {
+          "Laser_Power_W": 280,
+          "Scanning_Speed_mm_s": 1200,
+          "Hatch_Spacing_um": 140,
+          "Layer_Thickness_um": 30,
+          "Scan_Rotation_deg": 90,
+          "Volumetric_Energy_Density_J_mm3": 55.6,
+          "Annealing_Temperature_K": 923.15,
+          "Annealing_Time_h": 3,
+          "Protective_Atmosphere": "argon"
+        }
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Columnar prior β grains with square cross-section in B-plane (side length ~140 μm, approximately equal to scan spacing), spanning the entire height in S-plane. Fine acicular α/α' lath structure within prior β grains, with α phase decorating grain boundaries. Laths oriented at ~45° to build direction due to Burger's orientation relationships between cubic prior β and hexagonal α'. Epitaxial growth results in columnar grains growing in ⟨001⟩β directions normal to deposited layers. High energy density (55.6 J/mm³) melts all powder, eliminating heterogeneous nucleation sites, leading to full-height columnar grain growth. Both α and α' phases present (confirmed by TEM/SAED), with α' having lower c/a ratio (1.58) compared to α (1.59-1.6).",
+          "simplified": "Columnar prior β grains (~140μm, full height), fine acicular α/α' laths at ~45° to BD, α at GBs. Epitaxial growth, no equiaxed grains."
+        },
+        "Main_Phase": "HCP α/α' (acicular lath mixture)",
+        "Precipitates": [
+          {
+            "Phase_Type": "α (at prior β grain boundaries)",
+            "Volume_Fraction_pct": null
+          }
+        ],
+        "Porosity_pct": 0.37,
+        "Relative_Density_pct": 99.76,
+        "Grain_Size_avg_um": 140,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {
+          "Colony_Size_avg_um": "10-15",
+          "Lath_Thickness_max_um": 2.0
+        }
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Yield_Strength",
+          "Test_Condition": "Tensile test, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 1029,
+          "Value_Range": null,
+          "Value_StdDev": 8,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Ultimate_Tensile_Strength",
+          "Test_Condition": "Tensile test, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 1091,
+          "Value_Range": null,
+          "Value_StdDev": 6,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Elongation_Total",
+          "Test_Condition": "Tensile test, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 7.8,
+          "Value_Range": null,
+          "Value_StdDev": 0.8,
+          "Unit": "%",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": "Original paper reports ef (elongation to failure); not distinguished into uniform and fracture components"
+        },
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 55,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), 12mm thick, 24mm wide, precracked to a/W~0.45-0.55, fractured at 0.01 mm/s, ASTM E399-12",
+          "Note": null
+        },
+        {
+          "Property_Name": "Fatigue_Crack_Growth_Threshold",
+          "Test_Condition": "FCG threshold, Loading axis perpendicular to build direction (S), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 5.7,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), precracked to a/W~0.45-0.55, ASTM E647-15",
+          "Note": "ΔK₀ determined by load shedding method until da/dN=2×10⁻⁹ m/cycle"
+        },
+        {
+          "Property_Name": "Paris_Exponent",
+          "Test_Condition": "Steady-state FCG, Loading axis perpendicular to build direction (S), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 3.31,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "dimensionless",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), ASTM E647-15",
+          "Note": "Paris equation: da/dN = C(ΔK)^m"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "B3067",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Target",
+        "Alloy_Name_Raw": "Ti-6Al-4V ELI",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Commercial ELI grade Ti-6Al-4V powder; specific composition values not provided in text"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM)",
+        "Process_Text": {
+          "original": "Manufactured with ELI grade Ti-6Al-4V powder in an argon gas environment in an EOSINT M 280 SLM unit equipped with a Yb:YAG fiber laser. Process parameters: laser power 280 W, scan speed 1200 mm/s, scan spacing 0.14 mm, layer thickness 30 μm, scan rotation 67° between successive layers, energy density 55.6 J/mm³. Square cross-section coupons (64×64 mm², 14 mm thickness) and cylindrical samples (9 mm diameter, 64 mm long) were produced. Post-SLM stress relief annealing at 650°C for 3 h.",
+          "simplified": "SLM (EOSINT M 280, Yb:YAG laser): P=280W, v=1200mm/s, h=0.14mm, t=30μm, φ=67°, J=55.6 J/mm³. Stress relieved at 650°C/3h in argon."
+        },
+        "Equipment": "EOSINT M 280 SLM unit with Yb:YAG fiber laser",
+        "Key_Params": {
+          "Laser_Power_W": 280,
+          "Scanning_Speed_mm_s": 1200,
+          "Hatch_Spacing_um": 140,
+          "Layer_Thickness_um": 30,
+          "Scan_Rotation_deg": 67,
+          "Volumetric_Energy_Density_J_mm3": 55.6,
+          "Annealing_Temperature_K": 923.15,
+          "Annealing_Time_h": 3,
+          "Protective_Atmosphere": "argon"
+        }
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Equiaxed prior β grains in B-plane (average diameter ~140 μm, equal to scan spacing) due to 67° scan rotation causing mismatch between successive laser tracks. Columnar prior β grains in S-plane but with jagged and discontinuous walls due to laser track mismatch. Fine acicular α/α' lath structure within prior β grains, with α phase at grain boundaries. Both α and α' phases present.",
+          "simplified": "Equiaxed prior β in B-plane (~140μm), discontinuous columnar in S-plane. Fine acicular α/α' laths, α at GBs."
+        },
+        "Main_Phase": "HCP α/α' (acicular lath mixture)",
+        "Precipitates": [
+          {
+            "Phase_Type": "α (at prior β grain boundaries)",
+            "Volume_Fraction_pct": null
+          }
+        ],
+        "Porosity_pct": 0.39,
+        "Relative_Density_pct": 99.83,
+        "Grain_Size_avg_um": 140,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {
+          "Colony_Size_avg_um": "10-15",
+          "Lath_Thickness_max_um": 2.0
+        }
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Yield_Strength",
+          "Test_Condition": "Tensile test, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 1121,
+          "Value_Range": null,
+          "Value_StdDev": 42,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Ultimate_Tensile_Strength",
+          "Test_Condition": "Tensile test, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 1186,
+          "Value_Range": null,
+          "Value_StdDev": 42,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Elongation_Total",
+          "Test_Condition": "Tensile test, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 8.1,
+          "Value_Range": null,
+          "Value_StdDev": 0.6,
+          "Unit": "%",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": "Original paper reports ef (elongation to failure); not distinguished into uniform and fracture components"
+        },
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 48,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), 12mm thick, 24mm wide, precracked to a/W~0.45-0.55, fractured at 0.01 mm/s, ASTM E399-12",
+          "Note": null
+        },
+        {
+          "Property_Name": "Fatigue_Crack_Growth_Threshold",
+          "Test_Condition": "FCG threshold, Loading axis parallel to build direction (B), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 5.3,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), precracked to a/W~0.45-0.55, ASTM E647-15",
+          "Note": "ΔK₀ determined by load shedding method until da/dN=2×10⁻⁹ m/cycle"
+        },
+        {
+          "Property_Name": "Paris_Exponent",
+          "Test_Condition": "Steady-state FCG, Loading axis parallel to build direction (B), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 3.55,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "dimensionless",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), ASTM E647-15",
+          "Note": "Paris equation: da/dN = C(ΔK)^m"
+        },
+        {
+          "Property_Name": "Fatigue_Strength_Unnotched",
+          "Test_Condition": "Rotating bending fatigue (RBF), R=-1 (fully reversed), specimen axis along build direction, survival criterion 10^7 cycles",
+          "Value_Numeric": 340,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Hourglass RBF specimen, gauge length 22mm, min diameter ~5mm",
+          "Note": "FS/σU = 0.29"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "S3067",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Target",
+        "Alloy_Name_Raw": "Ti-6Al-4V ELI",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Commercial ELI grade Ti-6Al-4V powder; specific composition values not provided in text"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM)",
+        "Process_Text": {
+          "original": "Manufactured with ELI grade Ti-6Al-4V powder in an argon gas environment in an EOSINT M 280 SLM unit equipped with a Yb:YAG fiber laser. Process parameters: laser power 280 W, scan speed 1200 mm/s, scan spacing 0.14 mm, layer thickness 30 μm, scan rotation 67° between successive layers, energy density 55.6 J/mm³. Square cross-section coupons (64×64 mm², 14 mm thickness) and cylindrical samples (9 mm diameter, 64 mm long) were produced. Post-SLM stress relief annealing at 650°C for 3 h.",
+          "simplified": "SLM (EOSINT M 280, Yb:YAG laser): P=280W, v=1200mm/s, h=0.14mm, t=30μm, φ=67°, J=55.6 J/mm³. Stress relieved at 650°C/3h in argon."
+        },
+        "Equipment": "EOSINT M 280 SLM unit with Yb:YAG fiber laser",
+        "Key_Params": {
+          "Laser_Power_W": 280,
+          "Scanning_Speed_mm_s": 1200,
+          "Hatch_Spacing_um": 140,
+          "Layer_Thickness_um": 30,
+          "Scan_Rotation_deg": 67,
+          "Volumetric_Energy_Density_J_mm3": 55.6,
+          "Annealing_Temperature_K": 923.15,
+          "Annealing_Time_h": 3,
+          "Protective_Atmosphere": "argon"
+        }
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Equiaxed prior β grains in B-plane (average diameter ~140 μm, equal to scan spacing) due to 67° scan rotation causing mismatch between successive laser tracks. Columnar prior β grains in S-plane but with jagged and discontinuous walls due to laser track mismatch. Fine acicular α/α' lath structure within prior β grains, with α phase at grain boundaries. Both α and α' phases present.",
+          "simplified": "Equiaxed prior β in B-plane (~140μm), discontinuous columnar in S-plane. Fine acicular α/α' laths, α at GBs."
+        },
+        "Main_Phase": "HCP α/α' (acicular lath mixture)",
+        "Precipitates": [
+          {
+            "Phase_Type": "α (at prior β grain boundaries)",
+            "Volume_Fraction_pct": null
+          }
+        ],
+        "Porosity_pct": 0.39,
+        "Relative_Density_pct": 99.83,
+        "Grain_Size_avg_um": 140,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {
+          "Colony_Size_avg_um": "10-15",
+          "Lath_Thickness_max_um": 2.0
+        }
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Yield_Strength",
+          "Test_Condition": "Tensile test, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 1121,
+          "Value_Range": null,
+          "Value_StdDev": 9,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Ultimate_Tensile_Strength",
+          "Test_Condition": "Tensile test, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 1202,
+          "Value_Range": null,
+          "Value_StdDev": 11,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Elongation_Total",
+          "Test_Condition": "Tensile test, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 10.1,
+          "Value_Range": null,
+          "Value_StdDev": 0.3,
+          "Unit": "%",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": "Original paper reports ef (elongation to failure); not distinguished into uniform and fracture components"
+        },
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 54,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), 12mm thick, 24mm wide, precracked to a/W~0.45-0.55, fractured at 0.01 mm/s, ASTM E399-12",
+          "Note": null
+        },
+        {
+          "Property_Name": "Fatigue_Crack_Growth_Threshold",
+          "Test_Condition": "FCG threshold, Loading axis perpendicular to build direction (S), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 5.7,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), precracked to a/W~0.45-0.55, ASTM E647-15",
+          "Note": "ΔK₀ determined by load shedding method until da/dN=2×10⁻⁹ m/cycle"
+        },
+        {
+          "Property_Name": "Paris_Exponent",
+          "Test_Condition": "Steady-state FCG, Loading axis perpendicular to build direction (S), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 3.08,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "dimensionless",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), ASTM E647-15",
+          "Note": "Paris equation: da/dN = C(ΔK)^m"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "B6090",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Target",
+        "Alloy_Name_Raw": "Ti-6Al-4V ELI",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Commercial ELI grade Ti-6Al-4V powder; specific composition values not provided in text"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM)",
+        "Process_Text": {
+          "original": "Manufactured with ELI grade Ti-6Al-4V powder in an argon gas environment in an EOSINT M 280 SLM unit equipped with a Yb:YAG fiber laser. Process parameters: laser power 340 W, scan speed 1250 mm/s, scan spacing 0.12 mm, layer thickness 60 μm, scan rotation 90° between successive layers, energy density 37.8 J/mm³. Square cross-section coupons (64×64 mm², 14 mm thickness) and cylindrical samples (9 mm diameter, 64 mm long) were produced. Post-SLM stress relief annealing at 650°C for 3 h.",
+          "simplified": "SLM (EOSINT M 280, Yb:YAG laser): P=340W, v=1250mm/s, h=0.12mm, t=60μm, φ=90°, J=37.8 J/mm³. Stress relieved at 650°C/3h in argon."
+        },
+        "Equipment": "EOSINT M 280 SLM unit with Yb:YAG fiber laser",
+        "Key_Params": {
+          "Laser_Power_W": 340,
+          "Scanning_Speed_mm_s": 1250,
+          "Hatch_Spacing_um": 120,
+          "Layer_Thickness_um": 60,
+          "Scan_Rotation_deg": 90,
+          "Volumetric_Energy_Density_J_mm3": 37.8,
+          "Annealing_Temperature_K": 923.15,
+          "Annealing_Time_h": 3,
+          "Protective_Atmosphere": "argon"
+        }
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Square-shaped prior β grains in B-plane (side length ~120 μm, reflecting reduced scan spacing of 0.12 mm). Shortened vertical columnar prior β grains in S-plane due to melt zone boundaries from lower energy density (37.8 J/mm³), which prevents full epitaxy. Columnar grains are discontinuous but still aligned along build direction with near-linear boundaries. Fine acicular α/α' lath structure within prior β grains, α at grain boundaries. Possible Ti₃Al phase detected by XRD.",
+          "simplified": "Square prior β in B-plane (~120μm), shortened columnar in S-plane (melt zone boundaries). Fine α/α' laths, possible Ti₃Al."
+        },
+        "Main_Phase": "HCP α/α' (acicular lath mixture)",
+        "Precipitates": [
+          {
+            "Phase_Type": "α (at prior β grain boundaries)",
+            "Volume_Fraction_pct": null
+          }
+        ],
+        "Porosity_pct": 0.29,
+        "Relative_Density_pct": 99.83,
+        "Grain_Size_avg_um": 120,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {
+          "Colony_Size_avg_um": "10-15",
+          "Lath_Thickness_max_um": 2.0
+        }
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Yield_Strength",
+          "Test_Condition": "Tensile test, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 1151,
+          "Value_Range": null,
+          "Value_StdDev": 11,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Ultimate_Tensile_Strength",
+          "Test_Condition": "Tensile test, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 1222,
+          "Value_Range": null,
+          "Value_StdDev": 25,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Elongation_Total",
+          "Test_Condition": "Tensile test, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 9.8,
+          "Value_Range": null,
+          "Value_StdDev": 1.1,
+          "Unit": "%",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": "Original paper reports ef (elongation to failure); not distinguished into uniform and fracture components"
+        },
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 51,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), 12mm thick, 24mm wide, precracked to a/W~0.45-0.55, fractured at 0.01 mm/s, ASTM E399-12",
+          "Note": null
+        },
+        {
+          "Property_Name": "Fatigue_Crack_Growth_Threshold",
+          "Test_Condition": "FCG threshold, Loading axis parallel to build direction (B), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 5.8,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), precracked to a/W~0.45-0.55, ASTM E647-15",
+          "Note": "ΔK₀ determined by load shedding method until da/dN=2×10⁻⁹ m/cycle"
+        },
+        {
+          "Property_Name": "Paris_Exponent",
+          "Test_Condition": "Steady-state FCG, Loading axis parallel to build direction (B), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 2.87,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "dimensionless",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), ASTM E647-15",
+          "Note": "Paris equation: da/dN = C(ΔK)^m"
+        },
+        {
+          "Property_Name": "Fatigue_Strength_Unnotched",
+          "Test_Condition": "Rotating bending fatigue (RBF), R=-1 (fully reversed), specimen axis along build direction, survival criterion 10^7 cycles",
+          "Value_Numeric": 453,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Hourglass RBF specimen, gauge length 22mm, min diameter ~5mm",
+          "Note": "FS/σU = 0.37"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "S6090",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Target",
+        "Alloy_Name_Raw": "Ti-6Al-4V ELI",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Commercial ELI grade Ti-6Al-4V powder; specific composition values not provided in text"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM)",
+        "Process_Text": {
+          "original": "Manufactured with ELI grade Ti-6Al-4V powder in an argon gas environment in an EOSINT M 280 SLM unit equipped with a Yb:YAG fiber laser. Process parameters: laser power 340 W, scan speed 1250 mm/s, scan spacing 0.12 mm, layer thickness 60 μm, scan rotation 90° between successive layers, energy density 37.8 J/mm³. Square cross-section coupons (64×64 mm², 14 mm thickness) and cylindrical samples (9 mm diameter, 64 mm long) were produced. Post-SLM stress relief annealing at 650°C for 3 h.",
+          "simplified": "SLM (EOSINT M 280, Yb:YAG laser): P=340W, v=1250mm/s, h=0.12mm, t=60μm, φ=90°, J=37.8 J/mm³. Stress relieved at 650°C/3h in argon."
+        },
+        "Equipment": "EOSINT M 280 SLM unit with Yb:YAG fiber laser",
+        "Key_Params": {
+          "Laser_Power_W": 340,
+          "Scanning_Speed_mm_s": 1250,
+          "Hatch_Spacing_um": 120,
+          "Layer_Thickness_um": 60,
+          "Scan_Rotation_deg": 90,
+          "Volumetric_Energy_Density_J_mm3": 37.8,
+          "Annealing_Temperature_K": 923.15,
+          "Annealing_Time_h": 3,
+          "Protective_Atmosphere": "argon"
+        }
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Square-shaped prior β grains in B-plane (side length ~120 μm, reflecting reduced scan spacing of 0.12 mm). Shortened vertical columnar prior β grains in S-plane due to melt zone boundaries from lower energy density (37.8 J/mm³), which prevents full epitaxy. Columnar grains are discontinuous but still aligned along build direction with near-linear boundaries. Fine acicular α/α' lath structure within prior β grains, α at grain boundaries. Possible Ti₃Al phase detected by XRD.",
+          "simplified": "Square prior β in B-plane (~120μm), shortened columnar in S-plane (melt zone boundaries). Fine α/α' laths, possible Ti₃Al."
+        },
+        "Main_Phase": "HCP α/α' (acicular lath mixture)",
+        "Precipitates": [
+          {
+            "Phase_Type": "α (at prior β grain boundaries)",
+            "Volume_Fraction_pct": null
+          }
+        ],
+        "Porosity_pct": 0.29,
+        "Relative_Density_pct": 99.83,
+        "Grain_Size_avg_um": 120,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {
+          "Colony_Size_avg_um": "10-15",
+          "Lath_Thickness_max_um": 2.0
+        }
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Yield_Strength",
+          "Test_Condition": "Tensile test, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 1115,
+          "Value_Range": null,
+          "Value_StdDev": 18,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Ultimate_Tensile_Strength",
+          "Test_Condition": "Tensile test, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 1183,
+          "Value_Range": null,
+          "Value_StdDev": 22,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Elongation_Total",
+          "Test_Condition": "Tensile test, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 9.7,
+          "Value_Range": null,
+          "Value_StdDev": 0.3,
+          "Unit": "%",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": "Original paper reports ef (elongation to failure); not distinguished into uniform and fracture components"
+        },
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 52,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), 12mm thick, 24mm wide, precracked to a/W~0.45-0.55, fractured at 0.01 mm/s, ASTM E399-12",
+          "Note": null
+        },
+        {
+          "Property_Name": "Fatigue_Crack_Growth_Threshold",
+          "Test_Condition": "FCG threshold, Loading axis perpendicular to build direction (S), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 5.8,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), precracked to a/W~0.45-0.55, ASTM E647-15",
+          "Note": "ΔK₀ determined by load shedding method until da/dN=2×10⁻⁹ m/cycle"
+        },
+        {
+          "Property_Name": "Paris_Exponent",
+          "Test_Condition": "Steady-state FCG, Loading axis perpendicular to build direction (S), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 2.89,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "dimensionless",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), ASTM E647-15",
+          "Note": "Paris equation: da/dN = C(ΔK)^m"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "B6067",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Target",
+        "Alloy_Name_Raw": "Ti-6Al-4V ELI",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Commercial ELI grade Ti-6Al-4V powder; specific composition values not provided in text"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM)",
+        "Process_Text": {
+          "original": "Manufactured with ELI grade Ti-6Al-4V powder in an argon gas environment in an EOSINT M 280 SLM unit equipped with a Yb:YAG fiber laser. Process parameters: laser power 340 W, scan speed 1250 mm/s, scan spacing 0.12 mm, layer thickness 60 μm, scan rotation 67° between successive layers, energy density 37.8 J/mm³. Square cross-section coupons (64×64 mm², 14 mm thickness) and cylindrical samples (9 mm diameter, 64 mm long) were produced. Post-SLM stress relief annealing at 650°C for 3 h.",
+          "simplified": "SLM (EOSINT M 280, Yb:YAG laser): P=340W, v=1250mm/s, h=0.12mm, t=60μm, φ=67°, J=37.8 J/mm³. Stress relieved at 650°C/3h in argon."
+        },
+        "Equipment": "EOSINT M 280 SLM unit with Yb:YAG fiber laser",
+        "Key_Params": {
+          "Laser_Power_W": 340,
+          "Scanning_Speed_mm_s": 1250,
+          "Hatch_Spacing_um": 120,
+          "Layer_Thickness_um": 60,
+          "Scan_Rotation_deg": 67,
+          "Volumetric_Energy_Density_J_mm3": 37.8,
+          "Annealing_Temperature_K": 923.15,
+          "Annealing_Time_h": 3,
+          "Protective_Atmosphere": "argon"
+        }
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Equiaxed prior β grains in B-plane. Irregular and short grain boundaries in S-plane due to combined effect of 67° scan rotation and lower energy density (37.8 J/mm³). Fine acicular α/α' lath structure within prior β grains, with α phase at grain boundaries. Possible Ti₃Al phase detected by XRD. Most equiaxed mesostructure among all four conditions, resulting in optimum combination of high strength, ductility, and fracture toughness.",
+          "simplified": "Equiaxed prior β in B-plane, irregular short boundaries in S-plane. Fine α/α' laths, possible Ti₃Al. Most isotropic mesostructure."
+        },
+        "Main_Phase": "HCP α/α' (acicular lath mixture)",
+        "Precipitates": [
+          {
+            "Phase_Type": "α (at prior β grain boundaries)",
+            "Volume_Fraction_pct": null
+          }
+        ],
+        "Porosity_pct": 0.17,
+        "Relative_Density_pct": 99.77,
+        "Grain_Size_avg_um": 120,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {
+          "Colony_Size_avg_um": "10-15",
+          "Lath_Thickness_max_um": 2.0
+        }
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Yield_Strength",
+          "Test_Condition": "Tensile test, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 1102,
+          "Value_Range": null,
+          "Value_StdDev": 16,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Ultimate_Tensile_Strength",
+          "Test_Condition": "Tensile test, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 1145,
+          "Value_Range": null,
+          "Value_StdDev": 14,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Elongation_Total",
+          "Test_Condition": "Tensile test, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 12.5,
+          "Value_Range": null,
+          "Value_StdDev": 1.4,
+          "Unit": "%",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": "Original paper reports ef (elongation to failure); not distinguished into uniform and fracture components"
+        },
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness, Loading axis parallel to build direction (B)",
+          "Value_Numeric": 58,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), 12mm thick, 24mm wide, precracked to a/W~0.45-0.55, fractured at 0.01 mm/s, ASTM E399-12",
+          "Note": null
+        },
+        {
+          "Property_Name": "Fatigue_Crack_Growth_Threshold",
+          "Test_Condition": "FCG threshold, Loading axis parallel to build direction (B), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 5.4,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), precracked to a/W~0.45-0.55, ASTM E647-15",
+          "Note": "ΔK₀ determined by load shedding method until da/dN=2×10⁻⁹ m/cycle"
+        },
+        {
+          "Property_Name": "Paris_Exponent",
+          "Test_Condition": "Steady-state FCG, Loading axis parallel to build direction (B), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 3.51,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "dimensionless",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), ASTM E647-15",
+          "Note": "Paris equation: da/dN = C(ΔK)^m"
+        },
+        {
+          "Property_Name": "Fatigue_Strength_Unnotched",
+          "Test_Condition": "Rotating bending fatigue (RBF), R=-1 (fully reversed), specimen axis along build direction, survival criterion 10^7 cycles",
+          "Value_Numeric": 475,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Hourglass RBF specimen, gauge length 22mm, min diameter ~5mm",
+          "Note": "FS/σU = 0.41"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "S6067",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Target",
+        "Alloy_Name_Raw": "Ti-6Al-4V ELI",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Commercial ELI grade Ti-6Al-4V powder; specific composition values not provided in text"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM)",
+        "Process_Text": {
+          "original": "Manufactured with ELI grade Ti-6Al-4V powder in an argon gas environment in an EOSINT M 280 SLM unit equipped with a Yb:YAG fiber laser. Process parameters: laser power 340 W, scan speed 1250 mm/s, scan spacing 0.12 mm, layer thickness 60 μm, scan rotation 67° between successive layers, energy density 37.8 J/mm³. Square cross-section coupons (64×64 mm², 14 mm thickness) and cylindrical samples (9 mm diameter, 64 mm long) were produced. Post-SLM stress relief annealing at 650°C for 3 h.",
+          "simplified": "SLM (EOSINT M 280, Yb:YAG laser): P=340W, v=1250mm/s, h=0.12mm, t=60μm, φ=67°, J=37.8 J/mm³. Stress relieved at 650°C/3h in argon."
+        },
+        "Equipment": "EOSINT M 280 SLM unit with Yb:YAG fiber laser",
+        "Key_Params": {
+          "Laser_Power_W": 340,
+          "Scanning_Speed_mm_s": 1250,
+          "Hatch_Spacing_um": 120,
+          "Layer_Thickness_um": 60,
+          "Scan_Rotation_deg": 67,
+          "Volumetric_Energy_Density_J_mm3": 37.8,
+          "Annealing_Temperature_K": 923.15,
+          "Annealing_Time_h": 3,
+          "Protective_Atmosphere": "argon"
+        }
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Equiaxed prior β grains in B-plane. Irregular and short grain boundaries in S-plane due to combined effect of 67° scan rotation and lower energy density (37.8 J/mm³). Fine acicular α/α' lath structure within prior β grains, with α phase at grain boundaries. Possible Ti₃Al phase detected by XRD. Most equiaxed mesostructure among all four conditions, resulting in optimum combination of high strength, ductility, and fracture toughness.",
+          "simplified": "Equiaxed prior β in B-plane, irregular short boundaries in S-plane. Fine α/α' laths, possible Ti₃Al. Most isotropic mesostructure."
+        },
+        "Main_Phase": "HCP α/α' (acicular lath mixture)",
+        "Precipitates": [
+          {
+            "Phase_Type": "α (at prior β grain boundaries)",
+            "Volume_Fraction_pct": null
+          }
+        ],
+        "Porosity_pct": 0.17,
+        "Relative_Density_pct": 99.77,
+        "Grain_Size_avg_um": 120,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {
+          "Colony_Size_avg_um": "10-15",
+          "Lath_Thickness_max_um": 2.0
+        }
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Yield_Strength",
+          "Test_Condition": "Tensile test, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 1063,
+          "Value_Range": null,
+          "Value_StdDev": 17,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Ultimate_Tensile_Strength",
+          "Test_Condition": "Tensile test, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 1137,
+          "Value_Range": null,
+          "Value_StdDev": 23,
+          "Unit": "MPa",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": null
+        },
+        {
+          "Property_Name": "Elongation_Total",
+          "Test_Condition": "Tensile test, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 12.8,
+          "Value_Range": null,
+          "Value_StdDev": 0.9,
+          "Unit": "%",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": "1×10⁻³",
+          "Tensile_Speed_mm_min": 0.36,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Dog-bone, gauge length 6mm, cross-section 2×0.5mm²",
+          "Note": "Original paper reports ef (elongation to failure); not distinguished into uniform and fracture components"
+        },
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness, Loading axis perpendicular to build direction (S)",
+          "Value_Numeric": 58,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), 12mm thick, 24mm wide, precracked to a/W~0.45-0.55, fractured at 0.01 mm/s, ASTM E399-12",
+          "Note": null
+        },
+        {
+          "Property_Name": "Fatigue_Crack_Growth_Threshold",
+          "Test_Condition": "FCG threshold, Loading axis perpendicular to build direction (S), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 5.7,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), precracked to a/W~0.45-0.55, ASTM E647-15",
+          "Note": "ΔK₀ determined by load shedding method until da/dN=2×10⁻⁹ m/cycle"
+        },
+        {
+          "Property_Name": "Paris_Exponent",
+          "Test_Condition": "Steady-state FCG, Loading axis perpendicular to build direction (S), R=0.1, 10Hz sinusoidal",
+          "Value_Numeric": 3.48,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "dimensionless",
+          "Test_Temperature_K": 298.15,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": "Chevron notch half-sized C(T), ASTM E647-15",
+          "Note": "Paris equation: da/dN = C(ΔK)^m"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "Cain_2015_SLM_Parallel",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Reference",
+        "Alloy_Name_Raw": "SLM Ti-6Al-4V",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Literature reference data cited in the reviewed paper"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM)",
+        "Process_Text": {
+          "original": "SLM Ti-6Al-4V; specific process parameters not reported in the reviewed paper. High porosity levels noted.",
+          "simplified": "SLM Ti64, high porosity (Cain et al. [8])"
+        },
+        "Equipment": null,
+        "Key_Params": {}
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Not described in the reviewed paper.",
+          "simplified": "N/A"
+        },
+        "Main_Phase": null,
+        "Precipitates": [],
+        "Porosity_pct": null,
+        "Relative_Density_pct": null,
+        "Grain_Size_avg_um": null,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {}
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness, loading axis parallel to build direction",
+          "Value_Numeric": 28,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Cain et al. [8]; low KIC attributed to high porosity"
+        },
+        {
+          "Property_Name": "Paris_Exponent",
+          "Test_Condition": "Steady-state FCG",
+          "Value_Numeric": null,
+          "Value_Range": "3.2-5.8",
+          "Value_StdDev": null,
+          "Unit": "dimensionless",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Cain et al. [8]; widely ranging Paris exponents"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "Cain_2015_SLM_Perpendicular",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Reference",
+        "Alloy_Name_Raw": "SLM Ti-6Al-4V",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Literature reference data cited in the reviewed paper"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM)",
+        "Process_Text": {
+          "original": "SLM Ti-6Al-4V; high porosity levels noted. Stress relieved (conditions not specified).",
+          "simplified": "SLM Ti64, high porosity, stress relieved (Cain et al. [8])"
+        },
+        "Equipment": null,
+        "Key_Params": {}
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Not described in the reviewed paper.",
+          "simplified": "N/A"
+        },
+        "Main_Phase": null,
+        "Precipitates": [],
+        "Porosity_pct": null,
+        "Relative_Density_pct": null,
+        "Grain_Size_avg_um": null,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {}
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness, loading axis perpendicular to build direction, as-built",
+          "Value_Numeric": 23,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Cain et al. [8]; as-built condition"
+        },
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness, loading axis perpendicular to build direction, stress relieved",
+          "Value_Numeric": 30,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Cain et al. [8]; after stress relieving anneal"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "Hooreweder_2012_SLM_Parallel",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Reference",
+        "Alloy_Name_Raw": "SLM Ti-6Al-4V",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Literature reference data cited in the reviewed paper"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM)",
+        "Process_Text": {
+          "original": "SLM Ti-6Al-4V; specific process parameters not reported in the reviewed paper.",
+          "simplified": "SLM Ti64 (Hooreweder et al. [10])"
+        },
+        "Equipment": null,
+        "Key_Params": {}
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Not described in the reviewed paper.",
+          "simplified": "N/A"
+        },
+        "Main_Phase": null,
+        "Precipitates": [],
+        "Porosity_pct": null,
+        "Relative_Density_pct": null,
+        "Grain_Size_avg_um": null,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {}
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness, loading axis parallel to build direction",
+          "Value_Numeric": 50.2,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Hooreweder et al. [10]"
+        },
+        {
+          "Property_Name": "Paris_Exponent",
+          "Test_Condition": "Steady-state FCG",
+          "Value_Numeric": 3.4,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "dimensionless",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Hooreweder et al. [10]"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "Mohamed_2015_SLM_DuplexHT",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Reference",
+        "Alloy_Name_Raw": "SLM Ti-6Al-4V",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Literature reference data cited in the reviewed paper"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM) + duplex heat treatment",
+        "Process_Text": {
+          "original": "SLM Ti-6Al-4V followed by duplex heat treatment below the β-transus temperature; specific parameters not reported.",
+          "simplified": "SLM Ti64 + duplex heat treatment below β-transus (Mohamed et al. [11])"
+        },
+        "Equipment": null,
+        "Key_Params": {}
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Not described in the reviewed paper.",
+          "simplified": "N/A"
+        },
+        "Main_Phase": null,
+        "Precipitates": [],
+        "Porosity_pct": null,
+        "Relative_Density_pct": null,
+        "Grain_Size_avg_um": null,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {}
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness",
+          "Value_Numeric": 84,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Mohamed et al. [11]; duplex heat treatment below β-transus"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "Rafi_2013_SLM",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Reference",
+        "Alloy_Name_Raw": "SLM Ti-6Al-4V",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Literature reference data cited in the reviewed paper"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM)",
+        "Process_Text": {
+          "original": "SLM Ti-6Al-4V; low porosity and acicular α' microstructure noted.",
+          "simplified": "SLM Ti64, low porosity, acicular α' (Rafi et al. [14])"
+        },
+        "Equipment": null,
+        "Key_Params": {}
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Acicular α' microstructure",
+          "simplified": "Acicular α' microstructure"
+        },
+        "Main_Phase": null,
+        "Precipitates": [],
+        "Porosity_pct": null,
+        "Relative_Density_pct": null,
+        "Grain_Size_avg_um": null,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {}
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Fatigue_Strength_Unnotched",
+          "Test_Condition": "Tension-tension fatigue, R=0.1",
+          "Value_Numeric": 550,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Rafi et al. [14]; attributed to low porosity and acicular α' impeding dislocation motion"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "Rafi_2013_CastAnnealed",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Reference",
+        "Alloy_Name_Raw": "Cast and annealed Ti-6Al-4V",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Literature reference data cited in the reviewed paper"
+      },
+      "Process_Info": {
+        "Process_Category": "Casting + annealing",
+        "Process_Text": {
+          "original": "Cast and annealed Ti-6Al-4V; specific processing details not reported.",
+          "simplified": "Cast + annealed Ti64 (Rafi et al. [14])"
+        },
+        "Equipment": null,
+        "Key_Params": {}
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Not described in the reviewed paper.",
+          "simplified": "N/A"
+        },
+        "Main_Phase": null,
+        "Precipitates": [],
+        "Porosity_pct": null,
+        "Relative_Density_pct": null,
+        "Grain_Size_avg_um": null,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {}
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Fatigue_Strength_Unnotched",
+          "Test_Condition": "Tension-tension fatigue",
+          "Value_Numeric": 430,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Rafi et al. [14]; cast and annealed Ti64 baseline"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "Mower_2015_SLM_RBF",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Reference",
+        "Alloy_Name_Raw": "SLM Ti-6Al-4V",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Literature reference data cited in the reviewed paper"
+      },
+      "Process_Info": {
+        "Process_Category": "Selective Laser Melting (SLM)",
+        "Process_Text": {
+          "original": "SLM Ti-6Al-4V; as-built condition with low ductility and high porosity.",
+          "simplified": "SLM Ti64, as-built (Mower et al. [15])"
+        },
+        "Equipment": null,
+        "Key_Params": {}
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Not described in the reviewed paper.",
+          "simplified": "N/A"
+        },
+        "Main_Phase": null,
+        "Precipitates": [],
+        "Porosity_pct": null,
+        "Relative_Density_pct": null,
+        "Grain_Size_avg_um": null,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {}
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Fatigue_Strength_Unnotched",
+          "Test_Condition": "Rotating bending fatigue (RBF)",
+          "Value_Numeric": null,
+          "Value_Range": "<100",
+          "Value_StdDev": null,
+          "Unit": "MPa",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Mower et al. [15]; very low fatigue strength attributed to low ductility and high porosity"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "Singh_2012_Wrought",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Reference",
+        "Alloy_Name_Raw": "Wrought Ti-6Al-4V",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Literature reference data cited in the reviewed paper"
+      },
+      "Process_Info": {
+        "Process_Category": "Conventional manufacturing (wrought)",
+        "Process_Text": {
+          "original": "Conventionally manufactured (wrought) Ti-6Al-4V; specific processing details not reported.",
+          "simplified": "Wrought Ti64 (Singh et al. [34])"
+        },
+        "Equipment": null,
+        "Key_Params": {}
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Not described in the reviewed paper.",
+          "simplified": "N/A"
+        },
+        "Main_Phase": null,
+        "Precipitates": [],
+        "Porosity_pct": null,
+        "Relative_Density_pct": null,
+        "Grain_Size_avg_um": null,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {}
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Yield_Strength",
+          "Test_Condition": null,
+          "Value_Numeric": null,
+          "Value_Range": "850-900",
+          "Value_StdDev": null,
+          "Unit": "MPa",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Conventionally manufactured wrought Ti64, Singh et al. [34]"
+        },
+        {
+          "Property_Name": "Ultimate_Tensile_Strength",
+          "Test_Condition": null,
+          "Value_Numeric": null,
+          "Value_Range": "950-1000",
+          "Value_StdDev": null,
+          "Unit": "MPa",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Conventionally manufactured wrought Ti64, Singh et al. [34]"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "Lutjering_2007_Conventional",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Reference",
+        "Alloy_Name_Raw": "Conventionally manufactured Ti-6Al-4V (annealed)",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Literature reference data cited in the reviewed paper"
+      },
+      "Process_Info": {
+        "Process_Category": "Conventional manufacturing",
+        "Process_Text": {
+          "original": "Conventionally manufactured and annealed Ti-6Al-4V with similar grain size and fine colony structure.",
+          "simplified": "Conventional Ti64, annealed, fine colony structure (Lütjering & Williams [35])"
+        },
+        "Equipment": null,
+        "Key_Params": {}
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Not described in the reviewed paper.",
+          "simplified": "N/A"
+        },
+        "Main_Phase": null,
+        "Precipitates": [],
+        "Porosity_pct": null,
+        "Relative_Density_pct": null,
+        "Grain_Size_avg_um": null,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {}
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Fracture_Toughness_KIC",
+          "Test_Condition": "Mode I fracture toughness, plane strain conditions",
+          "Value_Numeric": null,
+          "Value_Range": "44-66",
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Conventionally manufactured and annealed Ti64, Lütjering & Williams [35]"
+        }
+      ]
+    },
+    {
+      "Sample_ID": "Sinha_2000_Conventional",
+      "Gradient_Material": false,
+      "Gradient_Group_ID": null,
+      "Composition_Info": {
+        "Role": "Reference",
+        "Alloy_Name_Raw": "Ti-6Al-4V (α/β duplex)",
+        "Nominal_Composition": {
+          "Composition_Type": "wt%",
+          "Elements_Normalized": {
+            "Ti": 90.0,
+            "Al": 6.0,
+            "V": 4.0
+          }
+        },
+        "Measured_Composition": null,
+        "Note": "Literature reference data cited in the reviewed paper"
+      },
+      "Process_Info": {
+        "Process_Category": "Conventional manufacturing",
+        "Process_Text": {
+          "original": "Conventionally manufactured Ti-6Al-4V with α/β duplex microstructure.",
+          "simplified": "Conventional Ti64, α/β duplex (Sinha et al. [40])"
+        },
+        "Equipment": null,
+        "Key_Params": {}
+      },
+      "Microstructure_Info": {
+        "Microstructure_Text": {
+          "original": "Not described in the reviewed paper.",
+          "simplified": "N/A"
+        },
+        "Main_Phase": null,
+        "Precipitates": [],
+        "Porosity_pct": null,
+        "Relative_Density_pct": null,
+        "Grain_Size_avg_um": null,
+        "Precipitate_Size_avg_nm": null,
+        "Advanced_Quantitative_Features": {}
+      },
+      "Properties_Info": [
+        {
+          "Property_Name": "Fatigue_Crack_Growth_Threshold",
+          "Test_Condition": "Near-threshold FCG",
+          "Value_Numeric": 5.4,
+          "Value_Range": null,
+          "Value_StdDev": null,
+          "Unit": "MPa√m",
+          "Test_Temperature_K": null,
+          "Strain_Rate_s1": null,
+          "Tensile_Speed_mm_min": null,
+          "Hardness_Load": null,
+          "Hardness_Dwell_Time_s": null,
+          "Data_Source": "text",
+          "Test_Specimen": null,
+          "Note": "Conventionally manufactured Ti64 with α/β duplex microstructure, Sinha et al. [40]"
+        }
+      ]
+    }
+  ]
+}
