@@ -432,12 +432,14 @@ class Property(BaseModel):
         default=None,
         description=(
             "ML-ready numeric value extracted for database and model training. "
+            "IMPORTANT: Always write values as decimal floats (e.g., 1.0e20), "
+            "NEVER as plain large integers exceeding 999999999. "
             "For exact measurements: the measured value (e.g., 683.0). "
             "For inequalities: the boundary value (e.g., '>50' → 50.0, '<2000' → 2000.0). "
             "For ranges: the midpoint (e.g., '12-30' → 21.0). "
             "For qualitative: a mapped numeric value (e.g., 'no plasticity' → 0.0). "
             "For missing: null."
-        )
+        ),
     )
 
     value_range: Optional[str] = Field(
@@ -452,6 +454,7 @@ class Property(BaseModel):
         default=None,
         description=(
             "Standard deviation when a mean±std format is reported, e.g. 215±5 -> 5. "
+            "Always write as a decimal float (e.g., 5.0), never as a large plain integer. "
             "Keep null when not available."
         ),
     )
@@ -477,6 +480,7 @@ class Property(BaseModel):
         default=None,
         description=(
             "Actual test environment temperature in Kelvin. "
+            "Always write as a decimal float (e.g., 1873.0), never as a large plain integer. "
             "Use only the testing temperature here, never fabrication or heat-treatment temperatures."
         ),
     )
@@ -970,6 +974,19 @@ class CompositionList(BaseModel):
     compositions: List[CompositionProperties] = Field(
         description="A list of extracted material compositions."
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def parse_compositions_string(cls, data: Any) -> Any:
+        """Handle LLM returning compositions as a JSON string instead of a list."""
+        if isinstance(data, dict):
+            val = data.get("compositions")
+            if isinstance(val, str):
+                try:
+                    data["compositions"] = json.loads(val)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        return data
 
 
 class EvaluationFeedback(BaseModel):

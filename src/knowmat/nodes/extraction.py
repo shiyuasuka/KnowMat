@@ -143,19 +143,28 @@ def extract_data(state: KnowMatState) -> Dict[str, Any]:
         result = extraction_extractor.invoke({"messages": messages})
     except Exception as exc:
         structured_error = exc
-        logger.warning(
-            "Structured extraction with role-separated messages failed; "
-            "falling back to legacy prompt. Error: %s",
-            exc,
-        )
-        try:
-            result = extraction_extractor.invoke(full_prompt)
-        except Exception as exc2:
-            logger.warning("Legacy structured extraction also failed: %s", exc2)
+        _is_int_overflow = "integer exceeds 64-bit range" in str(exc).lower()
+        if _is_int_overflow:
+            logger.warning(
+                "Structured extraction hit integer overflow; "
+                "skipping structured retries, jumping to raw-JSON fallback. Error: %s",
+                exc,
+            )
             result = None
+        else:
+            logger.warning(
+                "Structured extraction with role-separated messages failed; "
+                "falling back to legacy prompt. Error: %s",
+                exc,
+            )
+            try:
+                result = extraction_extractor.invoke(full_prompt)
+            except Exception as exc2:
+                logger.warning("Legacy structured extraction also failed: %s", exc2)
+                result = None
 
     responses = (result or {}).get("responses") or []
-    if not responses:
+    if not responses and not (structured_error and "integer exceeds 64-bit range" in str(structured_error).lower()):
         print(f"   Extraction attempt 1: {_time.time() - t_extract:.1f}s (no responses, retrying)")
         try:
             fallback_result = extraction_extractor.invoke(full_prompt)
