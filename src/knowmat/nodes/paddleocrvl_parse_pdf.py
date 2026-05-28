@@ -65,7 +65,7 @@ from knowmat.pdf.section_normalizer import (
     strip_references_section,
     structure_sections,
 )
-from knowmat.pdf.formula_formatter import format_formula_text
+from knowmat.pdf.formula_formatter import collapse_orphan_display_formulas, format_formula_text
 from knowmat.pdf.mineru_api_client import MineruAPIError, MineruLightweightClient, MineruPrecisionClient
 from knowmat.pdf.mineru_result_converter import (
     _pages_range_from_indices,
@@ -1179,6 +1179,7 @@ def _finalize_pdf_parse(
     structured_text = normalize_plain_author_superscripts(structured_text)
     structured_text = normalize_alloy_strings(structured_text)
     structured_text = format_formula_text(structured_text)
+    structured_text = collapse_orphan_display_formulas(structured_text)
     cleaned_text = (
         strip_references_section(structured_text)
         if settings.trim_references_section

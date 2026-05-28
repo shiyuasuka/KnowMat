@@ -306,14 +306,14 @@ def format_formula_text(text: str) -> str:
 
 def extract_formula_context(text: str, pattern: str) -> List[Tuple[str, int, int]]:
     """Extract all occurrences of a formula pattern from text.
-    
+
     Parameters
     ----------
     text : str
         Text to search.
     pattern : str
         Regex pattern to match.
-        
+
     Returns
     -------
     List[Tuple[str, int, int]]
@@ -324,3 +324,116 @@ def extract_formula_context(text: str, pattern: str) -> List[Tuple[str, int, int
     for match in compiled.finditer(text):
         results.append((match.group(0), match.start(), match.end()))
     return results
+
+
+# ---------------------------------------------------------------------------
+# Orphan inline-formula collapse (post-processing)
+# ---------------------------------------------------------------------------
+
+_DISPLAY_MATH_LINE_RE = re.compile(r"^\s*\$\$\s*(.*?)\s*\$\$\s*$")
+
+_SHORT_FORMULA_MAX_LEN = 80
+
+_INLINE_FORMULA_INDICATORS = re.compile(
+    r"\\mathrm\{|\\text\{|\\mathcal\{|\\textcircled\{|"
+    r"[A-Z][a-z]?_?\{?\d|"  # element+subscript like Fe_0, LCFE_{2}
+    r"^[A-Za-z\s\-_,.()|]+$|"  # pure text/punctuation (chemical name fragments)
+    r"^[\d^{}]+$"  # pure numbers/superscripts like 10^{6}
+)
+
+_TRUE_EQUATION_INDICATORS = re.compile(
+    r"\\frac\{|\\int|\\sum|\\prod|\\lim|\\begin\{|"
+    r"\\[a-z]+\{[^}]{20,}|"  # long nested expressions
+    r"=.*[a-zA-Z]|"  # equals sign followed by variable (real equation)
+    r"\\rightarrow|\\to|\\longrightarrow|"  # reaction arrows
+    r"\\d[xy]|\\partial"  # calculus
+)
+
+
+def _is_inline_formula_content(latex: str) -> bool:
+    """Heuristic: is this display-math content actually an inline chemical/short formula?"""
+    if len(latex) > _SHORT_FORMULA_MAX_LEN:
+        return False
+    if _TRUE_EQUATION_INDICATORS.search(latex):
+        return False
+    if _INLINE_FORMULA_INDICATORS.search(latex):
+        return True
+    if len(latex) <= 30:
+        return True
+    return False
+
+
+def _latex_to_readable(latex: str) -> str:
+    """Convert short LaTeX to a readable inline form for LLM consumption."""
+    s = latex.strip().rstrip(",").rstrip(".")
+    s = re.sub(r"\\mathrm\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\mathbf\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\mathit\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\text\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\mathcal\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\textcircled\{([^}]*)\}", r"(\1)", s)
+    s = re.sub(r"\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\left|\\right", "", s)
+    s = re.sub(r"_(\w)", r"_\1", s)
+    s = re.sub(r"\^(\w)", r"^\1", s)
+    s = s.replace("\\", "").replace("  ", " ").strip()
+    trailing = ""
+    if latex.strip().endswith(","):
+        trailing = ","
+    elif latex.strip().endswith("."):
+        trailing = "."
+    return s + trailing
+
+
+def collapse_orphan_display_formulas(text: str) -> str:
+    """Collapse sequences of short display-math blocks (orphan inline formulas) into inline text.
+
+    MinerU/PaddleOCR sometimes classifies inline chemical formula references as standalone
+    'formula' blocks, producing sequences of ``$$ \\mathrm{FE_0} $$`` on separate lines with
+    all surrounding paragraph text lost. This function detects such sequences (≥2 consecutive
+    display-math-only lines containing short formula fragments) and collapses them into a
+    single inline annotation that the LLM can parse.
+    """
+    lines = text.split("\n")
+    result: List[str] = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+        m = _DISPLAY_MATH_LINE_RE.match(line)
+
+        if m and _is_inline_formula_content(m.group(1)):
+            # Start collecting consecutive inline-formula display-math lines
+            formula_run: List[str] = [m.group(1)]
+            j = i + 1
+            while j < len(lines):
+                if lines[j].strip() == "":
+                    # skip blank lines between consecutive formulas
+                    j += 1
+                    continue
+                mj = _DISPLAY_MATH_LINE_RE.match(lines[j])
+                if mj and _is_inline_formula_content(mj.group(1)):
+                    formula_run.append(mj.group(1))
+                    j += 1
+                else:
+                    break
+
+            if len(formula_run) >= 2:
+                # Collapse: convert each to readable form and join
+                readable_parts = [_latex_to_readable(f) for f in formula_run if f.strip()]
+                readable_parts = [p for p in readable_parts if p]
+                if readable_parts:
+                    collapsed = "[Inline formula references: " + ", ".join(readable_parts) + "]"
+                    result.append(collapsed)
+                i = j
+            else:
+                # Single inline formula on its own — convert to inline $ ... $
+                readable = _latex_to_readable(formula_run[0])
+                if readable:
+                    result.append(f"$ {formula_run[0]} $")
+                i += 1
+        else:
+            result.append(line)
+            i += 1
+
+    return "\n".join(result)

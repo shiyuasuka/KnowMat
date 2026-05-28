@@ -9,8 +9,8 @@ used in the MI‑Agent project.
 The three extractors defined here correspond to the three agents in the
 KnowMat 2.0 pipeline:
 
-* ``subfield_extractor`` returns a ``SubFieldDetection`` model with two
-  fields: ``sub_field`` and ``updated_prompt``.
+* ``routing_extractor`` returns a ``PaperRouting`` model with three-dimensional
+  classification: ``base_material``, ``application``, ``research_paradigm``.
 * ``extraction_extractor`` returns a ``CompositionList`` model consisting
   of compositions and their properties.  The schema mirrors the original
   Pydantic classes from KnowMat v1.
@@ -100,6 +100,7 @@ def get_llm(agent_type: str = "default") -> ChatOpenAI:
         "model": model,
         "request_timeout": 1200,  # 20 minute timeout per API call (not per pipeline)
         "max_retries": 3,  # Retry failed requests up to 3 times
+        "max_tokens": 16384,  # Allow large outputs for multi-item papers
         **_llm_connection_kwargs(),
     }
 
@@ -368,28 +369,41 @@ class _LazyExtractor:
 # Pydantic schemas defining the structure of TrustCall tool outputs
 # -----------------------------------------------------------------------------
 
-class SubFieldDetection(BaseModel):
-    """Output schema for the sub‑field detection agent.
+class PaperRouting(BaseModel):
+    """Output schema for the three-dimensional paper routing agent.
 
-    Attributes
-    ----------
-    sub_field: str
-        The niche domain of materials science that best describes the paper.
-        One of ``experimental``, ``computational``, ``simulation``,
-        ``machine learning`` or ``hybrid``.
-    updated_prompt: str
-        An updated extraction prompt tailored to the detected sub‑field.
+    Classifies a materials science paper along three axes:
+    base_material, application, and research_paradigm.
     """
 
-    sub_field: str = Field(
+    base_material: str = Field(
         description=(
-            "The detected materials science sub‑field.  Must be one of: experimental, "
-            "computational, simulation, machine learning, or hybrid."
+            "Primary material system. One of: Metals, Ceramics_Inorganic, "
+            "Polymers, Composites, Organic_Small_Molecules."
         )
     )
-    updated_prompt: str = Field(
+    application: str = Field(
         description=(
-            "An extraction prompt modified to emphasise instructions relevant to the detected sub‑field."
+            "Application category. One of: Structural, Functional."
+        )
+    )
+    research_paradigm: str = Field(
+        description=(
+            "Research methodology. One of: Experimental, Pure_Simulation, Hybrid."
+        )
+    )
+    domain_overlays: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional domain overlays triggered by paper content. "
+            "Possible values: Machining, Coating, Battery."
+        )
+    )
+    patch_tags: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional patch tags for special material/process characteristics. "
+            "E.g. Gradient, Additive_Manufacturing, High_Entropy, Battery, etc."
         )
     )
 
@@ -418,6 +432,7 @@ class Property(BaseModel):
     )
     
     value: Optional[str] = Field(
+        default=None,
         description=(
             "Original value as reported in the paper. Can be: "
             "(1) A numeric string like '683.0' for exact measurements, "
@@ -460,6 +475,7 @@ class Property(BaseModel):
     )
     
     value_type: str = Field(
+        default="exact",
         description=(
             "Classification of the value type for downstream processing: "
             "'exact' - precise measurement (e.g., '683.0' K), "
@@ -476,6 +492,15 @@ class Property(BaseModel):
         description="Measurement unit of the property (e.g., 'K', 'MPa', 'mm', '%')."
     )
 
+    original_values: Optional[str] = Field(
+        default=None,
+        description=(
+            "Original value as written in the source text, preserving source units and notation. "
+            "E.g., '920 °C', '145 ksi', '450±20 HV', '580-620°C'. "
+            "This field maintains provenance while Value uses SI standard units."
+        ),
+    )
+
     test_temperature_k: Optional[float] = Field(
         default=None,
         description=(
@@ -488,10 +513,13 @@ class Property(BaseModel):
     measurement_condition: Optional[str] = Field(
         default=None,
         description=(
-            "Conditions under which the property was measured. "
-            "CRITICAL: If a test temperature is mentioned, ALWAYS start with 'at XXX K'. "
-            "Then add other conditions (pressure, sample geometry, heating rate, strain rate). "
-            "Examples: 'at 298.15 K; strain rate 1e-3 /s', 'at 1073.15 K; heating rate 20 K/min; Ar atmosphere'. "
+            "Natural language description of the test conditions. Include solution, atmosphere, "
+            "specimen geometry, strain rate, build angle, surface orientation, etc. "
+            "Examples: '3.5 wt.% NaCl solution at room temperature', "
+            "'Ar atmosphere, heating rate 20 K/min', 'ASTM E8 specimen, quasi-static', "
+            "'Nitrogen atmosphere', '30° build angle, upskin surface', '0° orientation'. "
+            "IMPORTANT: When the paper measures the same property at different angles/orientations/ "
+            "surfaces, create one Property entry per angle and distinguish them in this field. "
             "Use null if not provided."
         )
     )
@@ -522,11 +550,12 @@ class Property(BaseModel):
         description="Hardness dwell time in seconds. Use null if not reported.",
     )
 
-    data_source: Optional[str] = Field(
-        default=None,
+    data_source: str = Field(
+        default="text",
         description=(
-            "Source modality for this property value: 'text' for body/table/caption text, "
-            "'image' for chart or figure-derived values, or null if unclear."
+            "Source modality for this property value. Use 'text' for values from body text, "
+            "tables, or captions. Use 'image' for values read from charts/figures. "
+            "Default to 'text' when unclear."
         ),
     )
 
@@ -554,6 +583,50 @@ class Property(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def coerce_numeric_fields(cls, data: Any) -> Any:
+        """Handle LLM returning non-numeric strings in float fields, or numeric values in string fields.
+        Also recover missing 'value' from other fields when the LLM omits it."""
+        if not isinstance(data, dict):
+            return data
+
+        # Recover missing value field
+        if "value" not in data or data.get("value") is None:
+            for fallback_field in ("note", "original_values", "measurement_condition"):
+                candidate = data.get(fallback_field)
+                if candidate and isinstance(candidate, str):
+                    nums = re.findall(r'-?\d+(?:\.\d+)?', candidate)
+                    if nums:
+                        data.setdefault("value", nums[0])
+                        break
+
+        float_fields = (
+            "test_temperature_k", "value_numeric", "value_stddev",
+            "tensile_speed_mm_min",
+            "hardness_dwell_time_s",
+        )
+        for field in float_fields:
+            val = data.get(field)
+            if val is None or isinstance(val, (int, float)):
+                continue
+            s = str(val).strip()
+            m = re.match(r'^[<>≈~]?\s*(-?\d+(?:\.\d+)?)', s)
+            if m:
+                try:
+                    data[field] = float(m.group(1))
+                except (ValueError, TypeError):
+                    data[field] = None
+            else:
+                data[field] = None
+        # Coerce numeric values in string fields to strings
+        str_fields = ("strain_rate_s1", "hardness_load")
+        for field in str_fields:
+            val = data.get(field)
+            if isinstance(val, (int, float)):
+                data[field] = str(val)
+        return data
+
 
 class CompositionProperties(BaseModel):
     """Represents the properties, processing conditions, and characterisation for a composition."""
@@ -566,20 +639,13 @@ class CompositionProperties(BaseModel):
     sample_id: Optional[str] = Field(
         default=None,
         description=(
-            "Stable specimen identifier for this runtime composition. "
-            "All tests belonging to the same specimen should share the same sample_id. "
-            "Prefer informative IDs such as {alloy}_{route}_{state} when the paper gives enough context; "
-            "avoid overly generic labels like AP/HT unless the source itself only uses that code. "
-            "For retained comparison matrices, preserve the explicit family/state granularity from the paper "
-            "(for example R0 vs R5 vs S0 vs S15, theta0 vs theta45 vs theta90, As_Fabricated vs T6, "
-            "Powder vs PBF_EB vs PBF_LB). Do not drop the family prefix when it distinguishes retained specimens. "
-            "If the same specimen appears under a shorthand code and a long descriptive alias, choose one canonical "
-            "sample_id rather than emitting duplicate entries. For Reference items, preserve the explicit benchmark "
-            "label/state rather than collapsing multiple named benchmarks into one umbrella id such as Pure_Al_Reference "
-            "or various_AM_alloys_reference. Do not invent a standalone sample_id for powder, ingot, or "
-            "intermediate-route mentions unless that state is itself a retained specimen with sample-resolved evidence. "
-            "Do not create separate sample_id entries for testing temperatures, creep stresses, exposure times, or "
-            "optimization breadcrumbs unless the paper clearly retains them as standalone specimens in the final comparison set."
+            "Stable specimen identifier for this runtime composition + processing state. "
+            "PREFER the paper's own specimen labels exactly as written (e.g., 'as-printed', 'T01', 'ECAP+573K'). "
+            "Only invent a descriptive ID like {alloy}_{route}_{state} when the paper provides no short label.\n"
+            "When splitting by time/temperature conditions, encode in sample_id (e.g., EBC_1400C_50h, Aged_700C_2h).\n"
+            "For TEM microregion items: {interface}_{condition}_TEM.\n"
+            "For computed items: {model_type}_computed (e.g., oxidation_kinetics_computed, FEM_1450C_cooling).\n"
+            "For literature comparison items: {system_name}_literature."
         ),
     )
 
@@ -610,21 +676,37 @@ class CompositionProperties(BaseModel):
     role: Optional[str] = Field(
         default="Target",
         description=(
-            "Material role in this paper. "
-            "'Target' = synthesized, processed, or tested in this work (has original experimental data). "
-            "'Reference' = only cited from other papers for comparison (no original data). "
-            "Use 'Reference' only when the current paper reports specimen-resolved comparison rows/values/caption data "
-            "for that benchmark material. Named cast/baseline/benchmark alloys appearing in a current-paper "
-            "comparison table, figure, caption, or legend should still be emitted as standalone Reference entries. "
-            "Generic literature discussion, broad landscape plots, review-style alloy lists, umbrella labels "
-            "such as 'various AM alloys', or narrative 'better than X/Y/Z' claims should not become standalone "
-            "Reference entries. If the retained comparison set explicitly includes state-paired benchmarks or "
-            "directly characterized upstream endpoints, keep those exact labels as items rather than collapsing or "
-            "dropping them. "
+            "Material role in this paper. Allowed values: Target, Variant, Reference, Comparator, Demonstration.\n"
+            "'Target' = primary studied material, synthesized/characterized in this work.\n"
+            "'Variant' = same composition as Target but different processing state or exposure condition "
+            "(different aging time, thermal exposure duration, post-processing route). "
+            "First/initial state is Target, subsequent states are Variant.\n"
+            "'Reference' = literature data cited for comparison with specimen-resolved quantitative values.\n"
+            "'Comparator' = contrasting material/system from literature comparison tables with quantitative data.\n"
+            "'Demonstration' = supporting FEM/simulation item that validates a mechanism. Use with data_nature='Computed'.\n"
+            "DO extract literature items with quantitative property values (UTS, YS, etc.) from comparison tables. "
+            "Do NOT extract pure bibliographic citations without measurable values. "
             "Default to 'Target' if unclear."
         )
     )
-    
+
+    data_nature: str = Field(
+        default="Experimental",
+        description=(
+            "Data nature of this item. "
+            "'Experimental' = measured/synthesized in this paper's lab. "
+            "'Computed' = simulation/model/DFT/FEM/CALPHAD/kinetics/thermomechanical calculation result from this paper. "
+            "'Literature_Experimental' = experimental data cited from another paper for comparison. "
+            "'Literature_Computed' = computed data cited from another paper. "
+            "IMPORTANT: Computed items (FEM stress analysis, thermomechanical models, oxidation kinetics fits, "
+            "DFT predictions, phase-field simulations, JMAK/Arrhenius fitted parameters, Hall-Petch calculations, "
+            "Thermo-Calc/CALPHAD results) MUST be separate items from experimental ones — "
+            "never mix computed and experimental data in the same item. "
+            "Literature comparison items with specimen-resolved quantitative data (UTS, YS, elongation, hardness "
+            "from comparison tables/figures) should use 'Literature_Experimental'."
+        )
+    )
+
     composition_normalized: Optional[str] = Field(
         default=None,
         description=(
@@ -793,12 +875,17 @@ class CompositionProperties(BaseModel):
         description=(
             "Structured key process parameters extracted from the text. "
             "Use standardised keys: "
-            "Laser_Power_W (float), Scanning_Speed_mm_s (float), "
-            "Layer_Thickness_um (float), Hatch_Spacing_um (float), "
-            "Build_Plate_Temperature_K (float), Protective_Atmosphere (str, e.g. 'Argon'), "
-            "Volumetric_Energy_Density_J_mm3 (float/range), Oxygen_Content_ppm (float), "
-            "Beam_Current_mA (float), Acceleration_Voltage_kV (float), "
-            "Build_Orientation (str, e.g. 'Parallel-BD'). "
+            "Laser_Power_W, Scanning_Speed_mm_s, Layer_Thickness_um, Hatch_Spacing_um, "
+            "Build_Plate_Temperature_K, Protective_Atmosphere (str, e.g. 'Argon'), "
+            "Volumetric_Energy_Density_J_mm3, Oxygen_Content_ppm, "
+            "Beam_Current_mA, Acceleration_Voltage_kV, "
+            "Build_Orientation (str, e.g. 'Parallel-BD'), "
+            "Powder_Size_avg_um, Build_Rate_cm3_h, "
+            "Sintering_Temperature_K, Sintering_Time_h, Sintering_Pressure_MPa, "
+            "Aging_Temperature_K, Aging_Time_h, Cooling_Medium (str, e.g. 'Water'), "
+            "Molding_Temperature_K, Molding_Pressure_MPa, Preheat_Time_min, "
+            "Reaction_Temperature_K, Reaction_Time_h, "
+            "Annealing_Temperature_K, Annealing_Time_h. "
             "For heat-treatment ranges, preserve strings such as '1273-1373' or '2-4' instead of averaging. "
             "Include ONLY parameters with explicit values in the paper. "
             "Use null if no structured parameters can be extracted."
@@ -896,9 +983,20 @@ class CompositionProperties(BaseModel):
     properties_of_composition: List[Property] = Field(
         default_factory=list,
         description=(
-            "List of properties extracted for this specimen. Multiple test temperatures, creep stresses, "
-            "exposure times, and loading conditions for the same specimen should stay in this list rather than "
-            "triggering new composition entries."
+            "List of properties extracted for this specimen. "
+            "KEEP IN THIS LIST (same item, multiple Property entries): "
+            "different test temperatures on the SAME unchanged specimen (e.g., tensile at RT vs 400K on same bar), "
+            "different measurement angles/orientations (0°/30°/90° on same part), "
+            "different surface positions (upskin/downskin on same printed part), "
+            "different strain rates on same coupon, creep stresses on same specimen. "
+            "Use measurement_condition to distinguish these entries.\n\n"
+            "MUST NOT KEEP HERE — MUST CREATE SEPARATE ITEMS INSTEAD: "
+            "different thermal exposure / aging / oxidation durations (50h, 100h, 150h → each is a SEPARATE item), "
+            "different annealing temperatures or times (each = separate item), "
+            "different post-processing states (as-built vs HIP vs aged → separate items), "
+            "different cycle counts with microstructural evolution (each checkpoint = separate item). "
+            "KEY RULE: if the condition causes microstructural change (grain growth, oxidation, phase transformation), "
+            "it MUST be a new item, NOT a new property in this list."
         )
     )
 
@@ -909,6 +1007,20 @@ class CompositionProperties(BaseModel):
             return data
 
         repaired = dict(data)
+
+        # Coerce equipment from list/dict to string
+        eq = repaired.get("equipment")
+        if isinstance(eq, list):
+            parts = []
+            for item in eq:
+                if isinstance(item, dict):
+                    parts.append(", ".join(f"{v}" for v in item.values() if v))
+                else:
+                    parts.append(str(item))
+            repaired["equipment"] = "; ".join(parts) if parts else None
+        elif isinstance(eq, dict):
+            repaired["equipment"] = ", ".join(f"{v}" for v in eq.values() if v)
+
         aqf = _normalize_feature_map(repaired.get("advanced_quantitative_features")) or {}
         moved_any = False
         structured_fields = (
@@ -972,7 +1084,28 @@ class CompositionList(BaseModel):
     """Encapsulates a list of compositions with extracted details."""
 
     compositions: List[CompositionProperties] = Field(
-        description="A list of extracted material compositions."
+        description=(
+            "A list of extracted material compositions. "
+            "Each entry = ONE unique specimen (composition + processing state + exposure condition).\n"
+            "MUST SPLIT into separate entries:\n"
+            "• Each heat-treatment condition / aging time / thermal exposure duration\n"
+            "• Each temperature×time combination (GRID COMPLETENESS: N temps × M times = N×M entries)\n"
+            "• Each composition in parametric/screening studies\n"
+            "• PARAMETRIC SWEEP: each value of a single varied parameter (speed at 8 values → 8 entries; power at 5 levels → 5 entries)\n"
+            "• Each layer in multilayer coatings\n"
+            "• As-built vs post-processed states\n"
+            "• Computed/simulation items (FEM, DFT, phase-field, kinetics, CALPHAD) → data_nature='Computed'\n"
+            "• Each (specimen × environment × method) combination in simulations\n"
+            "• TEM-characterized interfaces/microregions with independent data\n"
+            "• Literature comparison data with quantitative values → role='Reference'/'Comparator'\n"
+            "• Constituent materials/precursors with independent characterization (pure resin, powder, monomer)\n"
+            "• Review/software papers: each case study with quantitative data → separate entry\n\n"
+            "DO NOT SPLIT (keep as 1 entry, multiple properties):\n"
+            "• Different test temps on SAME unchanged specimen\n"
+            "• Different measurement angles on SAME sample\n"
+            "• Pure bibliographic citations without quantitative data\n\n"
+            "KEY: microstructural evolution = new entry. Pure measurement variation = same entry."
+        )
     )
 
     @model_validator(mode="before")
@@ -1075,8 +1208,8 @@ class FlaggingFeedback(BaseModel):
 # Lazy extractors exposed for use in nodes
 # -----------------------------------------------------------------------------
 
-subfield_extractor = _LazyExtractor(
-    [SubFieldDetection], "SubFieldDetection", enable_inserts=True, agent_type="subfield"
+routing_extractor = _LazyExtractor(
+    [PaperRouting], "PaperRouting", enable_inserts=True, agent_type="subfield"
 )
 
 # The extraction output may be large, so we do not enable inserts here.

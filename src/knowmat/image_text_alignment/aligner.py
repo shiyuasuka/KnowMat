@@ -172,6 +172,15 @@ class ImageTextAligner:
             logger.warning("No image paths found")
             return []
 
+        # Build index mapping: position in visual_tokens -> position in img_vecs
+        # Only tokens with a valid image_path get embedded.
+        vt_to_embed_idx = {}
+        embed_i = 0
+        for i, vt in enumerate(visual_tokens):
+            if vt.image_path:
+                vt_to_embed_idx[i] = embed_i
+                embed_i += 1
+
         # ── Embed ─────────────────────────────────────────────────────────
         logger.info("Embedding %d images...", len(image_paths))
         img_vecs = encoder.embed_image(image_paths, batch_size=self.batch_size)
@@ -224,7 +233,8 @@ class ImageTextAligner:
         paper_vis_idx: dict = defaultdict(list)
         paper_sent_idx: dict = defaultdict(list)
         for i, vt in enumerate(visual_tokens):
-            paper_vis_idx[vt.paper_id].append(i)
+            if i in vt_to_embed_idx:
+                paper_vis_idx[vt.paper_id].append(i)
         for j, st in enumerate(topk_sents):
             paper_sent_idx[st.paper_id].append(j)
 
@@ -238,8 +248,9 @@ class ImageTextAligner:
             if not sent_indices:
                 continue
 
-            v_mat = img_vecs[vis_indices]
-            c_mat = cap_vecs[vis_indices]
+            embed_indices = [vt_to_embed_idx[i] for i in vis_indices]
+            v_mat = img_vecs[embed_indices]
+            c_mat = cap_vecs[embed_indices]
             s_mat = txt_vecs[np.array(sent_indices)]
             paper_sim = v_mat @ s_mat.T
             paper_cap_sim = c_mat @ s_mat.T
@@ -357,6 +368,7 @@ class ImageTextAligner:
                 paper_sent_idx=paper_sent_idx,
                 img_vecs_orig=img_vecs,
                 txt_vecs=txt_vecs,
+                vt_to_embed_idx=vt_to_embed_idx,
             )
 
         logger.info(
@@ -395,6 +407,7 @@ class ImageTextAligner:
         paper_sent_idx: dict,
         img_vecs_orig: np.ndarray,
         txt_vecs: np.ndarray,
+        vt_to_embed_idx: dict = None,
     ) -> None:
         """Write sci-align-compatible dataset files to output_dir."""
         out = Path(output_dir)
@@ -460,7 +473,7 @@ class ImageTextAligner:
         # Reverse: sentence → top-K images
         txt_topk = self._build_txt_topk(
             visual_tokens, topk_sents, img_vecs_orig, txt_vecs,
-            paper_vis_idx, paper_sent_idx,
+            paper_vis_idx, paper_sent_idx, vt_to_embed_idx,
         )
         self._write_jsonl(out / "text_topk.jsonl", txt_topk)
 
@@ -492,7 +505,7 @@ class ImageTextAligner:
 
     def _build_txt_topk(
         self, visual_tokens, topk_sents, img_vecs, txt_vecs,
-        paper_vis_idx, paper_sent_idx,
+        paper_vis_idx, paper_sent_idx, vt_to_embed_idx=None,
     ) -> List[Dict]:
         txt_topk = []
         k = self.top_k
@@ -500,7 +513,11 @@ class ImageTextAligner:
             vis_indices = paper_vis_idx.get(paper_id, [])
             if not vis_indices:
                 continue
-            v_mat = img_vecs[vis_indices]
+            if vt_to_embed_idx is not None:
+                embed_indices = [vt_to_embed_idx[i] for i in vis_indices]
+            else:
+                embed_indices = vis_indices
+            v_mat = img_vecs[embed_indices]
             s_mat = txt_vecs[sent_indices]
             paper_sim = v_mat @ s_mat.T
             k_txt = min(k, len(vis_indices))

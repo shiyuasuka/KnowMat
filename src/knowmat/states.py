@@ -201,9 +201,11 @@ class KnowMatState(TypedDict, total=False):
     document_metadata: Optional[DocumentMetadata]
     ocr_items: Optional[List[Dict[str, Any]]]
     
-    # Sub-field detection results
+    # Sub-field detection / routing results
     sub_field: Optional[str]
     updated_prompt: Optional[str]
+    paper_routing: Optional[Dict[str, Any]]
+    routing_supplements: Optional[str]
     
     # Extraction and evaluation results
     latest_extracted_data: Dict[str, Any]

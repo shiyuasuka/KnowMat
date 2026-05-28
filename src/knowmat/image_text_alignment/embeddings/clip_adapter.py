@@ -59,6 +59,8 @@ class CLIPAdapter(EmbeddingAdapter):
             ).to(self.device)
             with self._torch.no_grad():
                 feats = self._model.get_text_features(**inputs)
+                if not isinstance(feats, self._torch.Tensor):
+                    feats = feats.pooler_output
             all_vecs.append(feats.cpu().numpy())
         result = np.vstack(all_vecs).astype(np.float32)
         return result
@@ -80,15 +82,23 @@ class CLIPAdapter(EmbeddingAdapter):
             inputs = self._processor(images=images, return_tensors="pt").to(self.device)
             with self._torch.no_grad():
                 feats = self._model.get_image_features(**inputs)
+                if not isinstance(feats, self._torch.Tensor):
+                    feats = feats.pooler_output
             all_vecs.append(feats.cpu().numpy())
         return np.vstack(all_vecs).astype(np.float32)
 
     def _lazy_load(self) -> None:
         if self._model is not None:
             return
+
+        # Must set before importing transformers to prevent background network threads
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        os.environ.setdefault("SAFETENSORS_FAST_GPU", "1")
+
         try:
             import torch
-            from transformers import CLIPConfig, CLIPModel, CLIPProcessor
+            from transformers import CLIPModel, CLIPProcessor
 
             self._torch = torch
         except ImportError:
@@ -97,19 +107,21 @@ class CLIPAdapter(EmbeddingAdapter):
                 "Run: pip install transformers torch Pillow"
             )
 
-        # Use cached model when network is unavailable
-        os.environ.setdefault("HF_HUB_OFFLINE", "1")
-        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        load_kwargs = {"local_files_only": True}
+        try:
+            self._processor = CLIPProcessor.from_pretrained(self.model_name, local_files_only=True)
+        except Exception:
+            logger.info("CLIP processor not in local cache, downloading from network...")
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            os.environ.pop("TRANSFORMERS_OFFLINE", None)
+            load_kwargs.pop("local_files_only", None)
+            self._processor = CLIPProcessor.from_pretrained(self.model_name)
 
-        self._processor = CLIPProcessor.from_pretrained(self.model_name)
-        # torch 2.4+ workaround: build model from config then manually load state dict
-        from huggingface_hub import hf_hub_download
-
-        bin_path = hf_hub_download(self.model_name, "pytorch_model.bin")
-        cfg = CLIPConfig.from_pretrained(self.model_name)
-        self._model = CLIPModel(cfg)
-        state = torch.load(bin_path, map_location="cpu", weights_only=False)
-        self._model.load_state_dict(state, strict=False)
+        try:
+            self._model = CLIPModel.from_pretrained(self.model_name, **load_kwargs)
+        except Exception:
+            logger.info("CLIP model not in local cache, downloading from network...")
+            self._model = CLIPModel.from_pretrained(self.model_name)
         self._model.eval().to(self.device)
         self.embedding_dim = self._model.config.projection_dim
         logger.info("Loaded %s (dim=%d)", self.model_name, self.embedding_dim)

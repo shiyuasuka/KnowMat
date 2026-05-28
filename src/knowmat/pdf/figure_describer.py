@@ -16,6 +16,7 @@ import base64
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -26,13 +27,51 @@ logger = logging.getLogger(__name__)
 _SYSTEM_PROMPT = (
     "You are a materials science figure analyst. "
     "Describe the key information shown in this figure from a scientific paper. "
-    "Focus on: microstructure features, scale bars, phase labels, measurement values, and trends. "
-    "Be concise (2-4 sentences). Do not repeat the caption verbatim. "
+    "Focus on: microstructure features, scale bars, phase labels, measurement values, trends, "
+    "axis labels, data points, and any quantitative information visible. "
+    "Be thorough — extract ALL numerical values, labels, and data visible in the figure. "
+    "For multi-panel figures, describe each panel. "
+    "Target length: 200-500 words. Do not repeat the caption verbatim. "
     "Return only the final description text. Do not include reasoning, analysis, or <think> tags."
 )
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 _THINK_TAG_RE = re.compile(r"</?think>", re.IGNORECASE)
+
+_VLM_MAX_RETRIES = 4
+_VLM_RETRY_BACKOFF = 3.0
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Check if the exception is a rate limit / too-frequent error."""
+    msg = str(exc).lower()
+    return "429" in msg or "频繁" in msg or "rate" in msg or "too many" in msg
+
+
+def _vlm_call_with_retry(client, create_kwargs: dict, image_path, max_retries: int = _VLM_MAX_RETRIES) -> str:
+    """Call VLM API with exponential backoff retry on transient failures."""
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(**create_kwargs)
+            content = response.choices[0].message.content or ""
+            if content.strip():
+                return content
+            logger.warning("VLM returned empty content for %s (attempt %d/%d)", image_path, attempt + 1, max_retries)
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "VLM call failed for %s (attempt %d/%d): %s",
+                image_path, attempt + 1, max_retries, exc,
+            )
+        if attempt < max_retries - 1:
+            base_wait = _VLM_RETRY_BACKOFF * (2 ** attempt)
+            if last_exc and _is_rate_limit_error(last_exc):
+                base_wait = max(base_wait, 8.0 * (attempt + 1))
+            time.sleep(base_wait)
+    if last_exc:
+        raise last_exc
+    return ""
 
 
 def _sanitize_figure_description(text: str) -> str:
@@ -105,12 +144,12 @@ def describe_figure_image(
     if b64 is None:
         return ""
 
-    _api_key = api_key or os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
-    _base_url = base_url or os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
-    _model = model or os.getenv("LLM_MODEL", "")
+    _api_key = api_key or os.getenv("VLM_API_KEY") or os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+    _base_url = base_url or os.getenv("VLM_BASE_URL") or os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+    _model = model or os.getenv("VLM_MODEL") or os.getenv("LLM_MODEL", "")
 
     if not _api_key:
-        logger.warning("No LLM_API_KEY configured; skipping figure description.")
+        logger.warning("No VLM_API_KEY/LLM_API_KEY configured; skipping figure description.")
         return ""
 
     try:
@@ -135,7 +174,6 @@ def describe_figure_image(
                     "type": "image_url",
                     "image_url": {
                         "url": f"data:{media_type};base64,{b64}",
-                        "detail": "high",
                     },
                 },
                 {"type": "text", "text": user_text},
@@ -152,15 +190,11 @@ def describe_figure_image(
         create_kwargs: dict = {
             "model": _model,
             "messages": messages,
-            "max_tokens": 512,
+            "max_tokens": 2048,
+            "temperature": 0.2,
         }
-        # Some models (e.g. GPT-5) do not accept temperature
-        _model_lower = (_model or "").lower()
-        if not any(x in _model_lower for x in ("gpt-5",)):
-            create_kwargs["temperature"] = 0.2
 
-        response = client.chat.completions.create(**create_kwargs)
-        content = response.choices[0].message.content or ""
+        content = _vlm_call_with_retry(client, create_kwargs, image_path)
         content = _sanitize_figure_description(content)
         logger.debug("Figure description generated (%d chars) for %s", len(content), image_path)
         return content
@@ -169,18 +203,112 @@ def describe_figure_image(
         return ""
 
 
+def describe_figure_image_with_context(
+    image_path: Path,
+    caption: str = "",
+    related_sentences: Optional[List[str]] = None,
+    *,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> str:
+    """Generate a figure description using VLM with additional paper context.
+
+    Like :func:`describe_figure_image` but includes related sentences from the
+    paper body as extra context so the VLM can produce a more precise,
+    paper-specific description.
+    """
+    resolved_path = Path(image_path)
+    if not resolved_path.is_file():
+        logger.debug("Figure image not found, skipping description: %s", image_path)
+        return ""
+
+    b64 = _encode_image_base64(resolved_path)
+    if b64 is None:
+        return ""
+
+    _api_key = api_key or os.getenv("VLM_API_KEY") or os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+    _base_url = base_url or os.getenv("VLM_BASE_URL") or os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+    _model = model or os.getenv("VLM_MODEL") or os.getenv("LLM_MODEL", "")
+
+    if not _api_key:
+        logger.warning("No VLM_API_KEY/LLM_API_KEY configured; skipping figure description.")
+        return ""
+
+    try:
+        from openai import OpenAI  # type: ignore
+    except ImportError:
+        logger.warning("openai package not available; skipping figure description.")
+        return ""
+
+    user_text = ""
+    if caption:
+        user_text += f"Caption context: {caption}\n\n"
+    if related_sentences:
+        user_text += "Related text from the paper body (ranked by relevance to this figure):\n"
+        for i, sent in enumerate(related_sentences[:5], 1):
+            user_text += f"{i}. {sent}\n"
+        user_text += "\n"
+    user_text += (
+        "Using the image, caption, and related text above as context, "
+        "describe the key scientific information shown in this figure. "
+        "Be concise (2-4 sentences).\n"
+        "Return only the final description. Do not include <think> tags or hidden reasoning."
+    )
+
+    media_type = _image_media_type(resolved_path)
+    messages = [
+        {"role": "system", "content": _SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{media_type};base64,{b64}",
+                    },
+                },
+                {"type": "text", "text": user_text},
+            ],
+        },
+    ]
+
+    client_kwargs: dict = {"api_key": _api_key}
+    if _base_url:
+        client_kwargs["base_url"] = _base_url
+
+    try:
+        client = OpenAI(**client_kwargs)
+        create_kwargs: dict = {
+            "model": _model,
+            "messages": messages,
+            "max_tokens": 2048,
+            "temperature": 0.2,
+        }
+
+        content = _vlm_call_with_retry(client, create_kwargs, image_path)
+        content = _sanitize_figure_description(content)
+        logger.debug("Figure description (with context) generated (%d chars) for %s", len(content), image_path)
+        return content
+    except Exception as exc:
+        logger.warning("Figure description (with context) LLM call failed for %s: %s", image_path, exc)
+        return ""
+
+
 def inject_figure_descriptions(
     text: str,
     ocr_items: List[Dict[str, Any]],
     *,
-    max_workers: int = 4,
+    max_workers: int = 2,
+    paper_id: str = "",
+    output_dir: Optional[str] = None,
 ) -> str:
     """Insert multimodal LLM descriptions above each figure caption in *text*.
 
-    For each ``typer == "image"`` item with a valid ``image_path``, a description
-    is generated and inserted above the matching ``Fig. N`` / ``Figure N`` line in
-    *text*.  If no matching caption line is found the description is appended at the
-    end.  Items without ``image_path`` are silently skipped.
+    Uses Approach C (CLIP alignment + VLM with context) when possible: CLIP
+    finds the most relevant body sentences for each figure, then the VLM
+    generates a description using both the image and those sentences as context.
+    Falls back to Approach A (VLM-only) if CLIP alignment is unavailable.
 
     Called from the extraction stage (not OCR), so every LLM call here is
     intentional and gated by ``settings.figure_description_enabled``.
@@ -194,6 +322,33 @@ def inject_figure_descriptions(
     image_items = iter_resolved_figure_items(ocr_items)
     if not image_items:
         return text
+
+    # --- CLIP alignment (Approach C) ---
+    alignment_by_fig: Dict[str, List[str]] = {}
+    try:
+        from knowmat.image_text_alignment.aligner import ImageTextAligner
+
+        _output_dir = output_dir
+        if not _output_dir and image_items:
+            first_img = image_items[0].get("data", {}).get("image_path", "")
+            if first_img:
+                _output_dir = str(Path(first_img).parent)
+        _paper_id = paper_id or "unknown"
+
+        aligner = ImageTextAligner(
+            model="clip", device="cpu", top_k=5,
+            min_score=0.0, batch_size=32, caption_blend=0.0,
+        )
+        alignments = aligner.align(ocr_items, paper_id=_paper_id, output_dir=_output_dir)
+        for alignment in alignments:
+            fig_num = alignment.figure_num
+            if fig_num:
+                sentences = [s.text for s in alignment.related_sentences[:5]]
+                alignment_by_fig[fig_num] = sentences
+        if alignment_by_fig:
+            logger.info("CLIP alignment completed: %d figures aligned.", len(alignment_by_fig))
+    except Exception as exc:
+        logger.warning("CLIP alignment unavailable, using VLM-only fallback: %s", exc)
 
     # Collect valid items to describe
     to_describe: List[Dict[str, Any]] = []
@@ -212,14 +367,21 @@ def inject_figure_descriptions(
     if not to_describe:
         return text
 
-    # Parallel LLM calls for figure descriptions
+    # Parallel LLM calls (Approach C: VLM + CLIP context when available)
     descriptions: Dict[int, str] = {}
 
     def _describe(idx: int, item: Dict[str, Any]) -> tuple:
         data = item.get("data", {})
         img_path = Path(data.get("image_path", ""))
         caption = data.get("caption", "")
-        desc = describe_figure_image(img_path, caption=caption)
+        figure_num = data.get("figure_num", "")
+        related = alignment_by_fig.get(figure_num, []) if figure_num else []
+        if related:
+            desc = describe_figure_image_with_context(
+                img_path, caption=caption, related_sentences=related
+            )
+        else:
+            desc = describe_figure_image(img_path, caption=caption)
         desc = _sanitize_figure_description(desc)
         return idx, desc
 

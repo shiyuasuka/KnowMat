@@ -100,18 +100,28 @@ def extract_data(state: KnowMatState) -> Dict[str, Any]:
     paper_text = state.get("paper_text", "")
     original_paper_text = paper_text
     paper_text_path = state.get("paper_text_path")
-    sub_field = state.get("sub_field")
-    prompt_updates = state.get("updated_prompt", "").strip()
+    routing_supplements = state.get("routing_supplements", "")
+    paper_routing = state.get("paper_routing") or {}
 
     # Stage 2: inject multimodal figure descriptions into paper_text before extraction
+    # Uses Approach C: CLIP alignment + VLM with context
     if settings.figure_description_enabled:
         ocr_items = state.get("ocr_items") or []
         if ocr_items:
             from knowmat.pdf.figure_describer import inject_figure_descriptions
-            logger.info("Injecting figure descriptions into paper_text...")
+            logger.info("Injecting figure descriptions (Approach C: VLM+CLIP)...")
             t0 = _time.time()
             try:
-                paper_text = inject_figure_descriptions(paper_text, ocr_items)
+                _output_dir = state.get("output_dir") or ""
+                if not _output_dir and paper_text_path:
+                    _output_dir = str(Path(paper_text_path).parent.parent)
+                _paper_id = ""
+                if _output_dir:
+                    _paper_id = Path(_output_dir).name
+                paper_text = inject_figure_descriptions(
+                    paper_text, ocr_items,
+                    paper_id=_paper_id, output_dir=_output_dir,
+                )
                 elapsed = _time.time() - t0
                 logger.info("✓ Figure descriptions injected in %.1fs.", elapsed)
                 print(f"   Figure descriptions: {elapsed:.1f}s")
@@ -121,11 +131,15 @@ def extract_data(state: KnowMatState) -> Dict[str, Any]:
     if paper_text != original_paper_text:
         _persist_paper_text(paper_text_path, paper_text)
 
-    system_prompt = generate_system_prompt(sub_field=sub_field)
-    if prompt_updates:
-        system_prompt = system_prompt.strip() + "\n\n" + prompt_updates
+    system_prompt = generate_system_prompt(routing_supplements=routing_supplements)
 
-    user_prompt = generate_user_prompt(paper_text)
+    user_prompt = generate_user_prompt(
+        paper_text,
+        target_base_material=paper_routing.get("base_material", ""),
+        target_application=paper_routing.get("application", ""),
+        target_research_paradigm=paper_routing.get("research_paradigm", ""),
+        target_patch_tags=", ".join(paper_routing.get("patch_tags", [])),
+    )
     input_chars = len(system_prompt) + len(user_prompt)
     print(f"   Extraction input: ~{input_chars // 3} tokens")
     messages = [

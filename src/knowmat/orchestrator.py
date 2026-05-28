@@ -106,16 +106,18 @@ def build_graph(full_pipeline: bool = True) -> StateGraph:
     builder = StateGraph(KnowMatState)
 
     builder.add_node("parse_pdf", parse_pdf_with_paddleocrvl)
+    builder.add_node("detect_sub_field", detect_sub_field)
     builder.add_node("extract_data", extract_data)
 
     builder.add_edge(START, "parse_pdf")
+    builder.add_edge("parse_pdf", "detect_sub_field")
+    builder.add_edge("detect_sub_field", "extract_data")
+
     if not full_pipeline:
-        builder.add_edge("parse_pdf", "extract_data")
         builder.add_node("convert_schema", convert_to_target_schema)
         builder.add_edge("extract_data", "convert_schema")
         builder.add_edge("convert_schema", END)
     else:
-        builder.add_node("detect_sub_field", detect_sub_field)
         builder.add_node("evaluate_data", evaluate_data)
         builder.add_node("aggregate_runs", aggregate_runs)
         builder.add_node("validate_and_correct", validate_and_correct)
@@ -123,8 +125,6 @@ def build_graph(full_pipeline: bool = True) -> StateGraph:
         builder.add_node("standardize_properties", standardize_properties)
         builder.add_node("convert_schema", convert_to_target_schema)
 
-        builder.add_edge("parse_pdf", "detect_sub_field")
-        builder.add_edge("detect_sub_field", "extract_data")
         builder.add_edge("extract_data", "evaluate_data")
         builder.add_conditional_edges(
             "evaluate_data", evaluation_condition, ["extract_data", "aggregate_runs"]

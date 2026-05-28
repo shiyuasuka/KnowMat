@@ -279,6 +279,7 @@ class SchemaConverter:
                 "Sample_ID": self._clean_optional_str(comp.get("sample_id")) or sample.get("Sample_ID"),
                 "Gradient_Material": gradient_material,
                 "Gradient_Group_ID": self._clean_optional_str(comp.get("gradient_group_id")),
+                "Data_Nature": self._normalize_data_nature(comp.get("data_nature")),
                 "Composition_Info": {
                     "Role": self._normalize_role(comp.get("role")),
                     "Alloy_Name_Raw": alloy_name,
@@ -286,14 +287,14 @@ class SchemaConverter:
                         "Composition_Type": nominal_type,
                         "Elements_Normalized": nominal_comp,
                     },
-                    "Measured_Composition": {
+                    "Measured_Composition": self._collapse_null_object({
                         "Composition_Type": measured_type,
                         "Elements_Normalized": measured_comp,
                         "Measurement_Method": self._clean_optional_str(
                             comp.get("measured_composition_method")
                             or comp.get("measurement_method")
                         ),
-                    },
+                    }),
                     "Note": self._clean_optional_str(comp.get("composition_note")),
                 },
                 "Process_Info": {
@@ -316,8 +317,6 @@ class SchemaConverter:
                     "Relative_Density_pct": self._coerce_float(comp.get("relative_density_pct")),
                     "Grain_Size_avg_um": self._coerce_float(comp.get("grain_size_avg_um") or sample.get("Grain_Size_avg_um")),
                     "Precipitate_Size_avg_nm": self._coerce_float(comp.get("precipitate_size_avg_nm")),
-                    "Precipitate_Volume_Fraction_pct": self._coerce_float(comp.get("precipitate_volume_fraction_pct")),
-                    "Phase_Fraction_pct": self._coerce_float(comp.get("phase_fraction_pct")),
                     "Advanced_Quantitative_Features": advanced_micro_features,
                 },
                 "Properties_Info": self._build_lab_properties_from_internal(
@@ -357,7 +356,24 @@ class SchemaConverter:
         txt = str(role or "").strip().lower()
         if txt == "reference":
             return "Reference"
+        if txt == "variant":
+            return "Variant"
+        if txt == "comparator":
+            return "Comparator"
+        if txt == "demonstration":
+            return "Demonstration"
         return "Target"
+
+    @staticmethod
+    def _normalize_data_nature(data_nature: Any) -> str:
+        txt = str(data_nature or "").strip().lower().replace(" ", "_")
+        if "literature" in txt and "computed" in txt:
+            return "Literature_Computed"
+        if "literature" in txt:
+            return "Literature_Experimental"
+        if "computed" in txt or "simulation" in txt:
+            return "Computed"
+        return "Experimental"
 
     @staticmethod
     def _normalize_composition_type(comp_type: Any) -> Optional[str]:
@@ -376,6 +392,13 @@ class SchemaConverter:
             return None
         text = str(value).strip()
         return text or None
+
+    @staticmethod
+    def _collapse_null_object(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Return None if all values in obj are None/empty, otherwise return obj."""
+        if not any(v for v in obj.values()):
+            return None
+        return obj
 
     @staticmethod
     def _contains_numeric_signal(value: Any) -> bool:
@@ -1859,7 +1882,7 @@ class SchemaConverter:
                 ),
                 "Elements_Normalized": nominal_elements,
             }
-            comp_info["Measured_Composition"] = {
+            comp_info["Measured_Composition"] = self._collapse_null_object({
                 "Composition_Type": self._normalize_composition_type(
                     measured.get("Composition_Type")
                 ),
@@ -1869,7 +1892,7 @@ class SchemaConverter:
                     or measured.get("Measurment_Method")
                     or comp_info.get("Measurement_Method")
                 ),
-            }
+            })
             comp_info["Note"] = self._clean_optional_str(
                 comp_info.get("Note") or item.get("Composition_Note")
             )
@@ -1939,12 +1962,16 @@ class SchemaConverter:
             micro_info["Precipitate_Size_avg_nm"] = self._coerce_float(
                 micro_info.get("Precipitate_Size_avg_nm")
             )
-            micro_info["Precipitate_Volume_Fraction_pct"] = self._coerce_float(
-                micro_info.get("Precipitate_Volume_Fraction_pct")
-            )
-            micro_info["Phase_Fraction_pct"] = self._coerce_float(
-                micro_info.get("Phase_Fraction_pct")
-            )
+            _pvf = self._coerce_float(micro_info.get("Precipitate_Volume_Fraction_pct"))
+            if _pvf is not None:
+                micro_info["Precipitate_Volume_Fraction_pct"] = _pvf
+            else:
+                micro_info.pop("Precipitate_Volume_Fraction_pct", None)
+            _pf = self._coerce_float(micro_info.get("Phase_Fraction_pct"))
+            if _pf is not None:
+                micro_info["Phase_Fraction_pct"] = _pf
+            else:
+                micro_info.pop("Phase_Fraction_pct", None)
             micro_info["Advanced_Quantitative_Features"] = (
                 self._normalize_advanced_quantitative_features(
                     micro_info.get("Advanced_Quantitative_Features")
@@ -2002,7 +2029,7 @@ class SchemaConverter:
         target_items = [
             item
             for item in items
-            if (item.get("Composition_Info", {}) or {}).get("Role", "Target") == "Target"
+            if (item.get("Composition_Info", {}) or {}).get("Role", "Target") in ("Target", "Variant")
         ]
         if len(target_items) > 2:
             return items
@@ -2225,7 +2252,7 @@ class SchemaConverter:
         other_items = [
             item
             for item in items
-            if (item.get("Composition_Info", {}) or {}).get("Role", "Target") != "Target"
+            if (item.get("Composition_Info", {}) or {}).get("Role", "Target") not in ("Target", "Variant")
         ]
         return repaired_targets + other_items
 
@@ -2345,12 +2372,13 @@ class SchemaConverter:
     def _build_lab_property_entry(
         self,
         raw_property_name: Any,
-        condition: Optional[str],
-        value_numeric: Optional[float],
-        value_range: Optional[str],
-        value_stddev: Optional[float],
-        unit_raw: Any,
-        test_temp: Optional[float],
+        property_symbol: Any = None,
+        condition: Optional[str] = None,
+        value_numeric: Optional[float] = None,
+        value_range: Optional[str] = None,
+        value_stddev: Optional[float] = None,
+        unit_raw: Any = None,
+        test_temp: Optional[float] = None,
         strain_rate: Any = None,
         tensile_speed: Any = None,
         hardness_load: Any = None,
@@ -2359,10 +2387,15 @@ class SchemaConverter:
         test_specimen: Any = None,
         note: Any = None,
         context_text: Optional[str] = None,
+        original_values: Any = None,
     ) -> Optional[Dict[str, Any]]:
         property_name = self.normalize_property_name(raw_property_name) or "Unknown_Property"
         if property_name in {"Relative_Density_pct", "Relative_Density", "Porosity_pct", "Porosity", "Crack_Presence"}:
             return None
+        # Merge property symbol into name (e.g. Corrosion_Potential + Ecorr -> Corrosion_Potential_Ecorr)
+        sym = self._clean_optional_str(property_symbol)
+        if sym and sym not in property_name:
+            property_name = f"{property_name}_{sym}"
         merged_context = " ; ".join(
             part
             for part in (condition, context_text, self._clean_optional_str(note))
@@ -2380,6 +2413,7 @@ class SchemaConverter:
             "Value_Numeric": value_numeric,
             "Value_Range": value_range,
             "Value_StdDev": value_stddev,
+            "Original_Values": self._clean_optional_str(original_values),
             "Unit": self._infer_property_unit(property_name, unit_raw),
             "Test_Temperature_K": test_temp if test_temp is not None else self.parse_temperature_to_k(condition),
             "Strain_Rate_s1": self._clean_optional_str(strain_rate) or self._extract_strain_rate_text(condition, context_text),
@@ -2449,7 +2483,7 @@ class SchemaConverter:
         properties: List[Dict[str, Any]] = []
         for prop in props:
             numeric_val = self._coerce_float(prop.get("value_numeric"))
-            if numeric_val is None:
+            if not prop.get("property_name"):
                 continue
             condition = self._clean_optional_str(prop.get("measurement_condition"))
             value_range = self._clean_optional_str(prop.get("value_range"))
@@ -2472,6 +2506,7 @@ class SchemaConverter:
                         value_stddev = None
             entry = self._build_lab_property_entry(
                 raw_property_name=prop.get("property_name"),
+                property_symbol=prop.get("property_symbol"),
                 condition=condition,
                 value_numeric=numeric_val,
                 value_range=value_range,
@@ -2486,6 +2521,7 @@ class SchemaConverter:
                 test_specimen=prop.get("test_specimen"),
                 note=prop.get("note"),
                 context_text=prop.get("additional_information"),
+                original_values=prop.get("original_values"),
             )
             if entry is not None:
                 properties.append(entry)

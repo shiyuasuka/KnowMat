@@ -37,3 +37,23 @@ def load_yaml_templates_required(filename: str, required_keys: Iterable[str]) ->
         )
     return templates
 
+
+@lru_cache(maxsize=64)
+def load_routing_supplement(relative_path: str) -> str:
+    """Load a routing supplement file from prompts/directions/.
+
+    Parameters
+    ----------
+    relative_path : str
+        Path relative to prompts/directions/, e.g. "base/Metals.txt".
+
+    Returns
+    -------
+    str
+        The file content, or empty string if the file does not exist.
+    """
+    path = _prompts_dir() / "directions" / relative_path
+    if not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8")
+
