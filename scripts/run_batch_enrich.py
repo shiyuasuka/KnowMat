@@ -54,6 +54,7 @@ class BatchEnrichRunner:
         poll_interval: float = 10.0,
         ocr_timeout: float = 600.0,
         skip_existing: bool = False,
+        retry_incomplete: bool = False,
     ):
         self.input_folder = input_folder
         self.output_dir = output_dir
@@ -65,6 +66,7 @@ class BatchEnrichRunner:
         self.poll_interval = poll_interval
         self.ocr_timeout = ocr_timeout
         self.skip_existing = skip_existing
+        self.retry_incomplete = retry_incomplete
 
         self._db_path = db_path or (input_folder / ".knowmat_batch_enrich.db")
         self._store: Optional[TaskStore] = None
@@ -239,8 +241,13 @@ class BatchEnrichRunner:
         out_dir = self.output_dir / stem
         final_md_path = out_dir / f"{stem}_final.md"
 
-        if self.skip_existing and final_md_path.exists():
-            return
+        if final_md_path.exists():
+            if self.skip_existing and not self.retry_incomplete:
+                return
+            if self.retry_incomplete:
+                content = final_md_path.read_text(encoding="utf-8")
+                if "AI Description]:" in content:
+                    return
 
         enriched_text = enrich_paper_text(stem, raw_dir, vlm_workers=self.vlm_workers)
         if enriched_text:
@@ -327,6 +334,7 @@ Examples:
     parser.add_argument("--max-enrich-concurrent", type=int, default=4, help="Max concurrent enrichment workers")
     parser.add_argument("--vlm-workers", type=int, default=2, help="VLM concurrency per paper")
     parser.add_argument("--skip-existing", action="store_true", help="Skip papers with existing _final.md")
+    parser.add_argument("--retry-incomplete", action="store_true", help="Re-enrich papers whose _final.md is missing AI descriptions")
     parser.add_argument("--batch-db", default=None, help="SQLite state DB path")
     parser.add_argument("--ocr-poll-interval", type=float, default=10.0, help="OCR poll interval (seconds)")
     parser.add_argument("--ocr-timeout", type=float, default=600.0, help="OCR job timeout (seconds)")
@@ -353,6 +361,7 @@ Examples:
         poll_interval=args.ocr_poll_interval,
         ocr_timeout=args.ocr_timeout,
         skip_existing=args.skip_existing,
+        retry_incomplete=args.retry_incomplete,
     )
 
     if sys.platform == "win32":

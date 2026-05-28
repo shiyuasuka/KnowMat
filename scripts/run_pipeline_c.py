@@ -240,19 +240,25 @@ def enrich_paper_text(
                     fnum = futures[future]
                     print(f"  [{paper_id}] VLM failed for fig {fnum}: {exc}")
 
-    # Retry round: serial retry for figures that got empty descriptions
-    failed_tasks = [
-        (img_path, caption, figure_num, related)
-        for img_path, caption, figure_num, related in vlm_tasks
-        if figure_num and figure_num not in descriptions and img_path.is_file()
-    ]
-    if failed_tasks:
-        print(f"  [{paper_id}] Retrying {len(failed_tasks)} failed VLM descriptions (serial, 5s delay)...")
+    # Retry round: exponential backoff for figures that got empty descriptions
+    for attempt in range(1, 4):
+        failed_tasks = [
+            (img_path, caption, figure_num, related)
+            for img_path, caption, figure_num, related in vlm_tasks
+            if figure_num and figure_num not in descriptions and img_path.is_file()
+        ]
+        if not failed_tasks:
+            break
+        delay = 5 * (2 ** (attempt - 1))  # 5s, 10s, 20s
+        print(f"  [{paper_id}] Retry {attempt}/3: {len(failed_tasks)} figures, delay={delay}s...")
         for img_path, caption, figure_num, related in failed_tasks:
-            time.sleep(5)
-            r = run_vlm_description(img_path, caption, figure_num, related)
-            if r.get("description") and r.get("figure_num"):
-                descriptions[r["figure_num"]] = r["description"]
+            time.sleep(delay)
+            try:
+                r = run_vlm_description(img_path, caption, figure_num, related)
+                if r.get("description") and r.get("figure_num"):
+                    descriptions[r["figure_num"]] = r["description"]
+            except Exception as exc:
+                print(f"  [{paper_id}] VLM retry failed for fig {figure_num}: {exc}")
 
     print(f"  [{paper_id}] Got {len(descriptions)}/{len(vlm_tasks)} descriptions")
 
