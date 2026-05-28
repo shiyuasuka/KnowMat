@@ -21,6 +21,9 @@ from typing import Any, Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 from knowmat.batch.key_pool import KeyPool
 from knowmat.batch.models import TaskRecord, TaskStatus
 from knowmat.batch.ocr_dispatcher import OCRDispatcher
