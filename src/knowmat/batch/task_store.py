@@ -175,6 +175,20 @@ class TaskStore:
         stats["total"] = sum(stats.values())
         return stats
 
+    def reset_stuck_tasks(self) -> int:
+        """Reset llm_processing tasks back to ocr_done.
+
+        Tasks stuck in llm_processing indicate a prior crash mid-enrichment.
+        They have valid OCR output and just need to be re-enriched.
+        Returns the number of tasks reset.
+        """
+        cur = self._conn.execute(
+            "UPDATE tasks SET status=?, updated_at=datetime('now') WHERE status=?",
+            (TaskStatus.OCR_DONE.value, TaskStatus.LLM_PROCESSING.value),
+        )
+        self._conn.commit()
+        return cur.rowcount
+
     def count_by_status(self, status: TaskStatus) -> int:
         row = self._conn.execute(
             "SELECT COUNT(*) as cnt FROM tasks WHERE status = ?",

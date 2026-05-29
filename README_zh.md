@@ -194,6 +194,10 @@ python -m knowmat --help
 | `PADDLEOCR_API_URL` | 否 | `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs` | PaddleOCR API 地址 |
 | `PADDLEOCR_API_TIMEOUT_SEC` | 否 | `600` | PaddleOCR 轮询超时时间（秒） |
 | `MINERU_API_KEYS` | 否 | - | 多个 MinerU Key，逗号分隔（用于 `--batch` 模式） |
+| `VLM_API_KEY` | 否 | - | VLM API 密钥（用于 `--final-md` 图片描述） |
+| `VLM_API_KEYS` | 否 | - | 多个 VLM 密钥，逗号分隔（轮询，限流时自动切换） |
+| `VLM_BASE_URL` | 否 | - | VLM API 地址（OpenAI 兼容） |
+| `VLM_MODEL` | 否 | - | VLM 模型名称（如 `ernie-4.5-turbo-vl`） |
 
 ### OCR 调优（可选）
 
@@ -377,6 +381,91 @@ sqlite3 path/to/papers/.knowmat_batch.db \
 
 **注意：** `--batch` 模式与默认的本地 OCR 流式处理完全独立。不加 `--batch` 时，原有基于 `ThreadPoolExecutor` 的工作流不受任何影响。
 
+### Final-MD 模式（CLIP + VLM 图片描述富集）
+
+当需要在 Markdown 中嵌入 AI 图片描述，但**不需要**完整 LLM 抽取时，使用 `--final-md` 模式。该模式分两阶段：
+
+- **阶段一** — 云端 OCR（PaddleOCR 或 MinerU）→ CLIP 图文对齐 → VLM 图片描述 → 每篇论文生成 `_final.md`
+- **阶段二** — 修复循环：对 `_final.md` 中 AI 描述不完整的论文自动重试，直至所有可描述图片都有描述
+
+一篇论文"完成"的标准：每个有有效图片文件的图例，在 `_final.md` 中都有对应的 `> [Figure N AI Description]:` 块。VLM API 故障触发无限重试，指数退避（30s → 60s → 120s → 300s）。
+
+**配置：**
+
+在 `.env` 中添加 VLM API 凭证：
+
+```bash
+# VLM API（可与 LLM 相同或不同端点）
+VLM_API_KEY="your_vlm_api_key"
+VLM_BASE_URL="https://your-vlm-endpoint/v1"
+VLM_MODEL="ernie-4.5-turbo-vl"
+
+# 多个 VLM Key 以提高吞吐量（逗号分隔，限流时自动轮转）
+VLM_API_KEYS=key1,key2,key3,key4
+```
+
+**使用方法：**
+
+```bash
+# 完整流水线：OCR + CLIP + VLM 富集（1070 篇论文示例）
+python -m knowmat --final-md --paddleocr-api \
+    --input-folder data/raw \
+    --output-dir data/extraction_output \
+    --max-ocr-concurrent 30 \
+    --max-enrich-concurrent 2 \
+    --vlm-workers 4 \
+    --skip-existing
+
+# 仅修复（跳过 OCR，重新富集 _final.md 不完整的论文）
+python -m knowmat --final-md --repair-only \
+    --input-folder data/raw \
+    --output-dir data/extraction_output \
+    --max-enrich-concurrent 2 \
+    --vlm-workers 4
+
+# 使用 MinerU OCR
+python -m knowmat --final-md --mineru-api \
+    --input-folder data/raw \
+    --output-dir data/extraction_output \
+    --max-ocr-concurrent 20 \
+    --max-enrich-concurrent 2 \
+    --vlm-workers 4 --skip-existing
+```
+
+**进度输出示例：**
+
+```
+[ENRICH] Reset 19 stuck llm_processing tasks → ocr_done
+[ENRICH] Pre-queued 737 existing OCR_DONE tasks
+[30s] done=6 enriching=2 ocr_done=731 submitted=0 pending=0 failed=0 skipped=0 total=1070
+```
+
+**Final-MD 模式 CLI 参数：**
+
+| 参数 | 说明 | 默认值 |
+|------|------|--------|
+| `--final-md` | 启用 Final-MD 模式（需 `--paddleocr-api` 或 `--mineru-api`，`--repair-only` 除外） | `False` |
+| `--max-enrich-concurrent` | 最大并发 CLIP+VLM 富集 worker 数（保持 ≤ 2 防 OOM） | `2` |
+| `--vlm-workers` | 每篇论文 VLM API 并发数 | `4` |
+| `--skip-existing` | 跳过已有完整 `_final.md` 的论文 | `False` |
+| `--repair-only` | 跳过 OCR（阶段一），仅对现有 OCR 产出运行修复循环 | `False` |
+| `--max-ocr-concurrent` | 最大并发 OCR 提交数 | `20` |
+| `--ocr-poll-interval` | OCR 任务轮询间隔（秒） | `10` |
+| `--batch-db` | SQLite 状态数据库路径 | `<input>/.knowmat_batch_enrich.db` |
+
+**输出结构：**
+
+每篇论文在 `<output-dir>/<paper-id>/` 下生成 `_final.md`：
+
+```markdown
+> [Figure 3 AI Description]: SEM 显微照片显示等轴晶，平均晶粒直径 15 μm。
+> 箭头指示晶界析出物...
+
+Figure 3. 铸态合金的 SEM 图像...
+```
+
+**内存说明：** CLIP 模型（约 600 MB）作为进程级单例加载一次，所有富集 worker 共享。内存 < 16 GB 时建议保持 `--max-enrich-concurrent ≤ 2`。
+
 ### 进阶参数
 
 ```bash
@@ -409,10 +498,15 @@ python -m knowmat \
 | `--manager-model` | 二阶段校验模型 | `LLM_MODEL` |
 | `--flagging-model` | 最终质量评估模型 | `LLM_MODEL` |
 | `--batch` | 启用大规模并行模式 | `False` |
-| `--max-ocr-concurrent` | (Batch) 最大并发 OCR 提交数 | `20` |
+| `--max-ocr-concurrent` | (Batch/Final-MD) 最大并发 OCR 提交数 | `20` |
 | `--max-llm-concurrent` | (Batch) 最大并发 LLM 线程数 | `4` |
 | `--batch-db` | (Batch) SQLite 状态数据库路径 | `<input>/.knowmat_batch.db` |
-| `--ocr-poll-interval` | (Batch) OCR 轮询间隔（秒） | `10` |
+| `--ocr-poll-interval` | (Batch/Final-MD) OCR 轮询间隔（秒） | `10` |
+| `--final-md` | 启用 Final-MD 模式（CLIP+VLM 图片描述富集） | `False` |
+| `--max-enrich-concurrent` | (Final-MD) 最大并发富集 worker 数 | `2` |
+| `--vlm-workers` | (Final-MD) 每篇论文 VLM 并发数 | `4` |
+| `--skip-existing` | (Final-MD) 跳过已有完整 `_final.md` 的论文 | `False` |
+| `--repair-only` | (Final-MD) 跳过 OCR，仅修复不完整论文 | `False` |
 
 ### Python API
 
@@ -505,7 +599,7 @@ data/output/
 ```
 KnowMat/
 ├── src/knowmat/              # 主 Python 包
-│   ├── __main__.py           # CLI 入口
+│   ├── __main__.py           # CLI 入口（python -m knowmat）
 │   ├── orchestrator.py       # LangGraph 编排
 │   ├── nodes/                # LangGraph 节点
 │   │   ├── paddleocrvl_parse_pdf.py
@@ -514,13 +608,19 @@ KnowMat/
 │   │   └── ...
 │   ├── pdf/                  # PDF/OCR 子模块
 │   │   ├── ocr_engine.py
+│   │   ├── figure_describer.py   # VLM 多 key 池
+│   │   ├── pipeline_c.py         # CLIP+VLM 富集流水线
 │   │   └── ...
 │   └── batch/                # 大规模并行批处理
-│       ├── batch_runner.py   # asyncio 编排器
-│       ├── task_store.py     # SQLite 状态持久化
-│       ├── key_pool.py       # 多 key 轮转
-│       └── ocr_dispatcher.py # 异步 OCR 生命周期管理
-├── scripts/                  # 工具脚本
+│       ├── batch_runner.py       # asyncio 编排器（--batch 模式）
+│       ├── enrich_runner.py      # asyncio 富集运行器（--final-md 模式）
+│       ├── finalmd_pipeline.py   # 阶段 1+2 编排 + 修复循环
+│       ├── task_store.py         # SQLite 状态持久化
+│       ├── key_pool.py           # 多 key 轮转
+│       └── ocr_dispatcher.py     # 异步 OCR 生命周期管理
+├── scripts/                  # 工具脚本（包的薄包装层，向后兼容）
+│   ├── run_batch_enrich.py       # EnrichRunner 的 CLI 包装
+│   ├── batch_ocr_to_finalmd.py   # finalmd_pipeline 的 CLI 包装
 │   └── download_paddleocrvl_models.py
 ├── prompts/                  # LLM 提示词模板
 ├── configs/                  # 配置目录

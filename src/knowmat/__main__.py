@@ -142,7 +142,7 @@ def main(argv: list[str] | None = None) -> None:
         "--max-ocr-concurrent",
         type=int,
         default=20,
-        help="(Batch mode) Max concurrent OCR API submissions in flight.",
+        help="(Batch/Final-MD mode) Max concurrent OCR API submissions in flight.",
     )
     parser.add_argument(
         "--max-llm-concurrent",
@@ -159,7 +159,41 @@ def main(argv: list[str] | None = None) -> None:
         "--ocr-poll-interval",
         type=float,
         default=10.0,
-        help="(Batch mode) Seconds between OCR job poll cycles.",
+        help="(Batch/Final-MD mode) Seconds between OCR job poll cycles.",
+    )
+
+    # Final-MD mode arguments (CLIP+VLM enrichment → _final.md, no LLM extraction)
+    parser.add_argument(
+        "--final-md",
+        action="store_true",
+        help="Final-MD mode: batch OCR + CLIP+VLM enrichment → _final.md per paper. "
+             "No LLM extraction. Requires --paddleocr-api or --mineru-api "
+             "(unless --repair-only is set).",
+    )
+    parser.add_argument(
+        "--max-enrich-concurrent",
+        type=int,
+        default=2,
+        help="(Final-MD mode) Max concurrent CLIP+VLM enrichment workers. "
+             "Keep low (2) to avoid OOM — CLIP model is loaded once and shared.",
+    )
+    parser.add_argument(
+        "--vlm-workers",
+        type=int,
+        default=4,
+        help="(Final-MD mode) VLM API concurrency per paper (default: 4). "
+             "Reduce if you see 403 rate-limit errors.",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="(Final-MD mode) Skip papers that already have a complete _final.md.",
+    )
+    parser.add_argument(
+        "--repair-only",
+        action="store_true",
+        help="(Final-MD mode) Skip Phase 1 (OCR), only run Phase 2 repair loop "
+             "on papers with existing OCR output whose _final.md is incomplete.",
     )
 
     args = parser.parse_args(argv)
@@ -236,6 +270,55 @@ def main(argv: list[str] | None = None) -> None:
         )
 
         asyncio.run(runner.run())
+        return
+
+    # --- Final-MD mode (CLIP+VLM enrichment → _final.md, no LLM extraction) ---
+    if args.final_md:
+        if not args.repair_only and not (args.paddleocr_api or args.mineru_api):
+            print("Error: --final-md requires --paddleocr-api or --mineru-api "
+                  "(cloud OCR). Use --repair-only to skip OCR and only repair "
+                  "existing incomplete _final.md files.")
+            return
+
+        import logging as _logging
+        _logging.basicConfig(
+            level=_logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
+
+        from knowmat.batch.finalmd_pipeline import run_phase1, run_repair_loop, print_summary
+
+        output_dir = Path(extraction_output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        vendor = "paddleocr" if args.paddleocr_api else "mineru"
+        db_path = Path(args.batch_db) if args.batch_db else None
+
+        if not args.repair_only:
+            print(f"[FINAL-MD] Phase 1: Batch OCR + CLIP+VLM enrichment (vendor={vendor})...")
+            run_phase1(
+                raw_dir=input_folder,
+                output_dir=output_dir,
+                vendor=vendor,
+                max_ocr_concurrent=args.max_ocr_concurrent,
+                max_enrich_concurrent=args.max_enrich_concurrent,
+                vlm_workers=args.vlm_workers,
+                skip_existing=args.skip_existing,
+                db_path=db_path,
+                max_retries=3,
+                poll_interval=args.ocr_poll_interval,
+                ocr_timeout=600.0,
+            )
+            print("[FINAL-MD] Phase 1 complete.")
+
+        print("[FINAL-MD] Phase 2: Repair loop (validate completeness + retry VLM failures)...")
+        run_repair_loop(
+            raw_dir=input_folder,
+            output_dir=output_dir,
+            vlm_workers=args.vlm_workers,
+            max_workers=args.max_enrich_concurrent,
+        )
+
+        print_summary(input_folder, output_dir)
         return
 
     pdf_files = sorted(

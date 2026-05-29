@@ -44,18 +44,33 @@ LEGACY_ENRICHED_DIR = _PROJECT_ROOT / "data" / "comparison_results" / "extractio
 
 # ─── VLM + CLIP Enrichment ────────────────────────────────────────────────────
 
+import threading as _threading
+
+_CLIP_ALIGNER = None
+_CLIP_ALIGNER_LOCK = _threading.Lock()
+
+
 def _get_clip_aligner(top_k: int = 5):
-    """Get shared CLIP aligner instance."""
-    from knowmat.image_text_alignment import ImageTextAligner
-    return ImageTextAligner(
-        model="clip",
-        device="cpu",
-        top_k=top_k,
-        min_score=0.0,
-        batch_size=32,
-        caption_blend=0.0,
-        save_dataset=False,
-    )
+    """Return a process-wide singleton CLIP aligner (thread-safe).
+
+    Loading CLIP once and sharing it across all enrichment threads avoids
+    loading the ~600 MB model N times when max-enrich-concurrent > 1.
+    """
+    global _CLIP_ALIGNER
+    if _CLIP_ALIGNER is None:
+        with _CLIP_ALIGNER_LOCK:
+            if _CLIP_ALIGNER is None:
+                from knowmat.image_text_alignment import ImageTextAligner
+                _CLIP_ALIGNER = ImageTextAligner(
+                    model="clip",
+                    device="cpu",
+                    top_k=top_k,
+                    min_score=0.0,
+                    batch_size=32,
+                    caption_blend=0.0,
+                    save_dataset=False,
+                )
+    return _CLIP_ALIGNER
 
 
 def run_clip_alignment(ocr_items: List[Dict], paper_id: str, paper_dir: str, top_k: int = 5) -> List[Dict]:
@@ -154,6 +169,113 @@ def _clean_html(text: str) -> str:
     return text
 
 
+def _merge_ocr_figures(ocr_items: List[Dict]) -> tuple:
+    """Pair split image-file and caption items from PaddleOCR output.
+
+    PaddleOCR emits each figure as two separate records:
+      A) image item  — has image_path, empty figure_num and caption
+      B) caption item — has figure_num + caption, empty image_path
+
+    We pair them in document order: all A-items accumulated before a B-item
+    belong to that figure (handles multi-panel figures too).
+
+    Returns:
+      merged_ocr_items : same list but split pairs replaced by unified items
+                         (has both image_path and caption/figure_num)
+                         → CLIP tokenizer can now embed the images
+      figure_map       : {figure_num: {image_path, caption,
+                                       all_image_paths, page}}
+    """
+    merged: List[Dict] = []
+    figure_map: Dict[str, Dict] = {}
+    pending_img_paths: List[str] = []
+
+    for item in ocr_items:
+        itype = item.get("typer", "")
+        block_label = item.get("block_label", "")
+        is_fig = itype == "image" or block_label == "figure"
+
+        if not is_fig:
+            merged.append(item)
+            continue
+
+        data = item.get("data", {})
+        img_path = data.get("image_path", "")
+        figure_num = data.get("figure_num", "")
+        caption = data.get("caption", "")
+
+        if img_path and not figure_num and not caption:
+            # Pure image item — buffer until we see the caption
+            pending_img_paths.append(img_path)
+        elif figure_num or caption:
+            # Caption item — pair with buffered image(s)
+            all_paths = list(pending_img_paths)
+            primary = all_paths[0] if all_paths else ""
+
+            merged_item = {
+                "typer": "image",
+                "data": {
+                    "image_path": primary,
+                    "caption": caption,
+                    "figure_num": figure_num,
+                    "_all_image_paths": all_paths,
+                },
+                "page": item.get("page"),
+                "block_label": "figure",
+            }
+            merged.append(merged_item)
+
+            if figure_num:
+                figure_map[figure_num] = {
+                    "figure_num": figure_num,
+                    "caption": caption,
+                    "image_path": primary,
+                    "all_image_paths": all_paths,
+                    "page": item.get("page"),
+                }
+            pending_img_paths = []
+        else:
+            merged.append(item)
+
+    # Orphan image items at end with no caption pairing
+    for orphan in pending_img_paths:
+        merged.append({
+            "typer": "image",
+            "data": {"image_path": orphan, "caption": "", "figure_num": ""},
+            "block_label": "figure",
+        })
+
+    return merged, figure_map
+
+
+def _describe_figure_panels(
+    all_paths: List[Path],
+    caption: str,
+    figure_num: str,
+    related_sentences: List[str],
+) -> str:
+    """Describe all image panels of a figure, combining into one description.
+
+    Single-panel figures get one VLM call. Multi-panel figures get one call
+    per panel (labelled Sub-image 1/N … N/N) so no information is lost.
+    """
+    valid = [p for p in all_paths if p.is_file()]
+    if not valid:
+        return ""
+
+    if len(valid) == 1:
+        r = run_vlm_description(valid[0], caption, figure_num, related_sentences)
+        return r.get("description", "")
+
+    panel_descs: List[str] = []
+    for i, path in enumerate(valid, start=1):
+        r = run_vlm_description(path, caption, figure_num, related_sentences)
+        desc = r.get("description", "")
+        if desc:
+            panel_descs.append(f"[Sub-image {i}/{len(valid)}]: {desc}")
+    return "\n\n".join(panel_descs)
+
+
 def enrich_paper_text(
     paper_id: str,
     raw_dir: Path,
@@ -162,6 +284,14 @@ def enrich_paper_text(
     """Full enrichment pipeline: load raw OCR → CLIP align → VLM describe → inject into text.
 
     Returns the enriched paper text, or None on failure.
+
+    Approach C pipeline:
+      1. _merge_ocr_figures()  — pair split image-file + caption items so
+                                  CLIP can embed the images and VLM has a path
+      2. CLIP alignment        — find top-5 body sentences per figure
+      3. VLM description       — generate AI description per figure (all panels)
+      4. inject + clean        — insert "> [Figure N AI Description]: …"
+                                  before each figure mention in the markdown
     """
     paper_dir = raw_dir / paper_id
     md_path = paper_dir / f"{paper_id}.md"
@@ -174,91 +304,115 @@ def enrich_paper_text(
     paper_text = md_path.read_text(encoding="utf-8")
     ocr_items = json.loads(json_path.read_text(encoding="utf-8"))
 
-    # Find figure items
-    figures = [item for item in ocr_items
-               if item.get("typer") == "image" or item.get("block_label") == "figure"]
-    # Deduplicate by figure_num (keep first occurrence with a valid figure_num)
-    seen_figs = set()
-    unique_figures = []
-    for fig in figures:
-        fnum = fig.get("data", {}).get("figure_num", "")
-        if fnum and fnum not in seen_figs:
-            seen_figs.add(fnum)
-            unique_figures.append(fig)
-        elif not fnum:
-            unique_figures.append(fig)
-    figures = unique_figures
+    # Step 0: merge split image+caption items (PaddleOCR emits them separately)
+    merged_ocr_items, figure_map = _merge_ocr_figures(ocr_items)
 
-    if not figures:
-        print(f"  [{paper_id}] No figures found, returning cleaned text")
+    if not figure_map:
+        print(f"  [{paper_id}] No named figures found, returning cleaned text")
         return _clean_html(paper_text)
 
-    # Step 1: CLIP alignment
-    print(f"  [{paper_id}] CLIP alignment ({len(figures)} figures)...")
+    # Rebuild figures list from merged map (each item now has both image_path
+    # and figure_num, which is what inject_descriptions_into_text expects)
+    figures = [
+        {
+            "typer": "image",
+            "data": {
+                "image_path": fd["image_path"],
+                "caption": fd["caption"],
+                "figure_num": fd["figure_num"],
+                "_all_image_paths": fd["all_image_paths"],
+            },
+            "page": fd.get("page"),
+            "block_label": "figure",
+        }
+        for fd in figure_map.values()
+    ]
+
+    # Step 1: CLIP alignment — pass merged_ocr_items so the tokenizer
+    # finds valid image_path values and can compute image embeddings
+    print(f"  [{paper_id}] CLIP alignment ({len(figures)} named figures)...")
     try:
-        alignment_results = run_clip_alignment(ocr_items, paper_id, str(paper_dir))
+        alignment_results = run_clip_alignment(
+            merged_ocr_items, paper_id, str(paper_dir)
+        )
     except Exception as exc:
         print(f"  [{paper_id}] CLIP alignment failed: {exc}, proceeding without context")
         alignment_results = []
 
-    # Build alignment lookup
+    # Build figure_num → top-5 body sentences lookup
     alignment_by_fig: Dict[str, List[str]] = {}
     for ar in alignment_results:
         sentences = [s["text"] for s in ar.get("related_sentences", [])[:5]]
         if ar.get("figure_num"):
             alignment_by_fig[ar["figure_num"]] = sentences
+            print(
+                f"  [{paper_id}] CLIP fig {ar['figure_num']}: "
+                f"{len(sentences)} related sentences"
+            )
 
-    # Step 2: VLM descriptions (parallel)
+    # Step 2: VLM descriptions (parallel, per-figure)
+    # vlm_tasks: (primary_path, caption, figure_num, related_sentences, all_paths)
     print(f"  [{paper_id}] VLM descriptions (workers={vlm_workers})...")
-    vlm_tasks = []
+    vlm_tasks: List[tuple] = []
     for fig in figures:
         data = fig.get("data", {})
-        img_path = Path(data.get("image_path", ""))
+        all_paths = [Path(p) for p in data.get("_all_image_paths", []) if p]
+        if not all_paths:
+            img_str = data.get("image_path", "")
+            all_paths = [Path(img_str)] if img_str else []
         caption = data.get("caption", "")
         figure_num = data.get("figure_num", "")
         related = alignment_by_fig.get(figure_num, [])
-        vlm_tasks.append((img_path, caption, figure_num, related))
+        primary = all_paths[0] if all_paths else Path("")
+        vlm_tasks.append((primary, caption, figure_num, related, all_paths))
 
     descriptions: Dict[str, str] = {}
+
+    def _run_task(task: tuple) -> tuple:
+        primary, caption, figure_num, related, all_paths = task
+        desc = _describe_figure_panels(all_paths, caption, figure_num, related)
+        return figure_num, desc
+
     if vlm_workers <= 1:
-        for img_path, caption, figure_num, related in vlm_tasks:
-            r = run_vlm_description(img_path, caption, figure_num, related)
-            if r.get("description"):
-                descriptions[r["figure_num"]] = r["description"]
+        for task in vlm_tasks:
+            fnum, desc = _run_task(task)
+            if desc and fnum:
+                descriptions[fnum] = desc
     else:
         with ThreadPoolExecutor(max_workers=vlm_workers) as pool:
-            futures = {
-                pool.submit(run_vlm_description, img_path, caption, figure_num, related): figure_num
-                for img_path, caption, figure_num, related in vlm_tasks
-            }
+            futures = {pool.submit(_run_task, task): task[2] for task in vlm_tasks}
             for future in as_completed(futures):
+                fnum_key = futures[future]
                 try:
-                    r = future.result()
-                    if r.get("description") and r.get("figure_num"):
-                        descriptions[r["figure_num"]] = r["description"]
+                    fnum, desc = future.result()
+                    if desc and fnum:
+                        descriptions[fnum] = desc
                 except Exception as exc:
-                    fnum = futures[future]
-                    print(f"  [{paper_id}] VLM failed for fig {fnum}: {exc}")
+                    print(f"  [{paper_id}] VLM failed for fig {fnum_key}: {exc}")
 
     # Retry round: exponential backoff for figures that got empty descriptions
     for attempt in range(1, 4):
         failed_tasks = [
-            (img_path, caption, figure_num, related)
-            for img_path, caption, figure_num, related in vlm_tasks
-            if figure_num and figure_num not in descriptions and img_path.is_file()
+            task for task in vlm_tasks
+            if task[2]  # has figure_num
+            and task[2] not in descriptions
+            and any(p.is_file() for p in task[4])  # has at least one valid image
         ]
         if not failed_tasks:
             break
         delay = 5 * (2 ** (attempt - 1))  # 5s, 10s, 20s
-        print(f"  [{paper_id}] Retry {attempt}/3: {len(failed_tasks)} figures, delay={delay}s...")
-        for img_path, caption, figure_num, related in failed_tasks:
+        print(
+            f"  [{paper_id}] Retry {attempt}/3: "
+            f"{len(failed_tasks)} figures, delay={delay}s..."
+        )
+        for task in failed_tasks:
             time.sleep(delay)
             try:
-                r = run_vlm_description(img_path, caption, figure_num, related)
-                if r.get("description") and r.get("figure_num"):
-                    descriptions[r["figure_num"]] = r["description"]
+                fnum, desc = _run_task(task)
+                if desc and fnum:
+                    descriptions[fnum] = desc
             except Exception as exc:
-                print(f"  [{paper_id}] VLM retry failed for fig {figure_num}: {exc}")
+                print(f"  [{paper_id}] VLM retry failed for fig {task[2]}: {exc}")
 
     print(f"  [{paper_id}] Got {len(descriptions)}/{len(vlm_tasks)} descriptions")
 

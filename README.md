@@ -193,6 +193,10 @@ python -m knowmat --help
 | `PADDLEOCR_API_URL` | No | `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs` | PaddleOCR API endpoint |
 | `PADDLEOCR_API_TIMEOUT_SEC` | No | `600` | PaddleOCR polling timeout (seconds) |
 | `MINERU_API_KEYS` | No | - | Multiple MinerU keys, comma-separated (for `--batch` mode) |
+| `VLM_API_KEY` | No | - | VLM API key for figure description (`--final-md` mode) |
+| `VLM_API_KEYS` | No | - | Multiple VLM keys, comma-separated (round-robin with rate-limit rotation) |
+| `VLM_BASE_URL` | No | - | VLM API base URL (OpenAI-compatible) |
+| `VLM_MODEL` | No | - | VLM model name (e.g., `ernie-4.5-turbo-vl`) |
 
 ### OCR Tuning (Optional)
 
@@ -378,6 +382,99 @@ sqlite3 path/to/papers/.knowmat_batch.db \
 
 **Note:** `--batch` mode is completely independent from the default local-OCR streaming mode. Without `--batch`, the original `ThreadPoolExecutor`-based workflow runs unchanged.
 
+### Final-MD Mode (CLIP + VLM Figure Enrichment)
+
+For workflows where you need AI-enriched figure descriptions embedded in your markdown output — but **not** a full LLM extraction — use `--final-md` mode. This runs:
+
+- **Phase 1** — Cloud OCR (PaddleOCR or MinerU) → CLIP image-text alignment → VLM figure descriptions → `_final.md` per paper
+- **Phase 2** — Repair loop that automatically retries any paper whose `_final.md` is missing AI descriptions until every describable figure is complete
+
+A paper is considered **complete** only when every figure with a valid image file has a corresponding `> [Figure N AI Description]:` block in its `_final.md`. VLM API failures trigger unlimited retries with exponential backoff (30 s → 60 s → 120 s → 300 s).
+
+**Setup:**
+
+Add VLM API credentials to `.env`:
+
+```bash
+# VLM API (same or different endpoint from LLM)
+VLM_API_KEY="your_vlm_api_key"
+VLM_BASE_URL="https://your-vlm-endpoint/v1"
+VLM_MODEL="ernie-4.5-turbo-vl"
+
+# Multiple VLM keys for higher throughput (comma-separated)
+VLM_API_KEYS=key1,key2,key3,key4
+```
+
+**Usage:**
+
+```bash
+# Full pipeline: OCR + CLIP + VLM enrichment (1 070 papers example)
+python -m knowmat --final-md --paddleocr-api \
+    --input-folder data/raw \
+    --output-dir data/extraction_output \
+    --max-ocr-concurrent 30 \
+    --max-enrich-concurrent 2 \
+    --vlm-workers 4 \
+    --skip-existing
+
+# Repair only (skip OCR, re-enrich papers with incomplete _final.md)
+python -m knowmat --final-md --repair-only \
+    --input-folder data/raw \
+    --output-dir data/extraction_output \
+    --max-enrich-concurrent 2 \
+    --vlm-workers 4
+
+# With MinerU OCR
+python -m knowmat --final-md --mineru-api \
+    --input-folder data/raw \
+    --output-dir data/extraction_output \
+    --max-ocr-concurrent 20 \
+    --max-enrich-concurrent 2 \
+    --vlm-workers 4 --skip-existing
+```
+
+**Progress output:**
+
+```
+[ENRICH] Reset 19 stuck llm_processing tasks → ocr_done
+[ENRICH] Pre-queued 737 existing OCR_DONE tasks
+[30s] done=6 enriching=2 ocr_done=731 submitted=0 pending=0 failed=0 skipped=0 total=1070
+```
+
+**Final-MD mode CLI arguments:**
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--final-md` | Enable Final-MD mode (requires `--paddleocr-api` or `--mineru-api`, unless `--repair-only`) | `False` |
+| `--max-enrich-concurrent` | Max concurrent CLIP+VLM workers (keep ≤ 2 to avoid OOM) | `2` |
+| `--vlm-workers` | VLM API concurrency per paper | `4` |
+| `--skip-existing` | Skip papers with an already-complete `_final.md` | `False` |
+| `--repair-only` | Skip OCR (Phase 1), only run repair loop on existing OCR output | `False` |
+| `--max-ocr-concurrent` | Max concurrent OCR API submissions | `20` |
+| `--ocr-poll-interval` | Seconds between OCR job poll cycles | `10` |
+| `--batch-db` | SQLite state DB path | `<input>/.knowmat_batch_enrich.db` |
+
+**Output:**
+
+Each paper gets a `_final.md` in `<output-dir>/<paper-id>/`:
+
+```
+data/extraction_output/
+└── MyPaper/
+    └── MyPaper_final.md       # Markdown with AI figure descriptions injected
+```
+
+The AI descriptions appear inline before each figure mention:
+
+```markdown
+> [Figure 3 AI Description]: SEM micrograph showing equiaxed grains with
+> average diameter of 15 μm. Arrow indicates grain boundary precipitate...
+
+Figure 3. SEM image of the as-cast alloy...
+```
+
+**Memory note:** CLIP model (~600 MB) is loaded once as a process-wide singleton and shared across all enrichment workers. Keep `--max-enrich-concurrent ≤ 2` on machines with < 16 GB RAM.
+
 ### Advanced Options
 
 ```bash
@@ -410,10 +507,15 @@ python -m knowmat \
 | `--manager-model` | Two-stage manager model | `LLM_MODEL` |
 | `--flagging-model` | Flagging model | `LLM_MODEL` |
 | `--batch` | Enable batch parallel mode | `False` |
-| `--max-ocr-concurrent` | (Batch) Max concurrent OCR submissions | `20` |
+| `--max-ocr-concurrent` | (Batch/Final-MD) Max concurrent OCR submissions | `20` |
 | `--max-llm-concurrent` | (Batch) Max concurrent LLM threads | `4` |
 | `--batch-db` | (Batch) SQLite state DB path | `<input>/.knowmat_batch.db` |
-| `--ocr-poll-interval` | (Batch) OCR poll interval (seconds) | `10` |
+| `--ocr-poll-interval` | (Batch/Final-MD) OCR poll interval (seconds) | `10` |
+| `--final-md` | Enable Final-MD mode (CLIP+VLM enrichment) | `False` |
+| `--max-enrich-concurrent` | (Final-MD) Max concurrent enrichment workers | `2` |
+| `--vlm-workers` | (Final-MD) VLM concurrency per paper | `4` |
+| `--skip-existing` | (Final-MD) Skip papers with complete `_final.md` | `False` |
+| `--repair-only` | (Final-MD) Skip OCR, only repair incomplete papers | `False` |
 
 ### Python API
 
@@ -506,7 +608,7 @@ data/output/
 ```
 KnowMat/
 ├── src/knowmat/              # Main Python package
-│   ├── __main__.py           # CLI entry point
+│   ├── __main__.py           # CLI entry point (python -m knowmat)
 │   ├── orchestrator.py       # LangGraph orchestration
 │   ├── nodes/                # LangGraph nodes
 │   │   ├── paddleocrvl_parse_pdf.py
@@ -515,13 +617,19 @@ KnowMat/
 │   │   └── ...
 │   ├── pdf/                  # PDF/OCR submodule
 │   │   ├── ocr_engine.py
+│   │   ├── figure_describer.py   # VLM multi-key pool
+│   │   ├── pipeline_c.py         # CLIP+VLM enrichment pipeline
 │   │   └── ...
 │   └── batch/                # Batch parallel processing
-│       ├── batch_runner.py   # Asyncio orchestrator
-│       ├── task_store.py     # SQLite state persistence
-│       ├── key_pool.py       # Multi-key rotation
-│       └── ocr_dispatcher.py # Async OCR lifecycle
-├── scripts/                  # Utility scripts
+│       ├── batch_runner.py       # Asyncio orchestrator (--batch mode)
+│       ├── enrich_runner.py      # Asyncio enrichment runner (--final-md mode)
+│       ├── finalmd_pipeline.py   # Phase 1+2 orchestration + repair loop
+│       ├── task_store.py         # SQLite state persistence
+│       ├── key_pool.py           # Multi-key rotation
+│       └── ocr_dispatcher.py     # Async OCR lifecycle
+├── scripts/                  # Utility scripts (thin wrappers over package)
+│   ├── run_batch_enrich.py       # Backward-compat CLI for EnrichRunner
+│   ├── batch_ocr_to_finalmd.py   # Backward-compat CLI for finalmd_pipeline
 │   └── download_paddleocrvl_models.py
 ├── prompts/                  # LLM prompt templates
 ├── configs/                  # Configuration directory

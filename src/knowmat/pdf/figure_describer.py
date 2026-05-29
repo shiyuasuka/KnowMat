@@ -16,6 +16,7 @@ import base64
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -43,6 +44,157 @@ _VLM_RETRY_BACKOFF = 3.0
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
+    """Check if the exception is a rate limit / too-frequent error."""
+    msg = str(exc).lower()
+    return "429" in msg or "频繁" in msg or "rate" in msg or "too many" in msg
+
+
+class _VlmKeyPool:
+    """Thread-safe round-robin pool for VLM API keys.
+
+    Reads keys from (in priority order):
+      VLM_API_KEYS=key1,key2,key3       comma-separated list
+      VLM_API_KEY_1, VLM_API_KEY_2, …  numbered env vars
+      VLM_API_KEY / LLM_API_KEY         single-key fallback
+
+    On a rate-limit hit the caller should call next_key() to get the
+    next key immediately instead of sleeping on the same exhausted key.
+    Only when all keys have been tried in one round does the pool back off.
+    """
+
+    def __init__(self) -> None:
+        self._keys: list[str] = []
+        self._idx: int = 0
+        self._lock = threading.Lock()
+        self._load()
+
+    def _load(self) -> None:
+        keys: list[str] = []
+        multi = os.getenv("VLM_API_KEYS", "")
+        if multi:
+            keys.extend(k.strip() for k in multi.split(",") if k.strip())
+        for i in range(1, 50):
+            k = os.getenv(f"VLM_API_KEY_{i}", "")
+            if k:
+                keys.append(k)
+            else:
+                break
+        single = (
+            os.getenv("VLM_API_KEY")
+            or os.getenv("LLM_API_KEY")
+            or os.getenv("OPENAI_API_KEY", "")
+        )
+        if single and single not in keys:
+            keys.append(single)
+        self._keys = keys
+        if keys:
+            logger.info("VlmKeyPool loaded %d key(s)", len(keys))
+
+    @property
+    def size(self) -> int:
+        return len(self._keys)
+
+    def all_keys(self) -> list[str]:
+        return list(self._keys)
+
+    def next_key(self) -> str:
+        with self._lock:
+            if not self._keys:
+                return ""
+            key = self._keys[self._idx % len(self._keys)]
+            self._idx += 1
+            return key
+
+
+# Module-level singleton — shared across all threads in the process.
+_VLM_POOL: _VlmKeyPool | None = None
+_VLM_POOL_LOCK = threading.Lock()
+
+
+def _get_vlm_pool() -> _VlmKeyPool:
+    global _VLM_POOL
+    if _VLM_POOL is None:
+        with _VLM_POOL_LOCK:
+            if _VLM_POOL is None:
+                _VLM_POOL = _VlmKeyPool()
+    return _VLM_POOL
+
+
+def _vlm_call_with_pool(
+    base_url: str | None,
+    create_kwargs: dict,
+    image_path,
+) -> str:
+    """Call VLM API with multi-key rotation and exponential backoff.
+
+    Strategy:
+      - Cycle through all configured keys on rate-limit errors (immediate,
+        no sleep) — only sleep once every key in the pool has been tried.
+      - For non-rate-limit errors, apply per-attempt backoff as before.
+    """
+    try:
+        from openai import OpenAI  # type: ignore
+    except ImportError:
+        logger.warning("openai package not available; skipping figure description.")
+        return ""
+
+    pool = _get_vlm_pool()
+    keys = pool.all_keys()
+    if not keys:
+        logger.warning("No VLM API keys configured.")
+        return ""
+
+    n = len(keys)
+    max_attempts = n * _VLM_MAX_RETRIES
+    last_exc: Exception | None = None
+
+    for attempt in range(max_attempts):
+        key = keys[attempt % n]
+        client_kwargs: dict = {"api_key": key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+
+        try:
+            client = OpenAI(**client_kwargs)
+            response = client.chat.completions.create(**create_kwargs)
+            content = response.choices[0].message.content or ""
+            if content.strip():
+                return content
+            logger.warning(
+                "VLM empty response for %s (key %d/%d, attempt %d/%d)",
+                image_path, attempt % n + 1, n, attempt + 1, max_attempts,
+            )
+        except Exception as exc:
+            last_exc = exc
+            is_rate = _is_rate_limit_error(exc)
+            logger.warning(
+                "VLM %s for %s (key %d/%d, attempt %d/%d): %s",
+                "rate-limited" if is_rate else "failed",
+                image_path, attempt % n + 1, n, attempt + 1, max_attempts, exc,
+            )
+            if is_rate:
+                # Rotate to the next key immediately (no sleep within a round).
+                # If this was the last key in the round, all keys are exhausted —
+                # back off before starting the next round.
+                if (attempt + 1) % n == 0:
+                    round_num = (attempt + 1) // n
+                    wait = _VLM_RETRY_BACKOFF * (2 ** (round_num - 1))  # 3, 6, 12 …
+                    logger.info(
+                        "All %d VLM key(s) rate-limited (round %d), "
+                        "waiting %.1fs before next round…",
+                        n, round_num, wait,
+                    )
+                    time.sleep(wait)
+                continue  # try next key / next round immediately
+
+            # Non-rate-limit error: standard per-attempt backoff
+            if attempt < max_attempts - 1:
+                wait = _VLM_RETRY_BACKOFF * (2 ** (attempt % _VLM_MAX_RETRIES))
+                time.sleep(wait)
+
+    if last_exc:
+        raise last_exc
+    return ""
     """Check if the exception is a rate limit / too-frequent error."""
     msg = str(exc).lower()
     return "429" in msg or "频繁" in msg or "rate" in msg or "too many" in msg
@@ -144,7 +296,7 @@ def describe_figure_image(
     if b64 is None:
         return ""
 
-    _api_key = api_key or os.getenv("VLM_API_KEY") or os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+    _api_key = api_key or _get_vlm_pool().next_key()
     _base_url = base_url or os.getenv("VLM_BASE_URL") or os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
     _model = model or os.getenv("VLM_MODEL") or os.getenv("LLM_MODEL", "")
 
@@ -181,20 +333,15 @@ def describe_figure_image(
         },
     ]
 
-    client_kwargs: dict = {"api_key": _api_key}
-    if _base_url:
-        client_kwargs["base_url"] = _base_url
+    create_kwargs: dict = {
+        "model": _model,
+        "messages": messages,
+        "max_tokens": 2048,
+        "temperature": 0.2,
+    }
 
     try:
-        client = OpenAI(**client_kwargs)
-        create_kwargs: dict = {
-            "model": _model,
-            "messages": messages,
-            "max_tokens": 2048,
-            "temperature": 0.2,
-        }
-
-        content = _vlm_call_with_retry(client, create_kwargs, image_path)
+        content = _vlm_call_with_pool(_base_url, create_kwargs, image_path)
         content = _sanitize_figure_description(content)
         logger.debug("Figure description generated (%d chars) for %s", len(content), image_path)
         return content
@@ -227,7 +374,7 @@ def describe_figure_image_with_context(
     if b64 is None:
         return ""
 
-    _api_key = api_key or os.getenv("VLM_API_KEY") or os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+    _api_key = api_key or _get_vlm_pool().next_key()
     _base_url = base_url or os.getenv("VLM_BASE_URL") or os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
     _model = model or os.getenv("VLM_MODEL") or os.getenv("LLM_MODEL", "")
 
@@ -273,20 +420,15 @@ def describe_figure_image_with_context(
         },
     ]
 
-    client_kwargs: dict = {"api_key": _api_key}
-    if _base_url:
-        client_kwargs["base_url"] = _base_url
+    create_kwargs: dict = {
+        "model": _model,
+        "messages": messages,
+        "max_tokens": 2048,
+        "temperature": 0.2,
+    }
 
     try:
-        client = OpenAI(**client_kwargs)
-        create_kwargs: dict = {
-            "model": _model,
-            "messages": messages,
-            "max_tokens": 2048,
-            "temperature": 0.2,
-        }
-
-        content = _vlm_call_with_retry(client, create_kwargs, image_path)
+        content = _vlm_call_with_pool(_base_url, create_kwargs, image_path)
         content = _sanitize_figure_description(content)
         logger.debug("Figure description (with context) generated (%d chars) for %s", len(content), image_path)
         return content
