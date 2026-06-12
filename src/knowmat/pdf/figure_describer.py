@@ -492,7 +492,15 @@ def inject_figure_descriptions(
     except Exception as exc:
         logger.warning("CLIP alignment unavailable, using VLM-only fallback: %s", exc)
 
-    # Collect valid items to describe
+    # Collect valid items to describe, routing each to a processing mode:
+    #   "chart" → VLM digitization (line/bar) → '> [Figure N VLM-digitized]:'
+    #   "prose" → existing VLM prose description → '> [Figure N AI Description]:'
+    # Routing key: PaddleOCR-VL crop filename (chart_box vs image_box).
+    from knowmat.pdf.chart_digitizer import is_chart_crop
+    from knowmat.app_config import settings as _settings
+
+    _chart_enabled = getattr(_settings, "chart_digitization_enabled", True)
+
     to_describe: List[Dict[str, Any]] = []
     for item in image_items:
         data = item.get("data", {})
@@ -502,14 +510,21 @@ def inject_figure_descriptions(
             logger.debug("Figure image not found, skipping description injection: %s", img_path)
             continue
         figure_num = data.get("figure_num", "")
-        if figure_num and f"> [Figure {figure_num} AI Description]:" in text:
-            continue
+        mode = "chart" if (_chart_enabled and is_chart_crop(raw_path)) else "prose"
+        # Skip if this figure already has the corresponding injected block.
+        if figure_num:
+            if mode == "chart" and f"[Figure {figure_num} VLM-digitized" in text:
+                continue
+            if mode == "prose" and f"> [Figure {figure_num} AI Description]:" in text:
+                continue
+        item["_describe_mode"] = mode
         to_describe.append(item)
 
     if not to_describe:
         return text
 
-    # Parallel LLM calls (Approach C: VLM + CLIP context when available)
+    # Parallel LLM calls.  chart items → digitize_chart_image + format_digitized_block;
+    # prose items → existing VLM prose (Approach C: VLM + CLIP context when available).
     descriptions: Dict[int, str] = {}
 
     def _describe(idx: int, item: Dict[str, Any]) -> tuple:
@@ -517,6 +532,22 @@ def inject_figure_descriptions(
         img_path = Path(data.get("image_path", ""))
         caption = data.get("caption", "")
         figure_num = data.get("figure_num", "")
+        mode = item.get("_describe_mode", "prose")
+
+        if mode == "chart":
+            from knowmat.pdf.chart_digitizer import (
+                digitize_chart_image,
+                format_digitized_block,
+            )
+            result = digitize_chart_image(img_path, caption=caption)
+            if result:
+                block = format_digitized_block(result, figure_num=figure_num)
+                if block:
+                    # Strip the leading marker; the injection loop re-wraps.
+                    return idx, ("chart", block)
+            # Non-digitizable chart (xrd/micrograph/other) → fall back to prose
+            # so the figure still gets *some* context.
+
         related = alignment_by_fig.get(figure_num, []) if figure_num else []
         if related:
             desc = describe_figure_image_with_context(
@@ -525,28 +556,33 @@ def inject_figure_descriptions(
         else:
             desc = describe_figure_image(img_path, caption=caption)
         desc = _sanitize_figure_description(desc)
-        return idx, desc
+        return idx, ("prose", desc)
 
     workers = min(max_workers, len(to_describe))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_describe, i, item): i for i, item in enumerate(to_describe)}
         for future in as_completed(futures):
             try:
-                idx, desc = future.result()
-                if desc:
-                    descriptions[idx] = desc
+                idx, payload = future.result()
+                if payload and payload[1]:
+                    descriptions[idx] = payload
             except Exception as exc:
                 logger.warning("Figure description failed: %s", exc)
 
-    # Insert descriptions into text (must be done sequentially to keep positions correct)
+    # Insert descriptions into text (sequential to keep positions correct).
     for idx in sorted(descriptions.keys()):
         item = to_describe[idx]
         data = item.get("data", {})
         figure_num = data.get("figure_num", "")
-        description = descriptions[idx]
+        kind, content = descriptions[idx]
 
-        label = f"Figure {figure_num}" if figure_num else "Figure"
-        description_block = f"> [{label} AI Description]: {description}\n\n"
+        if kind == "chart":
+            # content is already a fully-formed '> [Figure N VLM-digitized ...]:' block
+            description_block = content.rstrip() + "\n\n"
+        else:
+            label = f"Figure {figure_num}" if figure_num else "Figure"
+            description_block = f"> [{label} AI Description]: {content}\n\n"
+
         if description_block.strip() in text:
             continue
 
@@ -561,10 +597,11 @@ def inject_figure_descriptions(
                 insert_pos = line_start if line_start < match.start() else match.start()
                 text = text[:insert_pos] + description_block + text[insert_pos:]
                 logger.debug(
-                    "Injected description for Figure %s at position %d", figure_num, insert_pos
+                    "Injected %s for Figure %s at position %d", kind, figure_num, insert_pos
                 )
                 continue
 
         text = text + "\n\n" + description_block
 
     return text
+

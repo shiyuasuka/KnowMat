@@ -92,7 +92,7 @@ def test_extract_data_persists_enriched_markdown(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(settings, "figure_description_enabled", True)
     monkeypatch.setattr(
         "knowmat.pdf.figure_describer.inject_figure_descriptions",
-        lambda text, items: text.replace(
+        lambda text, items, *args, **kwargs: text.replace(
             "Figure 1. SEM image of precipitates.",
             "> [Figure 1 AI Description]: Synthetic description.\n\nFigure 1. SEM image of precipitates.",
         ),

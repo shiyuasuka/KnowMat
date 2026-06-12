@@ -127,7 +127,7 @@ IV. Anti-Hallucination Hard Constraints
 Typical inference errors (absolutely prohibited):
 - Calculating other element content from balance element → must use "Balance"
 - Writing standard composition from commercial trade names → must fill null and retain original material name
-- Reading values from images → must fill null, prohibited: using "estimated from Fig.X" to retain estimated values; AI figure descriptions are context only, not data sources
+- Reading values from images → must fill null, prohibited: using "estimated from Fig.X" to retain estimated values; prose AI figure descriptions ("AI Description" blocks) are context only, not data sources. (Exception: "VLM-digitized" blocks ARE extractable with mandatory image_digitized provenance — see Section IV.5.c2.)
 - Inferring material properties from interrupted test stopping conditions → stopping conditions are not properties
 - Mixing theoretical strengthening contribution values into experimental properties → theoretical values require Data_Nature annotation
 
@@ -150,11 +150,30 @@ Per-field null strategy:
       - Values explicitly written in figure captions/legends can be extracted
       - Data_Source annotated as "image", Note states "from caption/legend"
       - Text/caption describing only trends without concrete values → fill null
-   c) AI-Generated Figure Descriptions (lines starting with "> [Figure"):
+   c) AI-Generated Figure Descriptions (lines starting with "> [Figure" and containing "AI Description"):
       - These are machine-generated contextual summaries to help you understand what figures contain
       - They are NOT primary data sources — do not extract numeric values from them
       - Use them only as context to better understand the paper's experimental results
       - Always extract properties from the main text body, tables, and captions
+   c2) VLM-Digitized Chart Data (lines starting with "> [Figure N VLM-digitized"):
+      - These are machine-read estimates of chart content, produced by a vision model from the figure pixels. They ARE extractable (unlike the prose AI Descriptions above), but with mandatory provenance:
+      - Every value taken from a VLM-digitized block MUST be annotated:
+        * Data_Source = "image_digitized"  (HARD RULE — exactly this string, NOT "image", NOT "text". "image" is reserved for values written in the caption/legend; a value read from a VLM-digitized block is ALWAYS "image_digitized".)
+        * Note must state "estimated from chart (VLM-digitized), not exact"
+        * Data_Nature follows the item (usually "Experimental"); the estimate flag lives in Note/Data_Source, not Data_Nature
+      - Two block formats exist:
+        * "bar chart" blocks contain a CSV of bar/bin heights → these discrete values may be extracted as approximate property/structure values (e.g. distribution peaks, hardness bars). Mark each Value with the provenance above.
+        * "line chart" blocks contain ONLY axis variables/units, series labels, monotonicity, start/end endpoints, and extrema (peak/valley) points — NO per-point series. You SHOULD extract the readable endpoint and extrema values as approximate property points (do not leave them unextracted), and use the trend/monotonicity as context. Do NOT fabricate intermediate points the block does not contain.
+          Worked example (line block):
+            "x_axis: Temperature (C); y_axis: Yield Strength (MPa); series θ=0: end=[800, 390], extrema=[peak@[700, 490]]"
+            → extract TWO approximate property records on that item:
+               { Property_Name: "Yield_Strength", Value_Numeric: 390, Unit: "MPa", Test_Temperature_K: 1073.15, Data_Source: "image_digitized", Data_Nature: "Experimental", Note: "estimated from chart (VLM-digitized), not exact; endpoint of Fig.6 θ=0 curve at 800°C" }
+               { Property_Name: "Yield_Strength", Value_Numeric: 490, Unit: "MPa", Test_Temperature_K: 973.15, Data_Source: "image_digitized", Data_Nature: "Experimental", Note: "estimated from chart (VLM-digitized), not exact; peak of Fig.6 θ=0 curve at 700°C" }
+          Skip a line block ONLY when its axes are not material properties (e.g. pure force–displacement / Lagrange-multiplier solver curves with no property meaning) or every endpoint/extremum value is null/unreadable.
+      - PRECEDENCE: if the SAME quantity also appears in the main text, a table, or a caption with a concrete value, ALWAYS prefer that source (Data_Source text/table/image) over the digitized estimate. Use digitized values only to fill gaps the text/tables do not cover.
+      - When a digitized value is null/empty or marked unreadable, do not invent it.
+
+
    d) Figure/Table Description Text (key scanning, high-frequency omission source):
       - Concrete values given in text describing figure/table content (e.g., "Fig. 6 shows hardness reached 450 HV") → must extract
       - Data_Source annotated as "text" (because value appears in body text)

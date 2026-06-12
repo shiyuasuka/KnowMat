@@ -1,9 +1,10 @@
-"""PaddleOCR cloud API client (supports PaddleOCR-VL-1.5 and PP-StructureV3 models)."""
+"""PaddleOCR cloud API client (supports PaddleOCR-VL-* and PP-StructureV3 models)."""
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -13,6 +14,32 @@ import requests
 logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+
+# Default VL model when neither caller nor env specifies one.  Kept at 1.5 for
+# backward compatibility; override via env to use a newer release (e.g. 1.6).
+_DEFAULT_VL_MODEL = "PaddleOCR-VL-1.5"
+
+
+def get_paddleocr_vl_model() -> str:
+    """Return the PaddleOCR-VL model name for the primary OCR pass.
+
+    Resolution order:
+      1. ``PADDLEOCR_API_MODEL`` env var (e.g. "PaddleOCR-VL-1.6")
+      2. ``PADDLEOCRVL_VERSION`` env var (a bare version like "1.6" → "PaddleOCR-VL-1.6")
+      3. built-in default (``PaddleOCR-VL-1.5``)
+
+    Only affects the VL OCR model; PP-StructureV3 refinement is unrelated and
+    always uses "PP-StructureV3".
+    """
+    explicit = os.getenv("PADDLEOCR_API_MODEL", "").strip()
+    if explicit:
+        return explicit
+    version = os.getenv("PADDLEOCRVL_VERSION", "").strip()
+    if version:
+        # Accept either a bare version ("1.6") or an already-qualified name.
+        return version if version.lower().startswith("paddleocr") else f"PaddleOCR-VL-{version}"
+    return _DEFAULT_VL_MODEL
+
 
 _DEFAULT_OPTIONS = {
     "useDocOrientationClassify": False,
@@ -43,10 +70,16 @@ class PaddleOCRAPIClient:
     def submit_job(
         self,
         pdf_path: Path,
-        model: str = "PaddleOCR-VL-1.5",
+        model: Optional[str] = None,
         options: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Upload PDF and submit OCR job. Returns jobId."""
+        """Upload PDF and submit OCR job. Returns jobId.
+
+        When *model* is None, the VL model is resolved from env via
+        :func:`get_paddleocr_vl_model` (default ``PaddleOCR-VL-1.5``).
+        Callers that need PP-StructureV3 pass it explicitly.
+        """
+        model = model or get_paddleocr_vl_model()
         opts = {**_DEFAULT_OPTIONS, **(options or {})}
         file_size = pdf_path.stat().st_size
         logger.info(
@@ -161,7 +194,7 @@ class PaddleOCRAPIClient:
     def upload_and_parse(
         self,
         pdf_path: Path,
-        model: str = "PaddleOCR-VL-1.5",
+        model: Optional[str] = None,
         options: Optional[Dict[str, Any]] = None,
         timeout_sec: float = 600,
     ) -> Dict[str, Any]:

@@ -263,7 +263,8 @@ class EnrichRunner:
             if self.skip_existing and not self.retry_incomplete:
                 return
             if self.retry_incomplete:
-                if "AI Description]:" in final_md_path.read_text(encoding="utf-8"):
+                _existing = final_md_path.read_text(encoding="utf-8")
+                if "AI Description]:" in _existing or "VLM-digitized" in _existing:
                     return
 
         enriched_text = enrich_paper_text(stem, self.input_folder, vlm_workers=self.vlm_workers)

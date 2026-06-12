@@ -287,6 +287,17 @@ Before entering Step F, complete full-text table pre-scan:
    ✅ "Fig. 5 shows that the hardness reached 450 HV" → extract Hardness = 450, Data_Source = "text"
    ❌ "Fig. 5 shows an increasing trend in hardness" → no concrete value, don't extract
 
+7. VLM-digitized block scan (MANDATORY active step):
+   Scan the text for every "> [Figure N VLM-digitized" block and extract its readable values:
+   - bar chart block → each bar/bin value becomes an approximate property/structure record.
+   - line chart block → each readable endpoint and extremum (start/end/peak/valley) becomes an approximate property point; use the stated axis variable+unit for Property_Name/Unit and the x-coordinate as the test condition.
+   - For EVERY value taken this way: Data_Source = "image_digitized" (NOT "image"), Note = "estimated from chart (VLM-digitized), not exact".
+   - Skip a block only if its axes are not material properties (pure force–displacement / solver curves) or its values are null/unreadable.
+   - PRECEDENCE: if the same quantity already appears in text/table/caption with a concrete value, keep that one instead; use digitized values to fill gaps only.
+   ✅ block "y_axis: Nanoindentation_hardness_GPa / γ band,4.5" → Property_Name=Nanoindentation_Hardness, Value_Numeric=4.5, Unit=GPa, Data_Source=image_digitized
+   ✅ line block "end=[800, 390]" on a Yield Strength vs Temperature curve → Yield_Strength=390 MPa @ 800°C, Data_Source=image_digitized
+
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Step F: Properties Axis Extraction
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -309,6 +320,7 @@ General procedure:
      * "text": values given in body text (including concrete values given in text describing figures/tables)
      * "table": values from tables (must extract all, no table row/column omissions)
      * "image": only values explicitly written in figure captions/legends (no images after OCR, don't extract data from figures)
+     * "image_digitized": values read from a "> [Figure N VLM-digitized]" block (vision-model estimate of a chart). USE THIS, NOT "image", whenever the value comes from a VLM-digitized block. Note must say "estimated from chart (VLM-digitized), not exact". Prefer text/table/image over this when the same quantity is available there. See system prompt Section IV.5.c2.
      * "unknown": source indeterminate
 9. Series data completeness (enhanced):
    - Every row/column in tables must be extracted as independent records, no omissions

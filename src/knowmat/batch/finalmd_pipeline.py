@@ -63,11 +63,17 @@ def _load_figures_with_valid_images(paper_id: str, raw_dir: Path) -> List[str]:
 
 
 def _count_ai_descriptions(final_md_path: Path) -> int:
-    """Count 'AI Description]:' occurrences in a _final.md (-1 if missing)."""
+    """Count injected figure blocks in a _final.md (-1 if missing).
+
+    Counts BOTH enrichment block kinds, since each figure gets exactly one:
+      - prose:        '> [Figure N AI Description]:'
+      - chart digitize: '> [Figure N VLM-digitized ...]:'
+    """
     if not final_md_path.exists():
         return -1
     try:
-        return final_md_path.read_text(encoding="utf-8").count("AI Description]:")
+        text = final_md_path.read_text(encoding="utf-8")
+        return text.count("AI Description]:") + text.count("VLM-digitized")
     except Exception:
         return -1
 

@@ -77,16 +77,64 @@ def _extract_json_object_text(text: str) -> str:
     raise ValueError("Could not locate a valid JSON object in fallback response.")
 
 
-def _invoke_plain_json_fallback(full_prompt: str) -> Dict[str, Any]:
-    """Fallback path for providers that fail structured tool calling."""
+_COMPACT_FALLBACK_SYSTEM = (
+    "You are a materials-science extraction engine. Extract database-ready "
+    "structured data from the paper text into ONE JSON object.\n\n"
+    "Output schema (return EXACTLY this shape, no prose, no markdown fences):\n"
+    "{\n"
+    '  "Paper_Metadata": {"Paper_Title": "...", "DOI": "... or null"},\n'
+    '  "Paper_Routing": {"base_material": "Metals|Ceramics_Inorganic|Polymers|Composites|Organic_Small_Molecules",\n'
+    '                     "application": "Structural|Functional",\n'
+    '                     "research_paradigm": "Experimental|Pure_Simulation|Hybrid"},\n'
+    '  "compositions": [ {\n'
+    '      "Sample_ID": "...", "Role": "Target|Variant|Reference|Comparator",\n'
+    '      "Data_Nature": "Experimental|Computed|Literature_Experimental|Literature_Computed",\n'
+    '      "Composition": {...}, "Processing": {...}, "Structure": {...},\n'
+    '      "Properties": [ {"Property_Name": "...", "Value_Numeric": 0, "Unit": "...",\n'
+    '                       "Data_Source": "text|table|image|image_digitized|unknown",\n'
+    '                       "Data_Nature": "Experimental", "Note": "..."} ]\n'
+    "  } ]\n"
+    "}\n\n"
+    "CRITICAL — the top-level list MUST be named \"compositions\" (NOT \"items\").\n"
+    "Split rules: each distinct composition / heat-treatment / aging time / "
+    "thermal-exposure duration / parametric-sweep value / coating layer / "
+    "computed (FEM/DFT/CALPHAD) case = a SEPARATE entry. Keep different test "
+    "temperatures on the SAME unchanged specimen as ONE entry with multiple Properties.\n"
+    "Faithful to source: never invent values; ranges→Value_Range with Value null; "
+    "inequalities→Value null + Note; omit fields not mentioned (do not emit null-filled objects).\n"
+    "Figure blocks: '> [Figure N AI Description]' prose is CONTEXT ONLY (do not extract numbers). "
+    "'> [Figure N VLM-digitized]' blocks ARE extractable — when you take a value from one, set "
+    'Data_Source="image_digitized" and Note="estimated from chart (VLM-digitized), not exact". '
+    "Prefer text/table/caption values over digitized estimates for the same quantity."
+)
+
+
+def _invoke_plain_json_fallback(full_prompt: str, compact_user: str | None = None) -> Dict[str, Any]:
+    """Fallback path for providers that fail structured tool calling.
+
+    When *compact_user* is provided, use a much shorter system+user prompt
+    (core schema + split/faithfulness rules only) instead of the full ~22k-token
+    template.  Long papers frequently exhaust the model's generation budget
+    under the full prompt and return only Paper_Metadata; the compact prompt
+    leaves far more room to actually emit the compositions list.
+    """
     llm = get_llm(agent_type="extraction")
-    fallback_prompt = (
-        full_prompt
-        + "\n\nIMPORTANT: Do not call any tool."
-        + "\nReturn raw JSON only."
-        + "\nReturn exactly one JSON object with top-level key `compositions`."
-    )
-    response = llm.invoke(fallback_prompt)
+    if compact_user is not None:
+        messages = [
+            {"role": "system", "content": _COMPACT_FALLBACK_SYSTEM},
+            {"role": "user", "content": compact_user},
+            {"role": "user", "content": "Return raw JSON only. Do not call any tool. "
+                                        "Top-level list key MUST be \"compositions\"."},
+        ]
+        response = llm.invoke(messages)
+    else:
+        fallback_prompt = (
+            full_prompt
+            + "\n\nIMPORTANT: Do not call any tool."
+            + "\nReturn raw JSON only."
+            + "\nReturn exactly one JSON object with top-level key `compositions`."
+        )
+        response = llm.invoke(fallback_prompt)
     content = _flatten_message_content(getattr(response, "content", response))
     payload = _extract_json_object_text(content)
     model = CompositionList.model_validate_json(payload)
@@ -197,16 +245,35 @@ def extract_data(state: KnowMatState) -> Dict[str, Any]:
             "Tool-based extraction returned no structured responses; "
             "attempting raw-JSON fallback."
         )
+        # Build a compact user message: routing hints + the (already
+        # figure-enriched) paper text, WITHOUT the ~22k-token step-by-step
+        # template.  This frees generation budget so long papers can actually
+        # emit the compositions list instead of stopping after Paper_Metadata.
+        _rt = paper_routing or {}
+        compact_user = (
+            "Routing hints (may be empty): "
+            f"base_material={_rt.get('base_material','')}, "
+            f"application={_rt.get('application','')}, "
+            f"research_paradigm={_rt.get('research_paradigm','')}\n\n"
+            "=== PAPER TEXT START ===\n"
+            f"{paper_text}\n"
+            "=== PAPER TEXT END ==="
+        )
         try:
-            extracted_dict = _invoke_plain_json_fallback(full_prompt)
+            extracted_dict = _invoke_plain_json_fallback(full_prompt, compact_user=compact_user)
             return {"latest_extracted_data": extracted_dict, "paper_text": paper_text}
-        except Exception as fallback_exc:
-            if structured_error is not None:
-                raise RuntimeError(
-                    "Extraction failed in both structured and raw-JSON modes: "
-                    f"{structured_error}; fallback={fallback_exc}"
-                ) from fallback_exc
-            raise
+        except Exception as compact_exc:
+            logger.warning("Compact fallback failed (%s); trying full-prompt fallback.", compact_exc)
+            try:
+                extracted_dict = _invoke_plain_json_fallback(full_prompt)
+                return {"latest_extracted_data": extracted_dict, "paper_text": paper_text}
+            except Exception as fallback_exc:
+                if structured_error is not None:
+                    raise RuntimeError(
+                        "Extraction failed in both structured and raw-JSON modes: "
+                        f"{structured_error}; fallback={fallback_exc}"
+                    ) from fallback_exc
+                raise
 
     response = responses[0]
     if isinstance(response, CompositionList):

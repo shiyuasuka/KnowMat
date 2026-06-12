@@ -1032,9 +1032,11 @@ def _extract_pdf_with_paddleocr_api(
 
     client = PaddleOCRAPIClient(token, base_url)
 
-    # Step 1: Run PaddleOCR-VL-1.5 for primary OCR
-    logger.info("[PaddleOCR API] Running PaddleOCR-VL-1.5 on %s...", pdf.name)
-    job_result = client.upload_and_parse(pdf, model="PaddleOCR-VL-1.5", timeout_sec=timeout)
+    # Step 1: Run PaddleOCR-VL for primary OCR (version from env, default 1.5)
+    from knowmat.pdf.paddleocr_api_client import get_paddleocr_vl_model
+    vl_model = get_paddleocr_vl_model()
+    logger.info("[PaddleOCR API] Running %s on %s...", vl_model, pdf.name)
+    job_result = client.upload_and_parse(pdf, model=vl_model, timeout_sec=timeout)
 
     jsonl_url = job_result.get("resultUrl", {}).get("jsonUrl", "")
     if not jsonl_url:
@@ -1053,7 +1055,7 @@ def _extract_pdf_with_paddleocr_api(
     ocr_items, pp_report = _refine_with_ppstructurev3_api(pdf_path, ocr_items, output_dir)
     metadata["ocr_quality"].update(pp_report)
 
-    metadata["paddleocr_api_model"] = "PaddleOCR-VL-1.5"
+    metadata["paddleocr_api_model"] = vl_model
     return extracted_text, metadata, ocr_items
 
 

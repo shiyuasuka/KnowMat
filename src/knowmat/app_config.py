@@ -72,6 +72,15 @@ class Settings(BaseSettings):
         each detected figure image and inserts it into ``paper_text`` above the
         corresponding figure caption.  Requires ``LLM_MODEL`` to support vision.
         Defaults to ``True``.  Disable via ``KNOWMAT2_FIGURE_DESCRIPTION_ENABLED=0``.
+
+    chart_digitization_enabled: bool
+        When ``True``, figure crops whose OCR filename marks them as charts
+        (``img_in_chart_box_*``) are routed to a VLM digitization pass instead
+        of prose: bar charts → CSV, line charts → key-points + trend summary,
+        injected as ``> [Figure N VLM-digitized]`` blocks that the extraction
+        stage may consume as ``image_digitized`` estimates.  Non-chart crops and
+        non-digitizable charts (XRD/micrograph) still get prose descriptions.
+        Defaults to ``True``.  Disable via ``KNOWMAT2_CHART_DIGITIZATION_ENABLED=0``.
     """
 
     # IO defaults (can be overridden by env or CLI)
@@ -88,6 +97,7 @@ class Settings(BaseSettings):
     flagging_model: str = DEFAULT_LLM_MODEL
     trim_references_section: bool = False
     figure_description_enabled: bool = True
+    chart_digitization_enabled: bool = True
 
     model_config = ConfigDict(env_prefix="KNOWMAT2_")
 

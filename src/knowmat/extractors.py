@@ -95,10 +95,22 @@ def get_llm(agent_type: str = "default") -> ChatOpenAI:
     }
     
     model = model_map.get(agent_type, settings.model_name)
-    
+
+    # Per-agent request timeout.  The extraction agent receives a very large
+    # prompt (system+user template ~22k tokens + enriched paper_text), and some
+    # providers (e.g. MiniMax) frequently return an EMPTY tool-call on the first
+    # attempt for such inputs.  A 20-minute timeout there means each empty
+    # return wastes up to 20 min before the raw-JSON fallback kicks in.  Use a
+    # shorter timeout for extraction so empty/slow calls fail fast and the
+    # fallback path is reached sooner; keep the long timeout for other agents.
+    _timeout_by_agent = {
+        "extraction": int(os.getenv("KNOWMAT2_EXTRACTION_TIMEOUT", "480")),
+    }
+    request_timeout = _timeout_by_agent.get(agent_type, 1200)
+
     base_kwargs = {
         "model": model,
-        "request_timeout": 1200,  # 20 minute timeout per API call (not per pipeline)
+        "request_timeout": request_timeout,
         "max_retries": 3,  # Retry failed requests up to 3 times
         "max_tokens": 16384,  # Allow large outputs for multi-item papers
         **_llm_connection_kwargs(),
@@ -1111,8 +1123,21 @@ class CompositionList(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def parse_compositions_string(cls, data: Any) -> Any:
-        """Handle LLM returning compositions as a JSON string instead of a list."""
+        """Normalize LLM output into the ``compositions`` field.
+
+        Two real-world quirks are handled here:
+          1. The model sometimes emits the list under the key ``items`` (the
+             name used in the prompt's output-structure example and in the
+             final lab schema) instead of ``compositions`` (this Pydantic
+             field).  When ``compositions`` is absent but ``items`` is a list,
+             treat ``items`` as the compositions list.  This was the dominant
+             cause of "compositions Field required" validation failures on
+             long papers where the model follows the prompt example literally.
+          2. The list may arrive as a JSON-encoded string.
+        """
         if isinstance(data, dict):
+            if "compositions" not in data and isinstance(data.get("items"), list):
+                data = {**data, "compositions": data["items"]}
             val = data.get("compositions")
             if isinstance(val, str):
                 try:

@@ -101,11 +101,15 @@ class OCRDispatcher:
                     return False
 
     def _submit_paddleocr(self, pdf_path: str, key: KeyInfo) -> str:
-        """Sync: submit job to PaddleOCR API. Returns job_id."""
+        """Sync: submit job to PaddleOCR API. Returns job_id.
+
+        VL model is resolved from env (PADDLEOCR_API_MODEL / PADDLEOCRVL_VERSION,
+        default PaddleOCR-VL-1.5) inside the client.
+        """
         from knowmat.pdf.paddleocr_api_client import PaddleOCRAPIClient
 
         client = PaddleOCRAPIClient(key.token, key.base_url)
-        return client.submit_job(Path(pdf_path), model="PaddleOCR-VL-1.5")
+        return client.submit_job(Path(pdf_path))
 
     def _submit_mineru(self, pdf_path: str, key: KeyInfo) -> str:
         """Sync: submit job to MinerU API. Returns batch_id."""
