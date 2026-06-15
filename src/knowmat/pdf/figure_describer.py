@@ -49,6 +49,22 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     return "429" in msg or "频繁" in msg or "rate" in msg or "too many" in msg
 
 
+def _is_non_retryable_error(exc: Exception) -> bool:
+    """Check if the error will never succeed on retry (so skip immediately).
+
+    Notably the provider's content-moderation rejection: some scientific
+    micrographs are flagged "image is sensitive" (HTTP 422 / unprocessable),
+    which returns the same 422 on every retry — retrying just wastes time.
+    """
+    msg = str(exc).lower()
+    return (
+        "422" in msg
+        or "unprocessable" in msg
+        or "sensitive" in msg
+        or "new_sensitive" in msg
+    )
+
+
 class _VlmKeyPool:
     """Thread-safe round-robin pool for VLM API keys.
 
@@ -166,6 +182,14 @@ def _vlm_call_with_pool(
             )
         except Exception as exc:
             last_exc = exc
+            if _is_non_retryable_error(exc):
+                # e.g. content-moderation "image is sensitive" (422): same result
+                # every retry → give up now so the pipeline moves on.
+                logger.warning(
+                    "VLM permanently rejected %s (non-retryable): %s",
+                    image_path, exc,
+                )
+                raise
             is_rate = _is_rate_limit_error(exc)
             logger.warning(
                 "VLM %s for %s (key %d/%d, attempt %d/%d): %s",

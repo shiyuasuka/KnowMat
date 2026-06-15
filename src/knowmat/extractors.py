@@ -1020,6 +1020,29 @@ class CompositionProperties(BaseModel):
 
         repaired = dict(data)
 
+        # Normalize list-typed fields the model sometimes mis-shapes:
+        #   {'item': [...]} wrapper  → [...]
+        #   '' / None                → []   (drop, so the field is simply absent)
+        #   single dict              → [dict]
+        # Seen on precipitates / properties_of_composition for long papers.
+        for _lf in ("precipitates", "properties_of_composition"):
+            if _lf not in repaired:
+                continue
+            v = repaired[_lf]
+            if isinstance(v, dict):
+                inner = v.get("item", v.get("items"))
+                if isinstance(inner, list):
+                    repaired[_lf] = inner
+                elif isinstance(inner, dict):
+                    repaired[_lf] = [inner]
+                else:
+                    repaired[_lf] = [v]
+            elif isinstance(v, str):
+                # empty/whitespace string → treat as no data
+                repaired[_lf] = [] if not v.strip() else repaired[_lf]
+            elif v is None:
+                repaired[_lf] = []
+
         # Coerce equipment from list/dict to string
         eq = repaired.get("equipment")
         if isinstance(eq, list):
