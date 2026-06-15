@@ -80,31 +80,46 @@ def _extract_json_object_text(text: str) -> str:
 _COMPACT_FALLBACK_SYSTEM = (
     "You are a materials-science extraction engine. Extract database-ready "
     "structured data from the paper text into ONE JSON object.\n\n"
-    "Output schema (return EXACTLY this shape, no prose, no markdown fences):\n"
+    "Output schema — use EXACTLY these lowercase field names (snake_case), "
+    "no prose, no markdown fences:\n"
     "{\n"
     '  "Paper_Metadata": {"Paper_Title": "...", "DOI": "... or null"},\n'
     '  "Paper_Routing": {"base_material": "Metals|Ceramics_Inorganic|Polymers|Composites|Organic_Small_Molecules",\n'
     '                     "application": "Structural|Functional",\n'
     '                     "research_paradigm": "Experimental|Pure_Simulation|Hybrid"},\n'
     '  "compositions": [ {\n'
-    '      "Sample_ID": "...", "Role": "Target|Variant|Reference|Comparator",\n'
-    '      "Data_Nature": "Experimental|Computed|Literature_Experimental|Literature_Computed",\n'
-    '      "Composition": {...}, "Processing": {...}, "Structure": {...},\n'
-    '      "Properties": [ {"Property_Name": "...", "Value_Numeric": 0, "Unit": "...",\n'
-    '                       "Data_Source": "text|table|image|image_digitized|unknown",\n'
-    '                       "Data_Nature": "Experimental", "Note": "..."} ]\n'
+    '      "sample_id": "...", "role": "Target|Variant|Reference|Comparator",\n'
+    '      "data_nature": "Experimental|Computed|Literature_Experimental|Literature_Computed",\n'
+    '      "nominal_composition": {"<element_or_component>": "<value>"},\n'
+    '      "processing_conditions": "free-text process summary",\n'
+    '      "microstructure_description": "free-text microstructure summary",\n'
+    '      "properties_of_composition": [ {\n'
+    '          "property_name": "e.g. Yield_Strength",\n'
+    '          "value_numeric": 0, "unit": "MPa",\n'
+    '          "value_range": "null or e.g. 580-620",\n'
+    '          "test_temperature_k": null,\n'
+    '          "measurement_condition": "...",\n'
+    '          "data_source": "text|table|image|image_digitized|unknown",\n'
+    '          "note": "..." } ]\n'
     "  } ]\n"
     "}\n\n"
-    "CRITICAL — the top-level list MUST be named \"compositions\" (NOT \"items\").\n"
+    "CRITICAL field names: the top-level list MUST be \"compositions\" (NOT \"items\"); "
+    "the per-sample property list MUST be \"properties_of_composition\" (NOT \"Properties\"); "
+    "each property uses \"property_name\"/\"value_numeric\"/\"unit\" (lowercase). "
+    "Mismatched names are silently dropped — follow them exactly.\n"
+    "EVERY sample with any measured/reported quantity MUST populate "
+    "properties_of_composition — do not return an empty list when the paper "
+    "reports strengths, hardness, elongation, densities, sizes, temperatures, etc. "
+    "Extract ALL table rows and series points (one property record each).\n"
     "Split rules: each distinct composition / heat-treatment / aging time / "
     "thermal-exposure duration / parametric-sweep value / coating layer / "
     "computed (FEM/DFT/CALPHAD) case = a SEPARATE entry. Keep different test "
-    "temperatures on the SAME unchanged specimen as ONE entry with multiple Properties.\n"
-    "Faithful to source: never invent values; ranges→Value_Range with Value null; "
-    "inequalities→Value null + Note; omit fields not mentioned (do not emit null-filled objects).\n"
+    "temperatures on the SAME unchanged specimen as ONE entry with multiple properties.\n"
+    "Faithful to source: never invent values; ranges→value_range with value_numeric null; "
+    "inequalities→value_numeric null + note; omit fields not mentioned.\n"
     "Figure blocks: '> [Figure N AI Description]' prose is CONTEXT ONLY (do not extract numbers). "
     "'> [Figure N VLM-digitized]' blocks ARE extractable — when you take a value from one, set "
-    'Data_Source="image_digitized" and Note="estimated from chart (VLM-digitized), not exact". '
+    'data_source="image_digitized" and note="estimated from chart (VLM-digitized), not exact". '
     "Prefer text/table/caption values over digitized estimates for the same quantity."
 )
 
@@ -139,6 +154,59 @@ def _invoke_plain_json_fallback(full_prompt: str, compact_user: str | None = Non
     payload = _extract_json_object_text(content)
     model = CompositionList.model_validate_json(payload)
     return json.loads(model.model_dump_json())
+
+
+def _count_extracted_props(extracted: Dict[str, Any]) -> int:
+    """Total property records across all compositions/items in a result dict."""
+    if not isinstance(extracted, dict):
+        return 0
+    comps = extracted.get("compositions") or extracted.get("items") or []
+    total = 0
+    for c in comps:
+        if isinstance(c, dict):
+            total += len(c.get("properties_of_composition") or c.get("Properties_Info") or [])
+    return total
+
+
+_PROP_SIGNAL_RE = re.compile(
+    r"\d\s*(?:MPa|GPa|HV|HRC|kN|μm|um|nm|mm|wt\.?%|at\.?%|vol\.?%|°C|\bK\b|mAh|S/cm|%)",
+    re.IGNORECASE,
+)
+
+
+def _paper_has_property_signals(paper_text: str) -> bool:
+    """Heuristic: does the paper text contain numeric property-like signals?
+
+    Used to decide whether a 0-property extraction is suspicious (paper clearly
+    reports measurable quantities) vs legitimately empty.
+    """
+    if not paper_text:
+        return False
+    return len(_PROP_SIGNAL_RE.findall(paper_text)) >= 3
+
+
+def _log_extraction_diag(path: str, extracted: Dict[str, Any]) -> None:
+    """Log which extraction path produced the result and its property counts.
+
+    Helps diagnose NO_PROPERTIES: shows whether the model emitted compositions
+    with empty properties_of_composition (model issue) vs a downstream drop.
+    """
+    try:
+        comps = extracted.get("compositions") or extracted.get("items") or []
+        prop_counts = [
+            len(c.get("properties_of_composition") or c.get("Properties_Info") or [])
+            for c in comps
+            if isinstance(c, dict)
+        ]
+        total = sum(prop_counts)
+        msg = (
+            f"[EXTRACT-DIAG] path={path} compositions={len(comps)} "
+            f"total_props={total} per_comp={prop_counts}"
+        )
+        logger.warning(msg)
+        print(f"   {msg}")
+    except Exception as exc:
+        logger.debug("extraction diag failed: %s", exc)
 
 
 def extract_data(state: KnowMatState) -> Dict[str, Any]:
@@ -261,11 +329,13 @@ def extract_data(state: KnowMatState) -> Dict[str, Any]:
         )
         try:
             extracted_dict = _invoke_plain_json_fallback(full_prompt, compact_user=compact_user)
+            _log_extraction_diag("compact-fallback", extracted_dict)
             return {"latest_extracted_data": extracted_dict, "paper_text": paper_text}
         except Exception as compact_exc:
             logger.warning("Compact fallback failed (%s); trying full-prompt fallback.", compact_exc)
             try:
                 extracted_dict = _invoke_plain_json_fallback(full_prompt)
+                _log_extraction_diag("full-fallback", extracted_dict)
                 return {"latest_extracted_data": extracted_dict, "paper_text": paper_text}
             except Exception as fallback_exc:
                 if structured_error is not None:
@@ -280,4 +350,36 @@ def extract_data(state: KnowMatState) -> Dict[str, Any]:
         extracted_dict = json.loads(response.model_dump_json())
     else:
         extracted_dict = response
+
+    # Quality gate: MiniMax tool-calling sometimes returns a syntactically valid
+    # but content-empty result (e.g. 1 composition, 0 properties) which trustcall
+    # accepts as a non-empty response — so the no-responses fallback above never
+    # fires.  If the primary result has zero properties yet the paper clearly
+    # reports measurable quantities, treat it as incomplete and run the compact
+    # fallback (which reliably extracts properties on these papers).
+    _primary_props = _count_extracted_props(extracted_dict)
+    if _primary_props == 0 and _paper_has_property_signals(paper_text):
+        logger.warning(
+            "Primary extraction returned 0 properties but paper has property "
+            "signals; retrying via compact fallback."
+        )
+        _rt = paper_routing or {}
+        compact_user = (
+            "Routing hints (may be empty): "
+            f"base_material={_rt.get('base_material','')}, "
+            f"application={_rt.get('application','')}, "
+            f"research_paradigm={_rt.get('research_paradigm','')}\n\n"
+            "=== PAPER TEXT START ===\n"
+            f"{paper_text}\n"
+            "=== PAPER TEXT END ==="
+        )
+        try:
+            salvaged = _invoke_plain_json_fallback(full_prompt, compact_user=compact_user)
+            if _count_extracted_props(salvaged) > 0:
+                _log_extraction_diag("primary->compact-salvage", salvaged)
+                return {"latest_extracted_data": salvaged, "paper_text": paper_text}
+        except Exception as exc:
+            logger.warning("Property-salvage compact fallback failed: %s", exc)
+
+    _log_extraction_diag("tool-primary", extracted_dict)
     return {"latest_extracted_data": extracted_dict, "paper_text": paper_text}
