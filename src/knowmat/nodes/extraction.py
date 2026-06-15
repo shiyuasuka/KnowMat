@@ -185,6 +185,28 @@ def _paper_has_property_signals(paper_text: str) -> bool:
     return len(_PROP_SIGNAL_RE.findall(paper_text)) >= 3
 
 
+_AI_DESC_BLOCK_RE = re.compile(
+    r"^> \[Figure[^\]]*AI Description\]:.*?(?=\n\n|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _slim_paper_text_for_fallback(paper_text: str) -> str:
+    """Drop verbose prose AI-Description blocks to free model generation budget.
+
+    Compact fallback fires when the model truncates on long input (it stops
+    after Paper_Metadata).  The biggest avoidable bloat is the injected
+    '> [Figure N AI Description]: <200-500 words>' prose, which is context-only
+    and never an extraction source.  We strip those but KEEP the short
+    '> [Figure N VLM-digitized]' blocks (extractable chart data).
+    """
+    if not paper_text or "AI Description]:" not in paper_text:
+        return paper_text
+    slimmed = _AI_DESC_BLOCK_RE.sub("", paper_text)
+    slimmed = re.sub(r"\n{3,}", "\n\n", slimmed).strip()
+    return slimmed
+
+
 def _log_extraction_diag(path: str, extracted: Dict[str, Any]) -> None:
     """Log which extraction path produced the result and its property counts.
 
@@ -324,7 +346,7 @@ def extract_data(state: KnowMatState) -> Dict[str, Any]:
             f"application={_rt.get('application','')}, "
             f"research_paradigm={_rt.get('research_paradigm','')}\n\n"
             "=== PAPER TEXT START ===\n"
-            f"{paper_text}\n"
+            f"{_slim_paper_text_for_fallback(paper_text)}\n"
             "=== PAPER TEXT END ==="
         )
         try:
@@ -370,7 +392,7 @@ def extract_data(state: KnowMatState) -> Dict[str, Any]:
             f"application={_rt.get('application','')}, "
             f"research_paradigm={_rt.get('research_paradigm','')}\n\n"
             "=== PAPER TEXT START ===\n"
-            f"{paper_text}\n"
+            f"{_slim_paper_text_for_fallback(paper_text)}\n"
             "=== PAPER TEXT END ==="
         )
         try:
