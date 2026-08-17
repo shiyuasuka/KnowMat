@@ -96,11 +96,30 @@ Paper-level coverage reports p50, p95, and maximum provider-call duration plus
 aggregate queue wait. Queue contention can then be distinguished from endpoint
 latency and model generation time.
 
+## Row-local contract adjudication
+
+A syntactically complete combined response may contain many valid facts and one
+or more malformed optional rows. A malformed row must not invalidate and
+regenerate its valid siblings. The response parser therefore validates anchors
+and facts independently, preserves every contract-valid row for the existing
+literal evidence gate, and records each invalid row as a visible
+`invalid_fact_contract` rejection. Missing required factual fields such as a
+property `value_raw` are never synthesized.
+
+These rejections are stored with the sanitized task cache so a cache replay has
+the same rejected-fact count and review evidence as the live call. A response
+that cannot be decoded as JSON, has no legal response envelope, or is truncated
+still follows the existing bounded recovery path. Row-local adjudication only
+prevents a complete response from multiplying requests because an independent
+row failed its schema contract.
+
 ## Verification
 
 - planner tests cover eight-unit prose grouping, adaptive table width, cell and
   character ceilings, and lossless unit assignment;
 - extraction tests cover queue/provider timing without changing response data;
+- contract tests cover preserving valid siblings, rejecting an incomplete row,
+  and retaining the rejection across sanitized cache replay;
 - the full Alpha25/V11 focused suite passes;
 - a zero-cache LLM-only pilot uses the frozen OCR manifest and a new output
   directory, with no OCR call;
