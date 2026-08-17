@@ -55,13 +55,16 @@ quality boundary. It is rejected.
 ### 3. Bounded adaptive packing
 
 Pack up to eight prose semantic units while preserving the existing 8,000-char
-and fact-density limits. Project tables with up to eight data columns, but also
-enforce a 96-cell ceiling and the same evidence-character bound. Very tall,
-wide, or text-heavy tables automatically use narrower slices. This is selected
-because it removes redundant request envelopes without dropping source.
+and fact-density limits. Project short, sparse tables with up to eight data
+columns. Expansion beyond the proven four-column baseline is allowed only while
+the projection stays within 36 data cells; tall or dense tables therefore fall
+back to four columns. Every projection also keeps the same evidence-character
+bound. This is selected because it removes redundant request envelopes without
+dropping source or widening high-output tables.
 
-Offline on the frozen corpus, an eight-unit prose cap plus eight-column table
-projection reduces the plan from 522 to approximately 428 tasks (18%).
+Offline on the frozen corpus, an eight-unit prose cap plus density-bounded table
+projection reduces the plan from 522 to 447 tasks (14.4%), including a reduction
+from 171 to 131 table tasks.
 
 ## Data Flow and Safety
 
@@ -70,8 +73,9 @@ projection reduces the plan from 522 to approximately 428 tasks (18%).
    8,000 evidence characters, eight semantic units, or the existing adaptive
    density capacity.
 3. For tables, compute a per-projection data-column width from the configured
-   column ceiling, row count, 96-cell ceiling, and evidence-character ceiling.
-   Preserve the row/sample key column in every projection as today.
+   column ceiling, row count, 36-cell expansion budget, four-column safety
+   floor, and evidence-character ceiling. Preserve the row/sample key column in
+   every projection as today.
 4. Keep each resulting table projection isolated so sample headers cannot bleed
    into another table.
 5. Gate every returned anchor and fact against the exact task evidence, then run
