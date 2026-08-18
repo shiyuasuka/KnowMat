@@ -250,6 +250,20 @@ _TEST_OR_MICRO_SUBSAMPLE = re.compile(
 _MICROANALYSIS_LOCATION = re.compile(
     r"(?i)^(?:eds\s+)?(?:point|spot|area|location)\s*#?\s*[A-Za-z0-9._-]+$"
 )
+_MICROANALYSIS_LOCATION_SEARCH = re.compile(
+    r"(?i)\b(?:eds\s+)?(point|spot|area|location)s?\s*#?\s*([A-Za-z0-9._-]+)"
+)
+_MICROANALYSIS_LOCATION_GROUP = re.compile(
+    r"(?i)\b(point|spot|area|location)s?\s*#?\s*([A-Za-z0-9._-]+)"
+    r"((?:\s*(?:,|and|&)\s*(?:(?:point|spot|area|location)s?\s*)?"
+    r"#?\s*[A-Za-z0-9._-]+)+)"
+)
+_CELSIUS_SERIES = re.compile(
+    r"(?i)(?<![A-Za-z0-9])"
+    r"([-+]?\d{2,4}(?:\.\d+)?(?:\s*(?:,|and|to|[-–—])\s*"
+    r"[-+]?\d{2,4}(?:\.\d+)?)*)\s*"
+    r"(?:°\s*C|deg(?:ree)?s?\s*C|\^?\s*\\circ\s*\{?\s*C\s*\}?)"
+)
 _SYNTHETIC_ROW_LABEL = re.compile(r"(?i)^.+[_-]row[_-]?\d+$")
 _TABLE_OR_FIGURE_LABEL = re.compile(
     r"(?i)^(?:table|fig(?:ure)?)\s*[A-Za-z0-9._-]+"
@@ -924,7 +938,7 @@ def _sanitize_composition_observation(row: dict[str, Any]) -> dict[str, Any] | N
         raw_expression = " | ".join(evidence)
     if not raw_expression:
         return None
-    return {
+    sanitized = {
         "observation_id": str(row.get("observation_id") or "temporary"),
         "source_type": source_type,
         "material_state": str(row.get("material_state") or "not_reported"),
@@ -938,6 +952,11 @@ def _sanitize_composition_observation(row: dict[str, Any]) -> dict[str, Any] | N
         "source_evidence": evidence,
         "note": row.get("note"),
     }
+    if row.get("_microanalysis_owner_recovered") is True:
+        # Internal routing marker only.  It survives composition splitting and
+        # deduplication, then is consumed before the public document is built.
+        sanitized["_microanalysis_owner_recovered"] = True
+    return sanitized
 
 
 def _composition_raw_unit_family(value: Any) -> tuple[str, str] | None:
@@ -3502,6 +3521,375 @@ def _recover_cited_nominal_composition_owners(
     return anchor_rows, fact_rows, issues
 
 
+def _microanalysis_location_label(fact: AxisFact) -> str:
+    """Return a literal observation location without treating it as material."""
+
+    for value in (fact.sample_id_raw, fact.data.get("sample_id")):
+        label = str(value or "").strip()
+        if _MICROANALYSIS_LOCATION.fullmatch(label):
+            return label
+    return ""
+
+
+def _microanalysis_location_key(value: Any) -> str:
+    match = _MICROANALYSIS_LOCATION_SEARCH.fullmatch(str(value or "").strip())
+    if match is None:
+        return ""
+    identifier = match.group(2).strip("._-").casefold()
+    return f"{match.group(1).casefold()}:{identifier}" if identifier else ""
+
+
+def _source_microanalysis_state_map(
+    source_text: str,
+) -> dict[str, tuple[str, list[str]]]:
+    """Recover Point/Spot-to-sintering-state links stated in nearby prose.
+
+    A single-temperature paragraph owns every analysis location it names.  A
+    multi-temperature paragraph is accepted only when it presents parallel
+    location groups of the same cardinality (for example two temperatures and
+    repeated ``points A and B`` pairs).  Ambiguous or conflicting prose yields
+    no mapping; task-response state guesses never break the tie.
+    """
+
+    candidates: dict[str, dict[str, list[str]]] = {}
+    for raw_line in (source_text or "").splitlines():
+        line = raw_line.strip()
+        if not line or not re.search(r"(?i)\bsinter(?:ed|ing)?\b", line):
+            continue
+        temperatures = list(
+            dict.fromkeys(
+                number
+                for match in _CELSIUS_SERIES.finditer(line)
+                for number in re.findall(r"[-+]?\d{2,4}(?:\.\d+)?", match.group(1))
+            )
+        )
+        if not temperatures:
+            continue
+        locations = [
+            (match.group(1), match.group(2))
+            for match in _MICROANALYSIS_LOCATION_SEARCH.finditer(line)
+            if re.search(r"\d", match.group(2))
+        ]
+        assignments: list[tuple[str, str, str]] = []
+        if len(temperatures) == 1:
+            assignments.extend(
+                (kind, identifier, temperatures[0])
+                for kind, identifier in locations
+            )
+        else:
+            for group in _MICROANALYSIS_LOCATION_GROUP.finditer(line):
+                kind = group.group(1)
+                identifiers = [group.group(2)]
+                identifiers.extend(
+                    match.group(1)
+                    for match in re.finditer(
+                        r"(?i)(?:,|and|&)\s*"
+                        r"(?:(?:point|spot|area|location)s?\s*)?"
+                        r"#?\s*([A-Za-z0-9._-]+)",
+                        group.group(3),
+                    )
+                )
+                if len(identifiers) == len(temperatures):
+                    assignments.extend(
+                        (kind, identifier, temperature)
+                        for identifier, temperature in zip(
+                            identifiers, temperatures, strict=True
+                        )
+                    )
+        for kind, identifier, temperature in assignments:
+            key = _microanalysis_location_key(f"{kind} {identifier}")
+            state = f"sintered at {temperature} °C"
+            if key:
+                candidates.setdefault(key, {}).setdefault(state, []).append(line)
+
+    resolved: dict[str, tuple[str, list[str]]] = {}
+    for key, states in candidates.items():
+        if len(states) != 1:
+            continue
+        state, evidence = next(iter(states.items()))
+        resolved[key] = (state, list(dict.fromkeys(evidence)))
+    return resolved
+
+
+def _state_supported_by_fact_evidence(fact: AxisFact, state: str) -> bool:
+    descriptor = _state_descriptor(state)
+    if descriptor is None:
+        return False
+    category, qualifiers = descriptor
+    return any(
+        (candidate := _state_descriptor(evidence)) is not None
+        and candidate[0] == category
+        and set(qualifiers) <= set(candidate[1])
+        for evidence in fact.source_evidence
+    )
+
+
+def _microanalysis_composition_row(fact: AxisFact) -> bool:
+    """Return whether a fact is a grounded multi-element Point/Spot table row."""
+
+    if not isinstance(fact, CompositionFact) or fact.fact_type != "composition_observation":
+        return False
+    label = _microanalysis_location_label(fact)
+    if not label:
+        return False
+    data = fact.data
+    if (
+        str(data.get("source_type") or "").strip().casefold() != "measured"
+        or str(data.get("data_source") or "").strip().casefold() != "table"
+    ):
+        return False
+    components = [
+        row for row in data.get("components") or [] if isinstance(row, dict)
+    ]
+    reported = [
+        row
+        for row in components
+        if str(row.get("name_raw") or "").strip()
+        and str(row.get("value_raw") or "").strip()
+        and re.search(r"\d", str(row.get("value_raw") or ""))
+    ]
+    if len(reported) < 2:
+        return False
+    folded_label = unicodedata.normalize("NFKC", label).casefold()
+    return any(
+        folded_label in unicodedata.normalize("NFKC", evidence).casefold()
+        for evidence in fact.source_evidence
+    )
+
+
+def _microanalysis_state_owner(
+    index: _IdentityIndex, fact: AxisFact
+) -> str | None:
+    """Resolve a point row only to one explicit, numerically matching state."""
+
+    state = str(fact.data.get("material_state") or "").strip()
+    state_descriptor = _state_descriptor(state)
+    if state_descriptor is None:
+        return None
+    state_category, state_qualifiers = state_descriptor
+    state_numbers = set(re.findall(r"\d+(?:\.\d+)?", state))
+    if not state_numbers:
+        return None
+    candidates = set(index.resolve_state_evidence([state]))
+    # A directly named inventory sample may carry a more specific state than
+    # the table header (for example ``sintered at 1280 °C for 4 h`` versus the
+    # EDS column's ``sintered at 1280 °C``).  Exact descriptor lookup excludes
+    # that legitimate owner, so include source primaries whose target-anchor
+    # state has the same category and a superset of the table qualifiers.  The
+    # numeric sample-label check below prevents a generic alloy owner from
+    # winning merely because it shares a process category.
+    for target in index.primary_aliases:
+        for anchor in index.anchors.get(target, []):
+            descriptor = _state_descriptor(anchor.state_raw)
+            if descriptor is None:
+                continue
+            category, qualifiers = descriptor
+            if (
+                anchor.role == "Target"
+                and category == state_category
+                and set(state_qualifiers) <= set(qualifiers)
+            ):
+                candidates.add(target)
+                break
+
+    ranked: list[tuple[tuple[int, int], str]] = []
+    for target in candidates:
+        display = index.display_label(target)
+        display_numbers = set(re.findall(r"\d+(?:\.\d+)?", display))
+        if not state_numbers <= display_numbers:
+            continue
+        target_anchors = index.anchors.get(target, [])
+        if not target_anchors:
+            continue
+        target_role = any(anchor.role == "Target" for anchor in target_anchors)
+        generated_state_presentation = bool("[" in display and "]" in display)
+        rank = (
+            int(not target_role),
+            int(generated_state_presentation),
+        )
+        ranked.append((rank, target))
+    if not ranked:
+        return None
+    best_rank = min(rank for rank, _ in ranked)
+    best = [target for rank, target in ranked if rank == best_rank]
+    return best[0] if len(best) == 1 else None
+
+
+def _microanalysis_complete_owner_state(
+    index: _IdentityIndex, target: str, source_state: str
+) -> tuple[str, list[str]]:
+    """Return one more-specific state already proven for the selected owner."""
+
+    source_descriptor = _state_descriptor(source_state)
+    if source_descriptor is None:
+        return source_state, []
+    source_category, source_qualifiers = source_descriptor
+    compatible: dict[tuple[str, tuple[str, ...]], list[InventoryAnchor]] = {}
+    for anchor in index.anchors.get(target, []):
+        descriptor = _state_descriptor(anchor.state_raw)
+        if (
+            anchor.role != "Target"
+            or descriptor is None
+            or descriptor[0] != source_category
+            or not set(source_qualifiers) <= set(descriptor[1])
+        ):
+            continue
+        compatible.setdefault(descriptor, []).append(anchor)
+    if not compatible:
+        return source_state, []
+    specificity = max(len(descriptor[1]) for descriptor in compatible)
+    best = [
+        (descriptor, anchors)
+        for descriptor, anchors in compatible.items()
+        if len(descriptor[1]) == specificity
+    ]
+    if len(best) != 1:
+        return source_state, []
+    _, anchors = best[0]
+    anchor = min(
+        anchors,
+        key=lambda row: (
+            len(str(row.state_raw or "")),
+            str(row.state_raw or "").casefold(),
+            -float(row.confidence),
+        ),
+    )
+    return str(anchor.state_raw).strip() or source_state, list(anchor.source_evidence)
+
+
+def _recover_microanalysis_location_owners(
+    anchors: Sequence[InventoryAnchor], facts: Sequence[AxisFact], source_text: str
+) -> tuple[list[AxisFact], list[MaterializeIssue]]:
+    """Attach explicit Point/Spot composition rows to one known state owner."""
+
+    fact_rows = list(facts)
+    index = _build_identity_index(anchors, fact_rows)
+    source_states = _source_microanalysis_state_map(source_text)
+    recovered: dict[str, dict[str, Any]] = {}
+    for fact_index, fact in enumerate(fact_rows):
+        if not _microanalysis_composition_row(fact):
+            continue
+        location = _microanalysis_location_label(fact)
+        source_state = source_states.get(_microanalysis_location_key(location))
+        before_state = str(fact.data.get("material_state") or "").strip()
+        if source_state is not None:
+            state, state_evidence = source_state
+        elif before_state and _state_supported_by_fact_evidence(fact, before_state):
+            state, state_evidence = before_state, []
+        else:
+            continue
+        data = deepcopy(fact.data)
+        data["material_state"] = state
+        data["sample_id"] = location
+        data["source_evidence"] = list(
+            dict.fromkeys([*_evidence(data.get("source_evidence")), *state_evidence])
+        )
+        grounded_fact = fact.model_copy(
+            update={
+                "data": data,
+                "source_evidence": list(
+                    dict.fromkeys([*fact.source_evidence, *state_evidence])
+                ),
+            }
+        )
+        target = _microanalysis_state_owner(index, grounded_fact)
+        if target is None:
+            continue
+        owner_state, owner_state_evidence = _microanalysis_complete_owner_state(
+            index, target, state
+        )
+        routed_data = deepcopy(grounded_fact.data)
+        routed_data["material_state"] = owner_state
+        routed_data["_microanalysis_owner_recovered"] = True
+        routed_data["source_evidence"] = list(
+            dict.fromkeys(
+                [
+                    *_evidence(routed_data.get("source_evidence")),
+                    *owner_state_evidence,
+                ]
+            )
+        )
+        routed_fact = grounded_fact.model_copy(
+            update={
+                "data": routed_data,
+                "source_evidence": list(
+                    dict.fromkeys(
+                        [*grounded_fact.source_evidence, *owner_state_evidence]
+                    )
+                ),
+            }
+        )
+        before_owner = str(fact.sample_id_raw or "").strip()
+        after_owner = index.display_label(target)
+        fact_rows[fact_index] = routed_fact.model_copy(
+            update={"sample_id_raw": after_owner}
+        )
+        audit = recovered.setdefault(
+            target,
+            {
+                "after_owner": after_owner,
+                "facts": [],
+                "evidence": [],
+                "locations": [],
+                "before_owners": [],
+                "state_corrections": [],
+            },
+        )
+        audit["facts"].append(fact.model_dump())
+        audit["locations"].append(location)
+        audit["before_owners"].append(before_owner)
+        audit["evidence"].extend(routed_fact.source_evidence)
+        if before_state != owner_state:
+            audit["state_corrections"].append(
+                {
+                    "location": location,
+                    "before_state": before_state,
+                    "after_state": owner_state,
+                    "source_evidence": list(
+                        dict.fromkeys([*state_evidence, *owner_state_evidence])
+                    ),
+                }
+            )
+
+    issues: list[MaterializeIssue] = []
+    for audit in recovered.values():
+        locations = list(dict.fromkeys(audit["locations"]))
+        before_owners = list(dict.fromkeys(audit["before_owners"]))
+        evidence = list(dict.fromkeys(audit["evidence"]))
+        issues.append(
+            MaterializeIssue(
+                code="microanalysis_location_owner_recovered",
+                sample_id_raw=audit["after_owner"],
+                path=f"items.{audit['after_owner']}.Composition_Observations",
+                message=(
+                    "Measured microanalysis point rows were attached to the "
+                    "only explicit material state matching source-backed prose."
+                ),
+                evidence=evidence,
+                expected={
+                    "owner": "one explicit target sample with the same state",
+                    "observation_location": "preserved Point/Spot label",
+                },
+                actual={
+                    "before_owner": before_owners[0]
+                    if len(before_owners) == 1
+                    else before_owners,
+                    "after_owner": audit["after_owner"],
+                    "observation_location": locations[0]
+                    if len(locations) == 1
+                    else locations,
+                    "state_corrections": audit["state_corrections"],
+                    "facts": audit["facts"],
+                },
+                suggested_action=(
+                    "Review only if the table state names more than one target "
+                    "material."
+                ),
+            )
+        )
+    return fact_rows, issues
+
+
 def materialize_candidate(
     anchors: Iterable[InventoryAnchor],
     facts: Iterable[AxisFact],
@@ -3524,8 +3912,14 @@ def materialize_candidate(
     anchor_rows, fact_rows, reference_owner_issues = (
         _recover_cited_nominal_composition_owners(anchor_rows, fact_rows)
     )
+    fact_rows, microanalysis_owner_issues = (
+        _recover_microanalysis_location_owners(
+            anchor_rows, fact_rows, source_text
+        )
+    )
     issues = _chart_quarantine_issues_from_text(source_text)
     issues.extend(reference_owner_issues)
+    issues.extend(microanalysis_owner_issues)
     property_context_index = PropertyContextIndex(source_text)
     if quality_gate is not None:
         issues.extend(
@@ -3930,7 +4324,11 @@ def materialize_candidate(
         )
         for obs_index, observation in enumerate(composition_observations, start=1):
             observation["observation_id"] = f"comp_obs_{obs_index:03d}"
-            observation["sample_id"] = sample_id
+            recovered_location = bool(
+                observation.pop("_microanalysis_owner_recovered", False)
+            )
+            if not recovered_location:
+                observation["sample_id"] = sample_id
 
         raw_structure_observations = list(
             grouped_facts.get("structure_observation", [])

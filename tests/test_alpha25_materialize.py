@@ -9,6 +9,7 @@ from knowmat.alpha25.contracts import (
 )
 from knowmat.alpha25.materialize import (
     _claim_quality_mode,
+    _source_microanalysis_state_map,
     is_plausible_material_identity,
     materialize_candidate,
 )
@@ -535,6 +536,208 @@ def test_uncited_nominal_composition_header_remains_unresolved():
     assert result.document["items"] == []
     assert any(
         issue.code == "unresolved_sample_alias" for issue in result.issues
+    )
+
+
+def test_microanalysis_point_row_routes_to_unique_explicit_state_owner():
+    evidence = "| Point | C | Cr |\n| Point 1 | 53.0 | 0.66 |"
+    fact = _composition_fact("Point 1", "Point 1", evidence)
+    fact.data.update(
+        {
+            "source_type": "measured",
+            "data_source": "table",
+            # The cached model state is deliberately wrong and absent from the
+            # row evidence.  Source prose below is authoritative.
+            "material_state": "sintered at 1290 °C",
+            "measurement": "EDS point analysis",
+            "components": [
+                {
+                    "name_raw": "C",
+                    "value_kind": "scalar",
+                    "value_raw": "53.0",
+                    "unit_raw": "wt%",
+                    "data_nature": "reported",
+                },
+                {
+                    "name_raw": "Cr",
+                    "value_kind": "scalar",
+                    "value_raw": "0.66",
+                    "unit_raw": "wt%",
+                    "data_nature": "reported",
+                },
+            ],
+        }
+    )
+    owner = InventoryAnchor(
+        sample_id_raw="1280 °C sample",
+        material_name_raw="alloy 625",
+        state_raw="sintered at 1280 °C for 4 h",
+        role="Target",
+        data_nature="Experimental",
+        source_evidence=["alloy 625 sample sintered at 1280 °C for 4 h"],
+        confidence=0.95,
+    )
+    # These generic-alloy inventory rows create a competing generated state
+    # owner.  The directly named source sample must win without collapsing the
+    # distinct 1220 °C sibling or creating a duplicate 1280 °C item.
+    generated_state_anchors = [
+        InventoryAnchor(
+            sample_id_raw="alloy 625",
+            material_name_raw="alloy 625",
+            state_raw=f"sintered at {temperature} °C",
+            role="Target",
+            data_nature="Experimental",
+            source_evidence=[f"alloy 625 sintered at {temperature} °C"],
+            confidence=0.9,
+        )
+        for temperature in (1220, 1280)
+    ]
+
+    source_text = (
+        "The sample sintered at 1280 °C contained the feature at Point 1.\n"
+        + evidence
+    )
+    result = materialize_candidate(
+        [owner, *generated_state_anchors], [fact], source_text=source_text
+    )
+
+    assert [item["Sample_ID"] for item in result.document["items"]] == [
+        "1280 °C sample"
+    ]
+    observation = result.document["items"][0]["Extracted_Data"]["Composition"][
+        "Composition_Observations"
+    ][0]
+    assert observation["sample_id"] == "Point 1"
+    assert observation["material_state"] == "sintered at 1280 °C for 4 h"
+    assert "_microanalysis_owner_recovered" not in observation
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "microanalysis_location_owner_recovered"
+    )
+    assert issue.actual["before_owner"] == "Point 1"
+    assert issue.actual["after_owner"] == "1280 °C sample"
+    assert issue.actual["observation_location"] == "Point 1"
+    assert issue.actual["state_corrections"][0]["before_state"] == (
+        "sintered at 1290 °C"
+    )
+    assert issue.actual["state_corrections"][0]["after_state"] == (
+        "sintered at 1280 °C for 4 h"
+    )
+
+
+def test_microanalysis_model_state_without_source_support_stays_unresolved():
+    evidence = "| Point | C | Cr |\n| Point 1 | 53.0 | 0.66 |"
+    fact = _composition_fact("Point 1", "Point 1", evidence)
+    fact.data.update(
+        {
+            "source_type": "measured",
+            "data_source": "table",
+            "material_state": "sintered at 1280 °C",
+            "components": [
+                {
+                    "name_raw": name,
+                    "value_kind": "scalar",
+                    "value_raw": value,
+                    "unit_raw": "wt%",
+                    "data_nature": "reported",
+                }
+                for name, value in (("C", "53.0"), ("Cr", "0.66"))
+            ],
+        }
+    )
+    owner = InventoryAnchor(
+        sample_id_raw="1280 °C sample",
+        material_name_raw="alloy 625",
+        state_raw="sintered at 1280 °C",
+        role="Target",
+        data_nature="Experimental",
+        source_evidence=["alloy 625 sample sintered at 1280 °C"],
+        confidence=0.95,
+    )
+
+    result = materialize_candidate([owner], [fact], source_text=evidence)
+
+    assert result.document["items"] == []
+    assert any(row.code == "unresolved_sample_alias" for row in result.issues)
+    assert not any(
+        row.code == "microanalysis_location_owner_recovered"
+        for row in result.issues
+    )
+
+
+def test_microanalysis_parallel_point_groups_follow_ordered_source_states():
+    mapping = _source_microanalysis_state_map(
+        "EDS analyses on samples sintered at 1290 and 1300 °C found bright "
+        "spots at points 5 and 7. Points 6 and 8 were matrix."
+    )
+
+    assert {key: value[0] for key, value in mapping.items()} == {
+        "point:5": "sintered at 1290 °C",
+        "point:6": "sintered at 1290 °C",
+        "point:7": "sintered at 1300 °C",
+        "point:8": "sintered at 1300 °C",
+    }
+
+
+def test_microanalysis_point_row_stays_unresolved_without_unique_state_owner():
+    evidence = "| Point | C | Cr |\n| Point 1 | 53.0 | 0.66 |"
+    fact = _composition_fact("Point 1", "Point 1", evidence)
+    fact.data.update(
+        {
+            "source_type": "measured",
+            "data_source": "table",
+            "material_state": "sintered at 1280 °C",
+            "measurement": "EDS point analysis",
+            "components": [
+                {
+                    "name_raw": "C",
+                    "value_kind": "scalar",
+                    "value_raw": "53.0",
+                    "unit_raw": "wt%",
+                    "data_nature": "reported",
+                },
+                {
+                    "name_raw": "Cr",
+                    "value_kind": "scalar",
+                    "value_raw": "0.66",
+                    "unit_raw": "wt%",
+                    "data_nature": "reported",
+                },
+            ],
+        }
+    )
+    anchors = [
+        InventoryAnchor(
+            sample_id_raw=sample,
+            material_name_raw=material,
+            state_raw="sintered at 1280 °C",
+            role="Target",
+            data_nature="Experimental",
+            source_evidence=[f"{material} {sample} sintered at 1280 °C"],
+            confidence=0.95,
+        )
+        for sample, material in (
+            ("A1280", "alloy A"),
+            ("B1280-4", "alloy B"),
+        )
+    ]
+
+    result = materialize_candidate(
+        anchors,
+        [fact],
+        source_text=(
+            "The samples sintered at 1280 °C contained Point 1.\n" + evidence
+        ),
+    )
+
+    assert result.document["items"] == []
+    assert any(
+        row.code == "unresolved_sample_alias" for row in result.issues
+    )
+    assert not any(
+        row.code == "microanalysis_location_owner_recovered"
+        for row in result.issues
     )
 
 
