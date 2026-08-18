@@ -567,6 +567,23 @@ def _validate_paper(
                 )
         value = clean_claim.get("value")
         review_status = clean_claim.get("review_status")
+        unit_raw = clean_claim.get("unit_raw")
+        if isinstance(unit_raw, str) and re.fullmatch(r"\s*[0-9]+\s*", unit_raw):
+            finding(
+                "citation_number_used_as_unit",
+                claims_path,
+                f"line {line_number}: {unit_raw!r}",
+            )
+        if (
+            clean_claim.get("axis") in {"Structure", "Properties"}
+            and isinstance(semantic_key, str)
+            and re.search(r"(?:^|_)(year|alloy|reference|citation)(?:_|$)", semantic_key)
+        ):
+            finding(
+                "bibliographic_metadata_used_as_fact",
+                claims_path,
+                f"line {line_number}: {semantic_key!r}",
+            )
         if isinstance(value, dict):
             value_kind = value.get("kind")
             if value_kind == "scalar" and (
