@@ -3279,7 +3279,7 @@ def materialize_candidate(
                     )
                 )
                 continue
-            context_decision = property_context_index.recover(prop)
+            context_decision = property_context_index.recover(prop, owner_role=role)
             if context_decision.status == "recovered":
                 original_prop = deepcopy(prop)
                 prop = deepcopy(prop)
@@ -3309,6 +3309,32 @@ def materialize_candidate(
                         suggested_action=(
                             "Review the source line spans if this paper uses multiple "
                             "tensile protocols for the same property family."
+                        ),
+                    )
+                )
+            elif context_decision.status == "reference":
+                issues.append(
+                    MaterializeIssue(
+                        code="property_test_context_not_applied_to_reference",
+                        sample_id_raw=sample_id,
+                        path=f"items.{sample_id}.Properties",
+                        message=(
+                            "The Property was preserved without inheriting the current "
+                            "paper's tensile procedure because its provenance is reference-like."
+                        ),
+                        evidence=_evidence(prop.get("source_evidence")),
+                        expected={
+                            "binding": "current-paper results only",
+                            "action": "preserve the original empty condition for reference facts",
+                        },
+                        actual={
+                            "fact": deepcopy(prop),
+                            "owner_role": role,
+                            "reason": context_decision.reason,
+                        },
+                        suggested_action=(
+                            "Bind a test condition only if property-local source evidence "
+                            "identifies the protocol used for this cited value."
                         ),
                     )
                 )

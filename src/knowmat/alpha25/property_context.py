@@ -23,6 +23,7 @@ RecoveryStatus = Literal[
     "ambiguous",
     "existing",
     "ineligible",
+    "reference",
     "not_found",
     "disabled",
 ]
@@ -47,6 +48,13 @@ _TENSILE_PROPERTY = re.compile(
     r"uniform\s+elongation|total\s+elongation|elongation\s+(?:at|to)\s+(?:break|failure)|"
     r"elongation|tensile\s+ductility|reduction\s+of\s+area|young'?s\s+modulus"
     r")\b"
+)
+_TENSILE_ABBREVIATION = re.compile(
+    r"(?ix)^\s*(?:"
+    r"(?:UTS|YS)(?:\s*(?:\(\s*(?:MPa|GPa|Pa|ksi)\s*\)|"
+    r"\[\s*(?:MPa|GPa|Pa|ksi)\s*\]|/\s*(?:MPa|GPa|Pa|ksi)))?|"
+    r"(?:TE|EL|EAB)(?:\s*(?:\(\s*%\s*\)|\[\s*%\s*\]|/\s*%))?"
+    r")\s*$"
 )
 _NON_TENSILE_PROPERTY = re.compile(
     r"(?i)\b(?:compress(?:ive|ion)|fatigue|creep|hardness|indentation|flexur|bend(?:ing)?|"
@@ -153,6 +161,15 @@ _ORIENTATION_VALUE = re.compile(
     r"(?i)\b(?:horizontal|vertical|transverse|longitudinal|parallel|perpendicular|"
     r"build\s+direction)\b"
 )
+_NUMERIC_CITATION = re.compile(
+    r"(?x)\[\s*"
+    r"\d{1,4}(?:\s*[-–—,;]\s*\d{1,4})*"
+    r"\s*\]"
+)
+_AUTHOR_YEAR_CITATION = re.compile(
+    r"(?ix)\b[A-Z][A-Za-z'’-]+(?:\s+et\s+al\.)?\s*"
+    r"(?:\(|,\s*)?(?:19|20)\d{2}[a-z]?\)?"
+)
 
 
 def property_context_recovery_enabled() -> bool:
@@ -179,14 +196,51 @@ def _property_is_tensile(row: dict[str, Any]) -> bool:
     combined = f"{name} | {method}"
     if _NON_TENSILE_PROPERTY.search(combined):
         return False
-    abbreviation = re.fullmatch(
-        r"(?i)\s*(?:UTS|YS|TE|EL|EAB)\s*", name
-    )
+    abbreviation = _TENSILE_ABBREVIATION.fullmatch(name)
     return bool(
         abbreviation
         or _TENSILE_PROPERTY.search(name)
         or _TENSILE_METHOD.search(method)
     )
+
+
+def _reference_ineligibility_reason(
+    row: dict[str, Any], owner_role: str | None
+) -> str | None:
+    """Explain why paper-level methods cannot be bound to this property.
+
+    Material role is the strongest signal, but comparison-table extraction can
+    occasionally classify literature material families as Target.  Preserve
+    those values while treating row-local citations as provenance boundaries.
+    """
+
+    if _fold(owner_role) == "reference":
+        return "the owning material is explicitly classified as Reference"
+
+    data_source = _fold(row.get("data_source")).replace(" ", "_")
+    if data_source == "external_reference":
+        return "the property explicitly declares external_reference provenance"
+
+    raw_note = str(row.get("raw_note") or "")
+    if _NUMERIC_CITATION.search(raw_note) or _AUTHOR_YEAR_CITATION.search(raw_note):
+        return "the property-local note carries bibliographic provenance"
+
+    evidence_rows = (
+        row.get("source_evidence")
+        if isinstance(row.get("source_evidence"), list)
+        else [row.get("source_evidence")]
+    )
+    evidence = "\n".join(str(value or "") for value in evidence_rows)
+    table_like = "|" in evidence or "<table" in evidence.casefold()
+    if table_like and (
+        _NUMERIC_CITATION.search(evidence)
+        or _AUTHOR_YEAR_CITATION.search(evidence)
+    ):
+        return (
+            "citation-bearing table evidence does not uniquely establish a "
+            "current-paper test-method binding"
+        )
+    return None
 
 
 def _is_table_or_figure(block: str) -> bool:
@@ -473,7 +527,12 @@ class PropertyContextIndex:
     def candidates(self) -> tuple[TestContextCandidate, ...]:
         return self._candidates
 
-    def recover(self, row: dict[str, Any]) -> PropertyContextDecision:
+    def recover(
+        self,
+        row: dict[str, Any],
+        *,
+        owner_role: str | None = None,
+    ) -> PropertyContextDecision:
         if not self._enabled:
             return PropertyContextDecision("disabled", "feature flag is disabled")
         if not _is_unreported(row.get("test_condition_raw")):
@@ -482,6 +541,9 @@ class PropertyContextIndex:
             return PropertyContextDecision("ineligible", "property is not an explicit tensile family")
         if not self._candidates:
             return PropertyContextDecision("not_found", "no detailed tensile procedure was found")
+        reference_reason = _reference_ineligibility_reason(row, owner_role)
+        if reference_reason:
+            return PropertyContextDecision("reference", reference_reason)
 
         hint = _fold(
             " | ".join(

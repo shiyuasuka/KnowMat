@@ -261,6 +261,129 @@ def test_unusual_tensile_properties_wording_remains_a_distinct_protocol():
     )
 
 
+def test_current_paper_table_value_without_citation_receives_context():
+    source = (
+        "## Tensile testing\n\n"
+        "Tensile tests were performed according to the ASTM E8-15a standard "
+        "at a strain rate of 0.005 min^-1.\n"
+    )
+    fact = _tensile_property(evidence="| Sample | UTS (MPa) |\n| A | 900 |")
+    fact.data["data_source"] = "table"
+
+    result = materialize_candidate([_anchor("A")], [fact], source_text=source)
+
+    condition = result.document["items"][0]["Extracted_Data"]["Properties"][0][
+        "test_condition_raw"
+    ]
+    assert "ASTM E8-15a" in condition
+
+
+def test_unit_decorated_uts_abbreviation_receives_current_paper_context():
+    source = (
+        "## Tensile testing\n\n"
+        "Tensile tests were performed at room temperature at a strain rate of 1 × 10^-3 s^-1.\n"
+    )
+    fact = _tensile_property(evidence="| Sample | UTS (MPa) |\n| A | 900 |")
+    fact.data["property_name_raw"] = "UTS (MPa)"
+    fact.data["data_source"] = "table"
+
+    result = materialize_candidate([_anchor("A")], [fact], source_text=source)
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["property_name_raw"] == "UTS (MPa)"
+    assert "room temperature" in prop["test_condition_raw"]
+
+
+def test_reference_material_does_not_inherit_current_paper_tensile_context():
+    source = (
+        "## Tensile testing\n\n"
+        "Tensile tests were performed at room temperature at a strain rate of 1 × 10^-3 s^-1.\n"
+    )
+    anchor = InventoryAnchor(
+        sample_id_raw="literature alloy",
+        material_name_raw="literature alloy",
+        state_raw=None,
+        role="Reference",
+        data_nature="Literature_Experimental",
+        source_evidence=["Literature alloy [12]"],
+        confidence=0.9,
+    )
+
+    result = materialize_candidate(
+        [anchor], [_tensile_property("literature alloy")], source_text=source
+    )
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["test_condition_raw"] in (None, "")
+    assert any(
+        issue.code == "property_test_context_not_applied_to_reference"
+        for issue in result.issues
+    )
+
+
+def test_external_reference_property_does_not_inherit_current_paper_context():
+    source = (
+        "## Tensile testing\n\n"
+        "Tensile tests were performed at room temperature at a strain rate of 1 × 10^-3 s^-1.\n"
+    )
+    fact = _tensile_property()
+    fact.data["data_source"] = "external_reference"
+
+    result = materialize_candidate([_anchor("A")], [fact], source_text=source)
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["test_condition_raw"] in (None, "")
+    assert any(
+        issue.code == "property_test_context_not_applied_to_reference"
+        for issue in result.issues
+    )
+
+
+def test_cited_comparison_table_value_does_not_inherit_current_paper_context():
+    source = (
+        "## Tensile testing\n\n"
+        "Tensile tests were performed at room temperature at a strain rate of 1 × 10^-3 s^-1.\n"
+    )
+    evidence = (
+        "| Properties | Current | WAAM | Wrought |\n"
+        "| Yield Strength (MPa) | 900 | 856 [39] | 948 [37] |"
+    )
+    fact = _tensile_property("WAAM", evidence=evidence)
+    fact.data["data_source"] = "table"
+    fact.data["raw_note"] = "[39]"
+
+    result = materialize_candidate([_anchor("WAAM")], [fact], source_text=source)
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["test_condition_raw"] in (None, "")
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "property_test_context_not_applied_to_reference"
+    )
+    assert "bibliographic provenance" in issue.actual["reason"]
+
+
+def test_citation_to_method_is_conservatively_left_unbound():
+    source = (
+        "## Tensile testing\n\n"
+        "Tensile tests were performed at room temperature at a strain rate of 1 × 10^-3 s^-1.\n"
+    )
+    fact = _tensile_property(
+        evidence="| Sample | Yield strength |\n| A | 900 MPa [12] |"
+    )
+    fact.data["data_source"] = "table"
+
+    result = materialize_candidate([_anchor("A")], [fact], source_text=source)
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["test_condition_raw"] in (None, "")
+    assert any(
+        issue.code == "property_test_context_not_applied_to_reference"
+        for issue in result.issues
+    )
+
+
 def _composition_fact(outer_sample: str, inner_sample: str, evidence: str):
     return CompositionFact(
         sample_id_raw=outer_sample,
