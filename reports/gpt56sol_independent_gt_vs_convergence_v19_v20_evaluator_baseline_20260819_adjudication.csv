@@ -1,0 +1,61 @@
+paper_id,paper_key,system,professional_winner,confirmed_correct,confirmed_missing,unsupported_claim,wrong_owner,wrong_axis,wrong_origin,value_conflict,unit_conflict,condition_conflict,duplicate_claim,likely_ocr_error,likely_chart_error
+paper_001,Achieving superior elevated temperature properties in additive manufactured nickel-based superalloys through unique alloy design,business_gt,business_gt,46,25,100,12,0,0,5,17,14,0,14,0
+paper_001,Achieving superior elevated temperature properties in additive manufactured nickel-based superalloys through unique alloy design,final_v5,business_gt,58,31,186,4,0,0,13,9,0,0,0,0
+paper_002,Achieving superior high-temperature mechanical properties in Al-Cu-Li-Sc-Zr alloy with nano-scale microstructure via laser additive manufacturing,business_gt,business_gt,35,18,39,2,0,0,0,3,0,0,2,0
+paper_002,Achieving superior high-temperature mechanical properties in Al-Cu-Li-Sc-Zr alloy with nano-scale microstructure via laser additive manufacturing,final_v5,business_gt,17,27,60,17,0,0,13,1,8,1,0,0
+paper_003,Active learning framework to optimize process parameters for additive-manufactured Ti-6Al-4V with high strength and ductility,business_gt,final_v5,40,45,110,9,0,0,18,24,12,0,14,0
+paper_003,Active learning framework to optimize process parameters for additive-manufactured Ti-6Al-4V with high strength and ductility,final_v5,final_v5,23,46,84,0,0,0,18,0,44,4,0,0
+paper_004,Additively manufactured heterogeneous precipitation-strengthened high-entropy alloys with high strength and ductility,business_gt,business_gt,8,20,67,37,0,0,2,1,32,0,0,0
+paper_004,Additively manufactured heterogeneous precipitation-strengthened high-entropy alloys with high strength and ductility,final_v5,business_gt,7,38,93,14,0,0,15,2,20,1,0,0
+paper_005,"Additive manufacturing of an ultrastrong, deformable Al alloy with nanoscale intermetallics",business_gt,business_gt,6,27,78,4,0,0,13,8,18,0,8,0
+paper_005,"Additive manufacturing of an ultrastrong, deformable Al alloy with nanoscale intermetallics",final_v5,business_gt,0,25,142,30,0,0,25,5,12,0,0,0
+paper_006,Additive manufacturing Ti-22Al-25 Nb alloy with excellent high temperature tensile properties by electron beam powder bed fusion,business_gt,business_gt,39,35,68,0,0,0,13,8,0,0,0,0
+paper_006,Additive manufacturing Ti-22Al-25 Nb alloy with excellent high temperature tensile properties by electron beam powder bed fusion,final_v5,business_gt,38,37,171,2,0,0,28,15,12,2,4,0
+paper_007,Characterization of Inconel 625 fabricated using powder-bed-based additive manufacturing technologies,business_gt,business_gt,15,85,96,3,0,0,10,14,90,0,6,0
+paper_007,Characterization of Inconel 625 fabricated using powder-bed-based additive manufacturing technologies,final_v5,business_gt,35,86,165,18,0,0,50,23,30,0,3,0
+paper_008,"Densification, microstructure, and mechanical properties of heat-treated MAR-M247 fabricated by Binder Jetting",business_gt,final_v5,0,109,171,0,0,0,25,43,44,0,8,0
+paper_008,"Densification, microstructure, and mechanical properties of heat-treated MAR-M247 fabricated by Binder Jetting",final_v5,final_v5,0,122,192,0,0,0,14,38,18,0,1,0
+paper_009,Dispersion hardening using amorphous nanoparticles deployed via additive manufacturing,business_gt,business_gt,1,70,78,28,0,0,4,2,14,1,1,0
+paper_009,Dispersion hardening using amorphous nanoparticles deployed via additive manufacturing,final_v5,business_gt,1,75,150,9,0,0,16,5,20,0,1,0
+paper_010,Effect of stacking fault segregation and local phase transformations on creep strength in Ni-base superalloys,business_gt,business_gt,10,81,72,5,0,0,0,2,48,0,2,0
+paper_010,Effect of stacking fault segregation and local phase transformations on creep strength in Ni-base superalloys,final_v5,business_gt,43,73,113,4,0,0,14,11,4,0,0,0
+paper_011,Electron beam powder bed fusion of Y₂O₃／γ-TiAl nanocomposite with balanced strength and toughness,business_gt,business_gt,61,38,52,16,2,1,6,5,4,5,1,0
+paper_011,Electron beam powder bed fusion of Y₂O₃／γ-TiAl nanocomposite with balanced strength and toughness,final_v5,business_gt,45,42,175,11,8,1,8,5,8,43,4,0
+paper_012,Enhanced creep resistance induced by minor Ti additions to a second generation nickel-based single crystal superalloy,business_gt,business_gt,114,70,70,42,3,2,5,4,18,55,2,0
+paper_012,Enhanced creep resistance induced by minor Ti additions to a second generation nickel-based single crystal superalloy,final_v5,business_gt,166,49,128,92,6,3,14,8,22,70,3,0
+paper_013,"Highly printable, strong, and ductile ordered intermetallic alloy",business_gt,business_gt,49,32,31,10,2,1,3,2,6,22,1,0
+paper_013,"Highly printable, strong, and ductile ordered intermetallic alloy",final_v5,business_gt,40,33,104,8,5,1,7,2,8,42,2,0
+paper_014,High strength Al–Li alloy development for laser powder bed fusion,business_gt,business_gt,44,12,148,5,3,1,4,2,8,71,2,0
+paper_014,High strength Al–Li alloy development for laser powder bed fusion,final_v5,business_gt,36,18,151,2,3,1,3,1,7,62,3,0
+paper_015,Improving ductility via grain structure control in Sc／Zr modified Al-Cu-Li alloys by pulsed-laser powder bed fusion,business_gt,business_gt,26,31,36,2,2,1,2,3,5,18,1,0
+paper_015,Improving ductility via grain structure control in Sc／Zr modified Al-Cu-Li alloys by pulsed-laser powder bed fusion,final_v5,business_gt,36,18,137,6,5,1,12,2,8,52,3,0
+paper_016,Improving mechanical properties and machining surface quality in a Fe49Mn30Co10Cr10N1 high-entropy alloy sheet by laser-assisted grinding,business_gt,business_gt,82,48,47,8,3,2,19,6,8,25,2,0
+paper_016,Improving mechanical properties and machining surface quality in a Fe49Mn30Co10Cr10N1 high-entropy alloy sheet by laser-assisted grinding,final_v5,business_gt,79,50,74,2,7,2,21,7,15,39,3,0
+paper_017,In situ tuning of FCC-BCC dual phase and mechanical properties in multi-principal element alloys via laser-aided additive manufacturing,business_gt,business_gt,94,109,96,5,3,2,24,1,12,58,2,0
+paper_017,In situ tuning of FCC-BCC dual phase and mechanical properties in multi-principal element alloys via laser-aided additive manufacturing,final_v5,business_gt,61,103,123,1,4,2,6,1,20,70,4,0
+paper_018,Microstructural evolution and formation of fine grains during fatigue crack initiation process of laser powder bed fusion Ni-based superalloy,business_gt,business_gt,74,89,43,54,4,2,2,8,9,38,2,0
+paper_018,Microstructural evolution and formation of fine grains during fatigue crack initiation process of laser powder bed fusion Ni-based superalloy,final_v5,business_gt,56,111,89,31,6,2,10,2,12,45,3,0
+paper_019,Microstructural evolution and mechanical properties of differently heat-treated binder jet printed samples from gas- and water-atomized alloy 625 powders,business_gt,final_v5,127,287,117,40,8,3,19,10,13,74,3,0
+paper_019,Microstructural evolution and mechanical properties of differently heat-treated binder jet printed samples from gas- and water-atomized alloy 625 powders,final_v5,final_v5,179,290,103,47,12,3,15,30,16,86,5,0
+paper_020,Nanotwinned precipitates induced ultra-strong AlCoCrFeNi_{2.1} eutectic high-entropy alloy through additive manufacturing,business_gt,business_gt,52,48,56,20,4,2,5,2,9,30,2,0
+paper_020,Nanotwinned precipitates induced ultra-strong AlCoCrFeNi_{2.1} eutectic high-entropy alloy through additive manufacturing,final_v5,business_gt,64,53,88,19,5,2,10,5,12,48,3,0
+paper_021,On the effect of boron on grain boundary character in a new polycrystalline superalloy,business_gt,final_v5,1,88,56,54,0,0,5,4,104,124,0,0
+paper_021,On the effect of boron on grain boundary character in a new polycrystalline superalloy,final_v5,final_v5,29,110,70,56,0,0,27,5,0,86,0,0
+paper_022,Peculiar microstructural evolution and tensile properties of β-containing γ-TiAl alloys fabricated by electron beam melting,business_gt,final_v5,13,48,59,10,0,0,19,0,6,75,0,0
+paper_022,Peculiar microstructural evolution and tensile properties of β-containing γ-TiAl alloys fabricated by electron beam melting,final_v5,final_v5,7,50,37,18,0,0,13,3,4,93,0,0
+paper_023,"Powder bed binder jet printed alloy 625: Densification, microstructure and mechanical properties",business_gt,business_gt,21,183,50,0,0,0,33,4,62,184,3,0
+paper_023,"Powder bed binder jet printed alloy 625: Densification, microstructure and mechanical properties",final_v5,business_gt,10,142,21,112,0,0,34,2,54,87,0,0
+paper_024,Powder recycling for electron beam powder bed fusion of TiAl alloy,business_gt,business_gt,1,85,28,12,0,0,0,40,12,245,8,0
+paper_024,Powder recycling for electron beam powder bed fusion of TiAl alloy,final_v5,business_gt,11,82,79,8,0,0,16,7,2,222,1,0
+paper_025,Process-Structure-Property Considerations for Wire-Based Directed Energy Deposition of Ti-6Al-4V,business_gt,business_gt,5,78,21,0,0,0,15,14,44,51,7,0
+paper_025,Process-Structure-Property Considerations for Wire-Based Directed Energy Deposition of Ti-6Al-4V,final_v5,business_gt,19,78,62,0,0,0,23,13,16,155,2,0
+paper_026,Strain controlled fatigue behaviour of a wire + arc additive manufactured Ti-6Al-4V,business_gt,business_gt,1,51,21,0,0,0,10,3,34,31,1,0
+paper_026,Strain controlled fatigue behaviour of a wire + arc additive manufactured Ti-6Al-4V,final_v5,business_gt,0,56,24,12,0,0,14,0,12,90,0,0
+paper_027,Superior corrosion resistance and its origins in an additively manufactured Co-Cr-Ni-Al-Ti high-entropy alloy with nano-lamellar precipitates,business_gt,business_gt,10,60,5,20,0,0,8,6,6,33,6,0
+paper_027,Superior corrosion resistance and its origins in an additively manufactured Co-Cr-Ni-Al-Ti high-entropy alloy with nano-lamellar precipitates,final_v5,business_gt,16,59,35,16,0,0,2,5,0,202,2,0
+paper_028,Tailoring thickness debit for high-temperature fatigue resistance of Inconel 718 superalloy fabricated by laser powder bed fusion,business_gt,final_v5,7,52,29,8,0,0,0,2,2,74,2,0
+paper_028,Tailoring thickness debit for high-temperature fatigue resistance of Inconel 718 superalloy fabricated by laser powder bed fusion,final_v5,final_v5,4,57,28,4,0,0,0,2,0,116,0,0
+paper_029,"The Effect of Interlayer Delay on the Heat Accumulation, Microstructures, and Properties in Laser Hot Wire Directed Energy Deposition of Ti-6Al-4V Single-Wall",business_gt,business_gt,2,103,25,0,0,0,8,0,120,41,0,0
+paper_029,"The Effect of Interlayer Delay on the Heat Accumulation, Microstructures, and Properties in Laser Hot Wire Directed Energy Deposition of Ti-6Al-4V Single-Wall",final_v5,business_gt,0,103,14,8,0,0,35,4,112,100,0,0
+paper_030,Variant Selection and Macrozone in Ti-6Al-4V Walls during Laser Hot Wire Direct Energy Deposition,business_gt,business_gt,0,125,42,0,0,0,6,6,50,29,0,0
+paper_030,Variant Selection and Macrozone in Ti-6Al-4V Walls during Laser Hot Wire Direct Energy Deposition,final_v5,business_gt,1,113,38,1,0,0,17,6,72,80,0,0

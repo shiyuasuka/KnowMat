@@ -378,3 +378,143 @@ def test_flatten_composition_is_atomic_and_skips_not_reported_parameter() -> Non
     processing = [row for row in claims if row["axis"] == "Processing"]
     assert len(composition) == 2
     assert len(processing) == 1  # stage identity only; absent power is not a fact
+
+
+def test_flatten_process_uses_stage_context_and_canonical_value_unit_pair() -> None:
+    document = {
+        "items": [
+            {
+                "Item_ID": "item_1",
+                "Sample_ID": "S1",
+                "Role": "Target",
+                "Data_Nature": "Experimental",
+                "Extracted_Data": {
+                    "Composition": {
+                        "Material_Identity": {"material_name_raw": "Ti-6Al-4V"}
+                    },
+                    "Processing": {
+                        "Process_Route": {
+                            "stages": [
+                                {
+                                    "process_code": "B2.HT.UNSPECIFIED",
+                                    "parameter_profile": "HEAT_TREATMENT",
+                                    "parameters": [
+                                        {
+                                            "parameter_code": "duration",
+                                            "status": "reported",
+                                            "value_kind": "scalar",
+                                            "value_raw": "2",
+                                            "unit_raw": "h",
+                                            "canonical_value": 7200.0,
+                                            "canonical_unit": "s",
+                                            "source_evidence": "heated for 2 h",
+                                        },
+                                        {
+                                            "parameter_code": "process_temperature",
+                                            "status": "reported",
+                                            "value_kind": "scalar",
+                                            "value_raw": "900",
+                                            "unit_raw": "°C",
+                                            "canonical_value": 1173.15,
+                                            "canonical_unit": "K",
+                                            "source_evidence": "heated at 900 °C",
+                                        },
+                                    ],
+                                }
+                            ]
+                        }
+                    },
+                    "Structure": {"Structure_Observations": [], "Characterization": []},
+                    "Properties": [],
+                },
+            }
+        ]
+    }
+    system = flatten_v11(document, source="final_v5", paper_key="paper")
+    system = [row for row in system if not row["semantic_key"].startswith("process_stage_")]
+    expert = [
+        {
+            **_expert(sample="S1", condition=""),
+            "axis": "Processing",
+            "semantic_key": "heat_treatment_time",
+            "name_raw": "Heating Time",
+            "value": {**_expert()["value"], "raw": "2", "number": 2.0},
+            "unit_raw": "h",
+        },
+        {
+            **_expert(sample="S1", condition=""),
+            "uid": "clm_0002",
+            "axis": "Processing",
+            "semantic_key": "heat_treatment_temperature",
+            "name_raw": "Heating Temperature",
+            "value": {**_expert()["value"], "raw": "900", "number": 900.0},
+            "unit_raw": "°C",
+        },
+    ]
+
+    report = compare_claim_sets(system, expert)
+
+    assert report["modes"]["loose"]["micro"]["matched"] == 2
+    assert {row["unit_raw"] for row in system} == {"s", "K"}
+    assert {row["value"]["number"] for row in system} == {7200.0, 1173.15}
+
+
+def test_flatten_numeric_raw_unmapped_parameter_is_comparable() -> None:
+    document = {
+        "items": [
+            {
+                "Item_ID": "item_1",
+                "Sample_ID": "S1",
+                "Role": "Target",
+                "Data_Nature": "Experimental",
+                "Extracted_Data": {
+                    "Composition": {
+                        "Material_Identity": {"material_name_raw": "Ti-6Al-4V"}
+                    },
+                    "Processing": {
+                        "Process_Route": {
+                            "stages": [
+                                {
+                                    "process_code": "A2.AM.PBF_LB",
+                                    "parameter_profile": "AM_PBF",
+                                    "parameters": [
+                                        {
+                                            "parameter_code": "raw_unmapped_parameter",
+                                            "parameter_name_raw": "Volumetric Energy Density",
+                                            "status": "ambiguous",
+                                            "value_kind": "unknown",
+                                            "value_raw": "94.69",
+                                            "unit_raw": "J/mm^3",
+                                            "canonical_value": None,
+                                            "canonical_unit": None,
+                                            "source_evidence": "VED was 94.69 J/mm^3",
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    },
+                    "Structure": {"Structure_Observations": [], "Characterization": []},
+                    "Properties": [],
+                },
+            }
+        ]
+    }
+    system = flatten_v11(document, source="final_v5", paper_key="paper")
+    system = [row for row in system if row["semantic_key"] == "volumetric_energy_density"]
+    expert = [
+        {
+            **_expert(sample="S1", condition=""),
+            "axis": "Processing",
+            "semantic_key": "lpbf_volumetric_energy_density",
+            "name_raw": "Volumetric Energy Density",
+            "value": {**_expert()["value"], "raw": "94.69", "number": 94.69},
+            "unit_raw": "J/mm³",
+        }
+    ]
+
+    report = compare_claim_sets(system, expert)
+
+    assert system[0]["value"]["kind"] == "scalar"
+    assert system[0]["value"]["number"] == 94.69
+    assert report["modes"]["loose"]["micro"]["matched"] == 1

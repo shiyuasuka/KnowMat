@@ -5,6 +5,7 @@ import pytest
 from knowmat.alpha25.runner_compat import (
     install_process_unit_compat,
     install_structure_unit_compat,
+    prepare_process_stage_compat,
     prepare_process_variant_conditions,
     process_parameter_alias,
     property_name_without_unit_suffix,
@@ -110,6 +111,7 @@ def test_process_unit_compat_normalizes_unmapped_tex_unit_with_audit() -> None:
         ("first stage temperature", "°C", "1120", "process_temperature"),
         ("substrate temperature", "°C", "200", "preheat_temperature"),
         ("time", "h", "4", "duration"),
+        ("Heating Time", "h", "2", "duration"),
         ("time", "", "1 hour", "duration"),
         ("time", "", "2", None),
         ("Feed Rate", "mm/s", "40", "wire_feed_rate"),
@@ -337,6 +339,215 @@ def test_process_variant_conditions_do_not_label_single_energy_power() -> None:
     }
 
     prepared, changes = prepare_process_variant_conditions(candidate)
+
+    assert prepared == candidate
+    assert changes == []
+
+
+def test_process_stage_compat_rehomes_split_table_parameters_without_mutation() -> None:
+    candidate = {
+        "candidate_stages": [
+            {
+                "candidate_stage_id": "cand_001",
+                "stage_index_candidate": 1,
+                "process_name_raw": "Printing Parameters",
+                "parameters_raw": [
+                    {
+                        "parameter_name_raw": "Volumetric Energy Density",
+                        "value_raw": "94.69",
+                        "unit_raw": "J/mm^3",
+                        "source_evidence": "| 1-1 | 2 | 94.69 |",
+                    }
+                ],
+                "source_evidence": ["| 1-1 | 2 | 94.69 |"],
+            },
+            {
+                "candidate_stage_id": "cand_002",
+                "stage_index_candidate": 2,
+                "process_name_raw": "post-HT",
+                "parameters_raw": [
+                    {
+                        "parameter_name_raw": "Heating Time",
+                        "value_raw": "2",
+                        "unit_raw": "h",
+                        "source_evidence": "| 1-1 | 2 | 94.69 |",
+                    }
+                ],
+                "source_evidence": ["| 1-1 | 2 | 94.69 |"],
+            },
+            {
+                "candidate_stage_id": "cand_003",
+                "stage_index_candidate": 3,
+                "process_name_raw": "LPBF",
+                "parameters_raw": [
+                    {
+                        "parameter_name_raw": "Laser Power",
+                        "value_raw": "250",
+                        "unit_raw": "W",
+                        "source_evidence": "| 1-1 | 250 | 1100 | 900 |",
+                    },
+                    {
+                        "parameter_name_raw": "Scan Speed",
+                        "value_raw": "1100",
+                        "unit_raw": "mm/s",
+                        "source_evidence": "| 1-1 | 250 | 1100 | 900 |",
+                    },
+                    {
+                        "parameter_name_raw": "Heating Temperature",
+                        "value_raw": "900",
+                        "unit_raw": "°C",
+                        "source_evidence": "| 1-1 | 250 | 1100 | 900 |",
+                    },
+                ],
+                "source_evidence": ["| 1-1 | 250 | 1100 | 900 |"],
+            },
+        ]
+    }
+
+    def resolve_process(name, _code, _role, _rules):
+        matches = {
+            "heat treatment": {
+                "code": "B2.HT.UNSPECIFIED",
+                "parameter_profile": "HEAT_TREATMENT",
+            },
+            "LPBF": {
+                "code": "A2.AM.PBF_LB",
+                "parameter_profile": "AM_PBF",
+            },
+        }
+        return matches.get(name), [], []
+
+    def normalize_parameter(raw, _stage_uid, profile, _rules):
+        aliases = {
+            "Laser Power": "power",
+            "Scan Speed": "scan_speed",
+            "Heating Time": "duration",
+            "Heating Temperature": "process_temperature",
+        }
+        code = aliases.get(raw["parameter_name_raw"])
+        allowed = {
+            "AM_PBF": {"power", "scan_speed"},
+            "HEAT_TREATMENT": {"duration", "process_temperature"},
+        }
+        if code in allowed.get(profile, set()):
+            return {"parameter_code": code}, [], []
+        return {"parameter_code": "raw_unmapped_parameter"}, [], []
+
+    rules = SimpleNamespace(
+        parameter_catalog={
+            "energy_density": {
+                "model_policy": "auxiliary_derived_or_reported"
+            }
+        }
+    )
+    prepared, changes = prepare_process_stage_compat(
+        candidate,
+        rules=rules,
+        resolve_process_type=resolve_process,
+        normalize_parameter=normalize_parameter,
+    )
+
+    container, heat_treatment, lpbf = prepared["candidate_stages"]
+    assert container["parameters_raw"] == []
+    assert heat_treatment["process_name_raw"] == "heat treatment"
+    assert [row["parameter_name_raw"] for row in heat_treatment["parameters_raw"]] == [
+        "Heating Time",
+        "Heating Temperature",
+    ]
+    assert [row["parameter_name_raw"] for row in lpbf["parameters_raw"]] == [
+        "Laser Power",
+        "Scan Speed",
+        "Volumetric Energy Density",
+    ]
+    assert "| 1-1 | 250 | 1100 | 900 |" in heat_treatment["source_evidence"]
+    assert candidate["candidate_stages"][0]["parameters_raw"][0][
+        "parameter_name_raw"
+    ] == "Volumetric Energy Density"
+    assert candidate["candidate_stages"][1]["process_name_raw"] == "post-HT"
+    assert candidate["candidate_stages"][2]["parameters_raw"][-1][
+        "parameter_name_raw"
+    ] == "Heating Temperature"
+    assert {change["rule_id"] for change in changes} == {
+        "compat.process_stage_alias.v1",
+        "compat.process_container_parameter_rehome.v1",
+        "compat.process_thermal_parameter_rehome.v1",
+    }
+
+
+def test_process_stage_compat_does_not_guess_an_isolated_container() -> None:
+    candidate = {
+        "candidate_stages": [
+            {
+                "candidate_stage_id": "cand_001",
+                "stage_index_candidate": 1,
+                "process_name_raw": "Printing Parameters",
+                "parameters_raw": [
+                    {
+                        "parameter_name_raw": "Volumetric Energy Density",
+                        "value_raw": "94.69",
+                        "unit_raw": "J/mm^3",
+                        "source_evidence": "table row",
+                    }
+                ],
+                "source_evidence": ["table row"],
+            }
+        ]
+    }
+
+    prepared, changes = prepare_process_stage_compat(
+        candidate,
+        rules=SimpleNamespace(parameter_catalog={}),
+        resolve_process_type=lambda *_args: (None, [], []),
+        normalize_parameter=lambda *_args: (
+            {"parameter_code": "raw_unmapped_parameter"},
+            [],
+            [],
+        ),
+    )
+
+    assert prepared == candidate
+    assert changes == []
+
+
+def test_process_stage_compat_keeps_am_temperature_without_thermal_sibling() -> None:
+    candidate = {
+        "candidate_stages": [
+            {
+                "candidate_stage_id": "cand_001",
+                "stage_index_candidate": 1,
+                "process_name_raw": "LPBF",
+                "parameters_raw": [
+                    {
+                        "parameter_name_raw": "Heating Temperature",
+                        "value_raw": "200",
+                        "unit_raw": "°C",
+                        "source_evidence": "powder bed heating temperature was 200 °C",
+                    }
+                ],
+                "source_evidence": ["powder bed heating temperature was 200 °C"],
+            }
+        ]
+    }
+
+    prepared, changes = prepare_process_stage_compat(
+        candidate,
+        rules=SimpleNamespace(parameter_catalog={}),
+        resolve_process_type=lambda name, *_args: (
+            {
+                "code": "A2.AM.PBF_LB",
+                "parameter_profile": "AM_PBF",
+            }
+            if name == "LPBF"
+            else None,
+            [],
+            [],
+        ),
+        normalize_parameter=lambda *_args: (
+            {"parameter_code": "raw_unmapped_parameter"},
+            [],
+            [],
+        ),
+    )
 
     assert prepared == candidate
     assert changes == []

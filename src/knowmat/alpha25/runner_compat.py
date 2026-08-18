@@ -35,6 +35,17 @@ _MASS_RATE_UNIT = re.compile(
     r"(?i)^(?:mg|g|kg)/(?:s|min|h|hr|hour)$"
 )
 _POWER_TOKEN = re.compile(r"(?i)(?:^|\s)power(?:$|\s)")
+_POST_HEAT_TREATMENT_STAGE = re.compile(
+    r"(?ix)^post[\s_-]*(?:ht|heat[\s_-]*treat(?:ment)?s?)$"
+)
+_GENERIC_PROCESS_PARAMETER_STAGE = re.compile(
+    r"(?ix)^(?:printing|processing|process|build|fabrication|manufacturing)"
+    r"(?:\s+process)?\s+parameters?$"
+)
+_HEAT_TREATMENT_TEMPERATURE = re.compile(
+    r"(?ix)^(?:(?:post[\s_-]*)?(?:ht|heat[\s_-]*treatment)|heating)"
+    r"[\s_-]*temperature$"
+)
 
 
 def property_name_without_unit_suffix(raw_name: Any) -> str:
@@ -132,6 +143,9 @@ def process_parameter_alias(
         key in {
             "heating temperature",
             "heat treatment temperature",
+            "post ht temperature",
+            "post heat treatment temperature",
+            "ht temperature",
             "process temperature",
             "treatment temperature",
             "thermal environment temperature",
@@ -149,6 +163,11 @@ def process_parameter_alias(
             "total duration",
             "hold time",
             "holding time",
+            "heating time",
+            "heat treatment time",
+            "post ht time",
+            "post heat treatment time",
+            "ht time",
             "delay time",
             "exposure time",
         }
@@ -162,6 +181,336 @@ def process_parameter_alias(
         if _MASS_RATE_UNIT.fullmatch(unit):
             return "feed_rate_mass"
     return None
+
+
+def _resolved_process(
+    stage: dict[str, Any], rules: Any, resolve_process_type: Callable[..., Any]
+) -> dict[str, Any] | None:
+    result = resolve_process_type(
+        stage.get("process_name_raw"),
+        stage.get("process_code_candidate"),
+        stage.get("process_role_candidate"),
+        rules,
+    )
+    if not isinstance(result, tuple) or not result:
+        return None
+    return result[0] if isinstance(result[0], dict) else None
+
+
+def _parameter_supported_by_profile(
+    raw: dict[str, Any],
+    profile: str,
+    rules: Any,
+    normalize_parameter: Callable[..., Any],
+) -> bool:
+    result = normalize_parameter(deepcopy(raw), "pstg_001", profile, rules)
+    record = result[0] if isinstance(result, tuple) and result else None
+    if isinstance(record, dict) and record.get("parameter_code") not in {
+        None,
+        "raw_unmapped_parameter",
+    }:
+        return True
+
+    # The frozen profile intentionally keeps reported energy-density values
+    # auxiliary rather than opening a model slot.  They are still legitimate
+    # AM evidence and may be attached to an explicit AM stage as raw evidence.
+    alias_code = process_parameter_alias(
+        raw.get("parameter_name_raw"), raw.get("unit_raw"), raw.get("value_raw")
+    )
+    catalog = getattr(rules, "parameter_catalog", {})
+    catalog_row = catalog.get(alias_code) if isinstance(catalog, dict) else None
+    return bool(
+        profile.startswith("AM_")
+        and isinstance(catalog_row, dict)
+        and str(catalog_row.get("model_policy") or "").startswith("auxiliary_")
+    )
+
+
+def _stage_distance(
+    source_index: int,
+    source: dict[str, Any],
+    target_index: int,
+    target: dict[str, Any],
+) -> int:
+    source_order = source.get("stage_index_candidate")
+    target_order = target.get("stage_index_candidate")
+    if isinstance(source_order, int) and isinstance(target_order, int):
+        return abs(source_order - target_order)
+    return abs(source_index - target_index)
+
+
+def _extend_stage_evidence(stage: dict[str, Any], parameter: dict[str, Any]) -> None:
+    evidence = parameter.get("source_evidence")
+    new_evidence = (
+        [evidence]
+        if isinstance(evidence, str) and evidence.strip()
+        else [
+            value
+            for value in evidence
+            if isinstance(value, str) and value.strip()
+        ]
+        if isinstance(evidence, list)
+        else []
+    )
+    existing = stage.get("source_evidence")
+    if not isinstance(existing, list):
+        existing = [existing] if isinstance(existing, str) and existing.strip() else []
+        stage["source_evidence"] = existing
+    for value in new_evidence:
+        if value not in existing:
+            existing.append(value)
+
+
+def _rehome_parameters(
+    stages: list[Any],
+    source_index: int,
+    target_index: int,
+    parameter_indexes: set[int],
+    rule_id: str,
+) -> list[dict[str, Any]]:
+    source = stages[source_index]
+    target = stages[target_index]
+    if not isinstance(source, dict) or not isinstance(target, dict):
+        return []
+    source_parameters = source.get("parameters_raw")
+    if not isinstance(source_parameters, list):
+        return []
+    target_parameters = target.get("parameters_raw")
+    if not isinstance(target_parameters, list):
+        target_parameters = []
+        target["parameters_raw"] = target_parameters
+
+    retained: list[Any] = []
+    changes: list[dict[str, Any]] = []
+    for parameter_index, parameter in enumerate(source_parameters):
+        if parameter_index not in parameter_indexes or not isinstance(parameter, dict):
+            retained.append(parameter)
+            continue
+        moved = deepcopy(parameter)
+        target_parameters.append(moved)
+        _extend_stage_evidence(target, moved)
+        changes.append(
+            {
+                "rule_id": rule_id,
+                "path": (
+                    f"candidate_stages.{source_index}.parameters_raw."
+                    f"{parameter_index}"
+                ),
+                "before": {
+                    "stage_id": source.get("candidate_stage_id"),
+                    "stage_name": source.get("process_name_raw"),
+                    "parameter": deepcopy(parameter),
+                },
+                "after": {
+                    "stage_id": target.get("candidate_stage_id"),
+                    "stage_name": target.get("process_name_raw"),
+                    "parameter": moved,
+                },
+            }
+        )
+    source["parameters_raw"] = retained
+    return changes
+
+
+def prepare_process_stage_compat(
+    candidate: dict[str, Any],
+    *,
+    rules: Any,
+    resolve_process_type: Callable[..., Any],
+    normalize_parameter: Callable[..., Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Reconcile evidence-backed stage fragments before frozen normalization.
+
+    Alpha25 can split one table row into a generic parameter container, a
+    post-heat-treatment fragment, and an explicit AM stage.  This adapter only
+    rehomes reported rows when those explicit sibling stages prove ownership;
+    it never infers a process from a container heading alone.
+    """
+
+    stages = candidate.get("candidate_stages")
+    if not isinstance(stages, list):
+        return candidate, []
+    prepared = deepcopy(candidate)
+    prepared_stages = prepared.get("candidate_stages") or []
+    changes: list[dict[str, Any]] = []
+
+    # Resolve only an otherwise-unmapped, explicit post-HT abbreviation.  The
+    # caller's candidate remains untouched and the exact raw spelling is kept
+    # in the normalization audit below.
+    for stage_index, stage in enumerate(prepared_stages):
+        if not isinstance(stage, dict):
+            continue
+        raw_name = str(stage.get("process_name_raw") or "").strip()
+        if not _POST_HEAT_TREATMENT_STAGE.fullmatch(raw_name):
+            continue
+        if _resolved_process(stage, rules, resolve_process_type) is not None:
+            continue
+        stage["process_name_raw"] = "heat treatment"
+        changes.append(
+            {
+                "rule_id": "compat.process_stage_alias.v1",
+                "path": f"candidate_stages.{stage_index}.process_name_raw",
+                "before": raw_name,
+                "after": "heat treatment",
+            }
+        )
+
+    resolved = [
+        _resolved_process(stage, rules, resolve_process_type)
+        if isinstance(stage, dict)
+        else None
+        for stage in prepared_stages
+    ]
+    am_targets = [
+        index
+        for index, match in enumerate(resolved)
+        if isinstance(match, dict)
+        and str(match.get("parameter_profile") or "").startswith("AM_")
+    ]
+
+    # A generic container is evidence, not a process.  Attach only parameters
+    # accepted by a real sibling AM profile (plus ontology-declared auxiliary
+    # reported parameters), preferring the nearest compatible sibling.
+    for source_index, source in enumerate(prepared_stages):
+        if not isinstance(source, dict) or not _GENERIC_PROCESS_PARAMETER_STAGE.fullmatch(
+            str(source.get("process_name_raw") or "").strip()
+        ):
+            continue
+        parameters = source.get("parameters_raw")
+        if not isinstance(parameters, list) or not parameters or not am_targets:
+            continue
+        scored: list[tuple[int, int, int, set[int]]] = []
+        for target_index in am_targets:
+            target = prepared_stages[target_index]
+            match = resolved[target_index]
+            if not isinstance(target, dict) or not isinstance(match, dict):
+                continue
+            profile = str(match.get("parameter_profile") or "")
+            supported = {
+                index
+                for index, raw in enumerate(parameters)
+                if isinstance(raw, dict)
+                and _parameter_supported_by_profile(
+                    raw, profile, rules, normalize_parameter
+                )
+            }
+            if supported:
+                scored.append(
+                    (
+                        len(supported),
+                        -_stage_distance(source_index, source, target_index, target),
+                        target_index,
+                        supported,
+                    )
+                )
+        if not scored:
+            continue
+        best_score = max((score, distance) for score, distance, _, _ in scored)
+        best = [row for row in scored if row[:2] == best_score]
+        if len(best) > 1:
+            process_codes = {
+                resolved[row[2]].get("code")
+                for row in best
+                if isinstance(resolved[row[2]], dict)
+            }
+            if len(process_codes) != 1:
+                continue
+        _, _, target_index, supported = max(best, key=lambda row: row[2])
+        changes.extend(
+            _rehome_parameters(
+                prepared_stages,
+                source_index,
+                target_index,
+                supported,
+                "compat.process_container_parameter_rehome.v1",
+            )
+        )
+
+    # Move an explicitly thermal temperature out of an AM stage only when a
+    # sibling heat-treatment stage already owns a reported duration.  This is
+    # deliberately stricter than interpreting every "heating" mention as HT.
+    heat_treatment_targets: list[int] = []
+    for target_index, (target, match) in enumerate(zip(prepared_stages, resolved)):
+        if not isinstance(target, dict) or not isinstance(match, dict):
+            continue
+        if match.get("parameter_profile") != "HEAT_TREATMENT":
+            continue
+        target_parameters = target.get("parameters_raw")
+        if not isinstance(target_parameters, list):
+            continue
+        if any(
+            isinstance(raw, dict)
+            and process_parameter_alias(
+                raw.get("parameter_name_raw"),
+                raw.get("unit_raw"),
+                raw.get("value_raw"),
+            )
+            == "duration"
+            for raw in target_parameters
+        ):
+            heat_treatment_targets.append(target_index)
+
+    for source_index in am_targets:
+        source = prepared_stages[source_index]
+        if not isinstance(source, dict) or not heat_treatment_targets:
+            continue
+        parameters = source.get("parameters_raw")
+        if not isinstance(parameters, list):
+            continue
+        thermal_indexes = {
+            index
+            for index, raw in enumerate(parameters)
+            if isinstance(raw, dict)
+            and _HEAT_TREATMENT_TEMPERATURE.fullmatch(
+                re.sub(
+                    r"\s+",
+                    " ",
+                    re.sub(
+                        r"[_-]+", " ", str(raw.get("parameter_name_raw") or "")
+                    ),
+                ).strip()
+            )
+            and process_parameter_alias(
+                raw.get("parameter_name_raw"),
+                raw.get("unit_raw"),
+                raw.get("value_raw"),
+            )
+            == "process_temperature"
+        }
+        if not thermal_indexes:
+            continue
+        ranked = sorted(
+            heat_treatment_targets,
+            key=lambda target_index: (
+                _stage_distance(
+                    source_index,
+                    source,
+                    target_index,
+                    prepared_stages[target_index],
+                ),
+                -target_index,
+            ),
+        )
+        target_index = ranked[0]
+        profile = str(resolved[target_index].get("parameter_profile") or "")
+        supported = {
+            index
+            for index in thermal_indexes
+            if _parameter_supported_by_profile(
+                parameters[index], profile, rules, normalize_parameter
+            )
+        }
+        if supported:
+            changes.extend(
+                _rehome_parameters(
+                    prepared_stages,
+                    source_index,
+                    target_index,
+                    supported,
+                    "compat.process_thermal_parameter_rehome.v1",
+                )
+            )
+    return prepared, changes
 
 
 def _process_variant_label(
@@ -431,10 +780,30 @@ def install_process_unit_compat(normalize_process: Any) -> None:
         def compatible_route(
             candidate: dict[str, Any], rules: Any
         ) -> tuple[Any, ...]:
+            stage_changes: list[dict[str, Any]] = []
+            resolve_process_type = getattr(
+                normalize_process, "resolve_process_type", None
+            )
+            if callable(resolve_process_type):
+                candidate, stage_changes = prepare_process_stage_compat(
+                    candidate,
+                    rules=rules,
+                    resolve_process_type=resolve_process_type,
+                    normalize_parameter=normalize_process.normalize_parameter,
+                )
             prepared, changes = prepare_process_variant_conditions(candidate)
             route, issues, audit = original_route(prepared, rules)
             audit_factory = getattr(normalize_process, "_audit", None)
             if callable(audit_factory):
+                audit.extend(
+                    audit_factory(
+                        change["rule_id"],
+                        change["path"],
+                        change["before"],
+                        change["after"],
+                    )
+                    for change in stage_changes
+                )
                 audit.extend(
                     audit_factory(
                         "compat.process_variant_condition.v1",

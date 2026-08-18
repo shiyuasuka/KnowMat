@@ -200,15 +200,36 @@ def _numeric_values(value: dict[str, Any]) -> tuple[float, ...]:
 def _value(row: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     nested = row.get("Value") if isinstance(row.get("Value"), dict) else {}
     kind = nested.get("value_kind") or row.get("value_kind") or "unknown"
-    raw = (
-        nested.get("value_raw") or row.get("value_raw") or row.get("Value_Raw")
-        or row.get("value") or nested.get("canonical_value") or row.get("canonical_value")
+    raw_candidates = (
+        nested.get("value_raw"),
+        row.get("value_raw"),
+        row.get("Value_Raw"),
+        row.get("value"),
+        nested.get("canonical_value"),
+        row.get("canonical_value"),
+    )
+    raw = next((value for value in raw_candidates if value is not None), None)
+    unit = (
+        nested.get("canonical_unit") or nested.get("unit_raw") or row.get("canonical_unit")
+        or row.get("unit_raw") or row.get("Unit_Raw")
     )
     number = nested.get("value_num")
     if number is None:
         number = nested.get("canonical_value", row.get("canonical_value"))
     if not isinstance(number, (int, float)) or isinstance(number, bool):
         number = row.get("value") if isinstance(row.get("value"), (int, float)) else None
+    if (
+        str(kind).casefold() == "unknown"
+        and unit not in (None, "")
+        and isinstance(raw, (str, int, float))
+        and not isinstance(raw, bool)
+        and re.fullmatch(
+            r"\s*[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?\s*", str(raw)
+        )
+    ):
+        kind = "scalar"
+        if number is None:
+            number = float(raw)
     value = {
         "kind": str(kind),
         "raw": None if raw is None else str(raw),
@@ -220,10 +241,6 @@ def _value(row: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         "stddev": nested.get("value_stddev", row.get("value_stddev")),
         "text": str(raw) if kind in {"categorical", "boolean", "unknown"} and raw is not None else None,
     }
-    unit = (
-        nested.get("canonical_unit") or nested.get("unit_raw") or row.get("canonical_unit")
-        or row.get("unit_raw") or row.get("Unit_Raw")
-    )
     return value, None if unit is None else str(unit)
 
 
@@ -337,7 +354,11 @@ def flatten_v11(document: dict[str, Any], *, source: str, paper_key: str) -> lis
                     origin=_origin(status, item.get("Data_Nature")),
                     evidence=_evidence(parameter) or _evidence(stage),
                     raw_path=f"items[{item_index}].Processing.stages[{stage_index}].parameters[{parameter_index}]",
-                    raw=parameter,
+                    raw={
+                        **parameter,
+                        "_stage_process_code": code,
+                        "_stage_parameter_profile": stage.get("parameter_profile"),
+                    },
                 )
             for equipment_index, equipment in enumerate(stage.get("equipment_entities") or []):
                 if not isinstance(equipment, dict):
@@ -474,6 +495,12 @@ def _process_context(claim: dict[str, Any]) -> str:
         str(claim.get("condition") or ""),
     ]
     parts.extend(str(row) for row in claim.get("evidence") or [])
+    raw = claim.get("raw")
+    if isinstance(raw, dict):
+        parts.extend(
+            str(raw.get(key) or "")
+            for key in ("_stage_process_code", "_stage_parameter_profile")
+        )
     return fold(" ".join(parts))
 
 
@@ -737,6 +764,8 @@ def _unit(value: Any) -> str:
         return "m^-2"
     if compact in {"g/cm3", "gcm3", "g/cc", "gcc"}:
         return "g/cm3"
+    if raw_compact.replace("^", "") in {"j/mm3", "jmm-3", "j·mm-3"}:
+        return "j/mm3"
     if compact in {"cycle", "cycles"}:
         return "cycle"
     if compact in {"s", "sec", "second", "seconds"}:
