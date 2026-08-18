@@ -40,7 +40,7 @@
       ],
       "properties": {
         "material_id": {"type": "string", "minLength": 1},
-        "material_name": {"type": "string", "minLength": 1},
+        "material_name": {"type": "string", "minLength": 1, "maxLength": 120},
         "sample_id": {"type": ["string", "null"]},
         "state": {"type": ["string", "null"]},
         "region": {"type": ["string", "null"]},
@@ -48,8 +48,13 @@
         "role": {"enum": ["Target", "Reference"]}
       }
     },
-    "semantic_key": {"type": "string", "minLength": 1},
-    "name_raw": {"type": "string", "minLength": 1},
+    "semantic_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$"
+    },
+    "name_raw": {"type": "string", "minLength": 1, "maxLength": 120},
     "value": {
       "type": "object",
       "additionalProperties": false,
@@ -68,14 +73,14 @@
         "kind": {
           "enum": ["scalar", "range", "inequality", "categorical", "boolean", "unknown"]
         },
-        "raw": {"type": ["string", "null"]},
+        "raw": {"type": ["string", "null"], "maxLength": 240},
         "number": {"type": ["number", "null"]},
         "min": {"type": ["number", "null"]},
         "max": {"type": ["number", "null"]},
         "operator": {"enum": ["<", "<=", ">", ">=", null]},
         "bound": {"type": ["number", "null"]},
         "stddev": {"type": ["number", "null"]},
-        "text": {"type": ["string", "null"]}
+        "text": {"type": ["string", "null"], "maxLength": 1000}
       }
     },
     "unit_raw": {"type": ["string", "null"]},

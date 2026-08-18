@@ -494,6 +494,38 @@ def _validate_paper(
             claim_ids.add(claim_id)
         if clean_claim.get("paper_key") != paper["paper_key"]:
             finding("paper_key_mismatch", claims_path, f"line {line_number}")
+        owner = clean_claim.get("owner")
+        if isinstance(owner, dict):
+            owner_name = owner.get("material_name")
+            if isinstance(owner_name, str):
+                owner_key = _title_key(owner_name)
+                paper_title_key = _title_key(paper["paper_key"])
+                if owner_key and (
+                    owner_key == paper_title_key
+                    or (
+                        len(owner_key) >= int(len(paper_title_key) * 0.65)
+                        and owner_key in paper_title_key
+                    )
+                ):
+                    finding(
+                        "paper_title_used_as_material_owner",
+                        claims_path,
+                        f"line {line_number}: {owner_name!r}",
+                    )
+        semantic_key = clean_claim.get("semantic_key")
+        if isinstance(semantic_key, str) and (
+            re.match(
+                r"^(composition|processing|structure|characterization|properties)\.",
+                semantic_key,
+            )
+            or re.search(r"_report_[0-9]+$", semantic_key)
+            or semantic_key in {"composition", "processing_fact"}
+        ):
+            finding(
+                "non_atomic_semantic_key",
+                claims_path,
+                f"line {line_number}: {semantic_key!r}",
+            )
         for evidence in clean_claim.get("evidence", []):
             if not isinstance(evidence, dict):
                 continue

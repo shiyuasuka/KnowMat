@@ -101,6 +101,18 @@ def test_claim_contract_rejects_missing_owner_and_bad_axis() -> None:
     assert any("allowed enum" in error for error in errors)
 
 
+def test_claim_contract_rejects_sentence_slug_semantic_key() -> None:
+    schema = json.loads(
+        (REPO_ROOT / "schemas/independent_gt/claim.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    claim = _valid_claim()
+    claim["semantic_key"] = "properties.this_is_a_sentence_" + "x" * 80
+    errors = independent_gt._schema_errors(claim, schema)
+    assert any("longer than" in error or "does not match" in error for error in errors)
+
+
 def test_prepared_manifest_has_expected_frozen_corpus() -> None:
     manifest = json.loads(
         (
