@@ -54,7 +54,7 @@
       "maxLength": 80,
       "pattern": "^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$"
     },
-    "name_raw": {"type": "string", "minLength": 1, "maxLength": 120},
+    "name_raw": {"type": "string", "minLength": 1, "maxLength": 80},
     "value": {
       "type": "object",
       "additionalProperties": false,

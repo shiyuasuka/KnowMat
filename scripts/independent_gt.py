@@ -50,6 +50,36 @@ REQUIRED_PAPER_ARTIFACTS = (
     "issues.json",
     "annotation_audit.jsonl",
 )
+GENERIC_SEMANTIC_KEYS = frozenset(
+    {
+        "characterization_method",
+        "composition",
+        "composition_observation",
+        "processing_fact",
+        "processing_observation",
+        "processing_parameter",
+        "properties_observation",
+        "property_observation",
+        "structure_observation",
+    }
+)
+NUMERIC_PROPERTY_KEYS = frozenset(
+    {
+        "creep_life",
+        "elastic_modulus",
+        "elongation",
+        "elongation_at_fracture",
+        "fatigue_life",
+        "fracture_strain",
+        "fracture_toughness",
+        "hardness",
+        "reduction_of_area",
+        "tensile_strength",
+        "ultimate_tensile_strength",
+        "uniform_elongation",
+        "yield_strength",
+    }
+)
 
 
 def _utc_now() -> str:
@@ -519,12 +549,72 @@ def _validate_paper(
                 semantic_key,
             )
             or re.search(r"_report_[0-9]+$", semantic_key)
-            or semantic_key in {"composition", "processing_fact"}
+            or semantic_key in GENERIC_SEMANTIC_KEYS
         ):
             finding(
                 "non_atomic_semantic_key",
                 claims_path,
                 f"line {line_number}: {semantic_key!r}",
+            )
+        name_raw = clean_claim.get("name_raw")
+        if isinstance(name_raw, str):
+            word_count = len(re.findall(r"[A-Za-z0-9Α-ω一-龥]+", name_raw))
+            if word_count > 12 or re.search(r"[.;:]\s*$", name_raw):
+                finding(
+                    "non_atomic_name_raw",
+                    claims_path,
+                    f"line {line_number}: {name_raw!r}",
+                )
+        value = clean_claim.get("value")
+        review_status = clean_claim.get("review_status")
+        if isinstance(value, dict):
+            value_kind = value.get("kind")
+            if value_kind == "scalar" and (
+                not isinstance(value.get("number"), (int, float))
+                or isinstance(value.get("number"), bool)
+                or not isinstance(value.get("raw"), str)
+                or not value.get("raw", "").strip()
+            ):
+                finding("invalid_scalar_value", claims_path, f"line {line_number}")
+            elif value_kind == "range" and (
+                not isinstance(value.get("min"), (int, float))
+                or not isinstance(value.get("max"), (int, float))
+                or value.get("min") > value.get("max")
+            ):
+                finding("invalid_range_value", claims_path, f"line {line_number}")
+            elif value_kind == "inequality" and (
+                value.get("operator") not in {"<", "<=", ">", ">="}
+                or not isinstance(value.get("bound"), (int, float))
+            ):
+                finding("invalid_inequality_value", claims_path, f"line {line_number}")
+            elif value_kind in {"categorical", "boolean"} and not (
+                isinstance(value.get("text"), str) and value.get("text", "").strip()
+            ):
+                finding("invalid_text_value", claims_path, f"line {line_number}")
+            elif value_kind == "unknown" and review_status != "needs_review":
+                finding(
+                    "accepted_unknown_value",
+                    claims_path,
+                    f"line {line_number}: unknown values must remain under review",
+                )
+            if (
+                clean_claim.get("axis") == "Properties"
+                and semantic_key in NUMERIC_PROPERTY_KEYS
+                and value_kind not in {"scalar", "range", "inequality"}
+            ):
+                finding(
+                    "numeric_property_encoded_as_text",
+                    claims_path,
+                    f"line {line_number}: {semantic_key}",
+                )
+        if clean_claim.get("origin") == "chart_digitization" and not any(
+            isinstance(row, dict) and row.get("source_type") == "csv"
+            for row in clean_claim.get("evidence", [])
+        ):
+            finding(
+                "chart_claim_without_csv_evidence",
+                claims_path,
+                f"line {line_number}",
             )
         for evidence in clean_claim.get("evidence", []):
             if not isinstance(evidence, dict):
