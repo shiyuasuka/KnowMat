@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://knowmat.local/schemas/independent-gt-curve-audit-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["paper_key", "series"],
+  "properties": {
+    "paper_key": {"type": "string", "minLength": 1},
+    "series": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "series_id",
+          "figure_id",
+          "csv_path",
+          "csv_sha256",
+          "series_label",
+          "owner",
+          "x_axis",
+          "y_axis",
+          "row_count",
+          "disposition",
+          "reason_codes",
+          "locator",
+          "source_evidence",
+          "notes"
+        ],
+        "properties": {
+          "series_id": {"type": "string", "minLength": 1},
+          "figure_id": {"type": "string", "minLength": 1},
+          "csv_path": {"type": "string", "minLength": 1},
+          "csv_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "series_label": {"type": ["string", "null"]},
+          "owner": {"type": ["string", "null"]},
+          "x_axis": {"type": "object"},
+          "y_axis": {"type": "object"},
+          "row_count": {"type": "integer", "minimum": 0},
+          "disposition": {"enum": ["accepted", "ignored", "quarantined"]},
+          "reason_codes": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          },
+          "locator": {"type": "string", "minLength": 1},
+          "source_evidence": {"type": "string", "minLength": 1},
+          "notes": {"type": ["string", "null"]}
+        }
+      }
+    }
+  }
+}

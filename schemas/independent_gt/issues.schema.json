@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://knowmat.local/schemas/independent-gt-issues-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["paper_key", "issues"],
+  "properties": {
+    "paper_key": {"type": "string", "minLength": 1},
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issue_id", "code", "severity", "target_id", "message", "evidence"],
+        "properties": {
+          "issue_id": {"type": "string", "minLength": 1},
+          "code": {"type": "string", "minLength": 1},
+          "severity": {"enum": ["review", "quarantine", "fatal"]},
+          "target_id": {"type": ["string", "null"]},
+          "message": {"type": "string", "minLength": 1},
+          "evidence": {"type": "array", "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    }
+  }
+}

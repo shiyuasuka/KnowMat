@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://knowmat.local/schemas/independent-gt-claim-v1.json",
+  "title": "KnowMat independent expert GT claim",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "claim_id",
+    "paper_key",
+    "axis",
+    "owner",
+    "semantic_key",
+    "name_raw",
+    "value",
+    "unit_raw",
+    "condition",
+    "origin",
+    "evidence",
+    "confidence",
+    "review_status",
+    "notes"
+  ],
+  "properties": {
+    "claim_id": {"type": "string", "pattern": "^clm_[0-9]{4,}$"},
+    "paper_key": {"type": "string", "minLength": 1},
+    "axis": {
+      "enum": ["Composition", "Processing", "Structure", "Characterization", "Properties"]
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "material_id",
+        "material_name",
+        "sample_id",
+        "state",
+        "region",
+        "orientation",
+        "role"
+      ],
+      "properties": {
+        "material_id": {"type": "string", "minLength": 1},
+        "material_name": {"type": "string", "minLength": 1},
+        "sample_id": {"type": ["string", "null"]},
+        "state": {"type": ["string", "null"]},
+        "region": {"type": ["string", "null"]},
+        "orientation": {"type": ["string", "null"]},
+        "role": {"enum": ["Target", "Reference"]}
+      }
+    },
+    "semantic_key": {"type": "string", "minLength": 1},
+    "name_raw": {"type": "string", "minLength": 1},
+    "value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "raw",
+        "number",
+        "min",
+        "max",
+        "operator",
+        "bound",
+        "stddev",
+        "text"
+      ],
+      "properties": {
+        "kind": {
+          "enum": ["scalar", "range", "inequality", "categorical", "boolean", "unknown"]
+        },
+        "raw": {"type": ["string", "null"]},
+        "number": {"type": ["number", "null"]},
+        "min": {"type": ["number", "null"]},
+        "max": {"type": ["number", "null"]},
+        "operator": {"enum": ["<", "<=", ">", ">=", null]},
+        "bound": {"type": ["number", "null"]},
+        "stddev": {"type": ["number", "null"]},
+        "text": {"type": ["string", "null"]}
+      }
+    },
+    "unit_raw": {"type": ["string", "null"]},
+    "condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw", "temperature_raw", "time_raw", "rate_raw", "environment_raw", "details"],
+      "properties": {
+        "raw": {"type": ["string", "null"]},
+        "temperature_raw": {"type": ["string", "null"]},
+        "time_raw": {"type": ["string", "null"]},
+        "rate_raw": {"type": ["string", "null"]},
+        "environment_raw": {"type": ["string", "null"]},
+        "details": {"type": "object"}
+      }
+    },
+    "origin": {
+      "enum": [
+        "author_experiment",
+        "author_computation",
+        "literature_experiment",
+        "literature_computation",
+        "chart_digitization",
+        "provided",
+        "inferred",
+        "unknown"
+      ]
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_type", "path", "sha256", "locator", "quote", "columns"],
+        "properties": {
+          "source_type": {"enum": ["markdown", "csv"]},
+          "path": {"type": "string", "minLength": 1},
+          "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+          "locator": {"type": "string", "minLength": 1},
+          "quote": {"type": "string", "minLength": 1},
+          "columns": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "uniqueItems": true
+          }
+        }
+      }
+    },
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "review_status": {"enum": ["accepted", "needs_review"]},
+    "notes": {"type": ["string", "null"]}
+  }
+}

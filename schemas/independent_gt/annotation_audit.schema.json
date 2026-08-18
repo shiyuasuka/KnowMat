@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://knowmat.local/schemas/independent-gt-annotation-audit-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "audit_id",
+    "paper_key",
+    "phase",
+    "actor",
+    "action",
+    "target_type",
+    "target_id",
+    "before",
+    "after",
+    "reason",
+    "evidence"
+  ],
+  "properties": {
+    "audit_id": {"type": "string", "minLength": 1},
+    "paper_key": {"type": "string", "minLength": 1},
+    "phase": {"enum": ["annotation", "blind_review", "adjudication"]},
+    "actor": {"type": "string", "minLength": 1},
+    "action": {"enum": ["create", "update", "delete", "quarantine", "restore"]},
+    "target_type": {"enum": ["claim", "curve_series", "owner", "projection"]},
+    "target_id": {"type": "string", "minLength": 1},
+    "before": {},
+    "after": {},
+    "reason": {"type": "string", "minLength": 1},
+    "evidence": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  }
+}
