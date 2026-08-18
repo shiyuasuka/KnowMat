@@ -258,6 +258,18 @@ _MICROANALYSIS_LOCATION_GROUP = re.compile(
     r"((?:\s*(?:,|and|&)\s*(?:(?:point|spot|area|location)s?\s*)?"
     r"#?\s*[A-Za-z0-9._-]+)+)"
 )
+_NUMERIC_MICROANALYSIS_LOCATION = re.compile(r"^[1-9]\d*$")
+_MICROANALYSIS_METHOD = re.compile(
+    r"(?i)\b(?:eds|edx|energy[\s-]+dispersive(?:[\s-]+x[\s-]*ray)?)\b"
+)
+_SOURCE_SAMPLE_NOUN = re.compile(
+    r"(?i)\b(?:samples?|specimens?|materials?|powders?|feedstocks?)\b"
+)
+_SOURCE_STATE_QUALIFIER = re.compile(
+    r"(?i)(?<![A-Za-z0-9])([-+]?\d+(?:\.\d+)?)\s*"
+    r"(°\s*C|deg(?:ree)?s?\s*C|K|h|hr|hrs|hours?|min|mins|minutes?|"
+    r"s|sec|seconds?)\b"
+)
 _CELSIUS_SERIES = re.compile(
     r"(?i)(?<![A-Za-z0-9])"
     r"([-+]?\d{2,4}(?:\.\d+)?(?:\s*(?:,|and|to|[-–—])\s*"
@@ -3890,6 +3902,606 @@ def _recover_microanalysis_location_owners(
     return fact_rows, issues
 
 
+@dataclass(frozen=True)
+class _NumericMicroanalysisOwner:
+    target: str
+    state: str
+    binding_evidence: tuple[str, ...]
+    owner_evidence: tuple[str, ...]
+
+
+def _numeric_microanalysis_location(fact: AxisFact) -> str:
+    """Return one bare positive-integer observation label from a fact."""
+
+    labels = {
+        str(int(label))
+        for value in (fact.sample_id_raw, fact.data.get("sample_id"))
+        if (label := str(value or "").strip())
+        and _NUMERIC_MICROANALYSIS_LOCATION.fullmatch(label)
+    }
+    return next(iter(labels)) if len(labels) == 1 else ""
+
+
+def _table_cells(line: str) -> list[str]:
+    """Return presentation-stripped cells for one Markdown or HTML row."""
+
+    stripped = line.strip()
+    if stripped.startswith("|") and stripped.count("|") >= 2:
+        return [cell.strip() for cell in stripped.strip("|").split("|")]
+    if "<tr" not in stripped.casefold():
+        return []
+    cells = re.findall(
+        r"(?is)<t[dh]\b[^>]*>(.*?)</t[dh]>",
+        stripped,
+    )
+    return [
+        re.sub(r"(?is)<[^>]+>", "", cell)
+        .replace("&nbsp;", " ")
+        .strip()
+        for cell in cells
+    ]
+
+
+def _source_numeric_eds_table_locations(source_text: str) -> set[str]:
+    """Collect numeric headers from source tables explicitly labelled EDS/EDX."""
+
+    lines = (source_text or "").splitlines()
+    locations: set[str] = set()
+    for line_index, line in enumerate(lines):
+        cells = _table_cells(line)
+        if not cells:
+            continue
+        first = unicodedata.normalize("NFKC", cells[0]).strip()
+        header_cells = cells[1:] if (
+            not first
+            or re.search(r"(?i)\b(?:point|spot|area|location)s?\b", first)
+        ) else []
+        nonempty = [cell.strip() for cell in header_cells if cell.strip()]
+        if not nonempty or not all(
+            _NUMERIC_MICROANALYSIS_LOCATION.fullmatch(cell) for cell in nonempty
+        ):
+            continue
+        window = "\n".join(lines[max(0, line_index - 4) : line_index + 2])
+        if not _MICROANALYSIS_METHOD.search(window) or not re.search(
+            r"(?i)\b(?:point|spot|area|location)s?\b", window
+        ):
+            continue
+        locations.update(str(int(cell)) for cell in nonempty)
+    return locations
+
+
+def _numeric_microanalysis_composition_row(
+    fact: AxisFact, *, source_locations: set[str]
+) -> bool:
+    """Return whether a bare number is a grounded multi-element EDS location."""
+
+    if (
+        not isinstance(fact, CompositionFact)
+        or fact.fact_type != "composition_observation"
+    ):
+        return False
+    location = _numeric_microanalysis_location(fact)
+    if not location or location not in source_locations:
+        return False
+    data = fact.data
+    if (
+        str(data.get("source_type") or "").strip().casefold() != "measured"
+        or str(data.get("data_source") or "").strip().casefold() != "table"
+    ):
+        return False
+    context = "\n".join(
+        [
+            str(data.get("measurement") or ""),
+            str(data.get("raw_expression") or ""),
+            *fact.source_evidence,
+        ]
+    )
+    explicit_header = any(
+        location
+        in {
+            str(int(cell))
+            for cell in _table_cells(line)[1:]
+            if _NUMERIC_MICROANALYSIS_LOCATION.fullmatch(cell.strip())
+        }
+        for evidence in fact.source_evidence
+        for line in evidence.splitlines()
+        if _table_cells(line)
+    )
+    method_context = bool(
+        _MICROANALYSIS_METHOD.search(context)
+        and re.search(r"(?i)\b(?:point|spot|area|location)s?\b", context)
+    )
+    if not (method_context or explicit_header):
+        return False
+    components = [
+        row for row in data.get("components") or [] if isinstance(row, dict)
+    ]
+    reported = [
+        row
+        for row in components
+        if str(row.get("name_raw") or "").strip()
+        and str(row.get("value_raw") or "").strip()
+        and re.search(r"\d", str(row.get("value_raw") or ""))
+    ]
+    return len(reported) >= 2
+
+
+def _source_discourse_sentences(paragraph: str) -> list[str]:
+    """Split prose without breaking common figure/reference abbreviations."""
+
+    protected = re.sub(
+        r"(?i)\b(figs?|refs?|eqs?)\.",
+        lambda match: match.group(0).replace(".", "\u2024"),
+        paragraph,
+    )
+    protected = protected.replace("e.g.", "e\u2024g\u2024").replace(
+        "i.e.", "i\u2024e\u2024"
+    )
+    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9(])", protected)
+    return [sentence.replace("\u2024", ".").strip() for sentence in sentences if sentence.strip()]
+
+
+def _numeric_microanalysis_mentions(text: str) -> tuple[str, ...]:
+    """Return all numeric Point/Spot/Area/Location identifiers in source order."""
+
+    found: list[tuple[int, str]] = []
+    covered: list[tuple[int, int]] = []
+    for group in _MICROANALYSIS_LOCATION_GROUP.finditer(text):
+        identifiers = [group.group(2)]
+        identifiers.extend(
+            match.group(1)
+            for match in re.finditer(
+                r"(?i)(?:,|and|&)\s*"
+                r"(?:(?:point|spot|area|location)s?\s*)?"
+                r"#?\s*([A-Za-z0-9._-]+)",
+                group.group(3),
+            )
+        )
+        for offset, identifier in enumerate(identifiers):
+            if _NUMERIC_MICROANALYSIS_LOCATION.fullmatch(identifier):
+                found.append((group.start() + offset, str(int(identifier))))
+        covered.append(group.span())
+    for match in _MICROANALYSIS_LOCATION_SEARCH.finditer(text):
+        if any(start <= match.start() < end for start, end in covered):
+            continue
+        identifier = match.group(2)
+        if _NUMERIC_MICROANALYSIS_LOCATION.fullmatch(identifier):
+            found.append((match.start(), str(int(identifier))))
+    return tuple(dict.fromkeys(value for _, value in sorted(found)))
+
+
+def _target_family(index: _IdentityIndex, target: str) -> str:
+    return index.state_family_base.get(target, target)
+
+
+def _target_is_production_sample(index: _IdentityIndex, target: str) -> bool:
+    return any(anchor.role == "Target" for anchor in index.anchors.get(target, []))
+
+
+def _explicit_sample_families(
+    index: _IdentityIndex, sentence: str
+) -> set[str]:
+    """Resolve source-named identities occurring near a material/sample noun."""
+
+    candidates: list[tuple[int, int, set[str]]] = []
+    words = list(re.finditer(r"[A-Za-z0-9_.+/-]+", sentence))
+    for noun in _SOURCE_SAMPLE_NOUN.finditer(sentence):
+        before = [match for match in words if match.end() <= noun.start()][-10:]
+        for start in range(len(before)):
+            for end in range(start + 1, len(before) + 1):
+                phrase = sentence[before[start].start() : before[end - 1].end()]
+                targets = {
+                    target
+                    for target in index.resolve_exact(phrase)
+                    if _target_is_production_sample(index, target)
+                }
+                families = {_target_family(index, target) for target in targets}
+                if families:
+                    candidates.append(
+                        (len(families), -(end - start), families)
+                    )
+    # OCR/layout extraction can split a noun phrase immediately after a short
+    # source code (for example ``... aged GA`` / ``samples with ...``).  Accept
+    # a terminal identity only in a microscopy/state sentence; ordinary bare
+    # acronyms remain ineligible evidence.
+    if not candidates and re.search(
+        r"(?i)\b(?:eds|edx|sem|micrographs?|microscopy)\b", sentence
+    ):
+        trailing = words[-8:]
+        for start in range(len(trailing)):
+            phrase = sentence[trailing[start].start() : trailing[-1].end()]
+            targets = {
+                target
+                for target in index.resolve_exact(phrase)
+                if _target_is_production_sample(index, target)
+            }
+            families = {_target_family(index, target) for target in targets}
+            if families:
+                candidates.append((len(families), -(len(trailing) - start), families))
+    if not candidates:
+        return set()
+    best_cardinality = min(row[0] for row in candidates)
+    best_length = min(
+        row[1] for row in candidates if row[0] == best_cardinality
+    )
+    best = [
+        families
+        for cardinality, length, families in candidates
+        if cardinality == best_cardinality and length == best_length
+    ]
+    merged = set().union(*best)
+    return merged if len(merged) == best_cardinality else set()
+
+
+def _source_state_descriptor(
+    sentence: str,
+) -> tuple[str, tuple[str, ...]] | None:
+    """Read a state category plus only unit-qualified process numbers."""
+
+    normalized = re.sub(
+        r"\^?\s*\\circ\s*(?:\{\s*C\s*\}|C)",
+        "°C",
+        unicodedata.normalize("NFKC", sentence),
+        flags=re.IGNORECASE,
+    )
+    category = next(
+        (
+            name
+            for name, pattern in _STATE_CATEGORY_PATTERNS
+            if pattern.search(normalized)
+        ),
+        "",
+    )
+    qualifiers: list[str] = []
+    for match in _SOURCE_STATE_QUALIFIER.finditer(normalized):
+        number = match.group(1)
+        unit = re.sub(r"\s+", "", match.group(2).casefold())
+        unit = {
+            "degreec": "°c",
+            "degreesc": "°c",
+            "hr": "h",
+            "hrs": "h",
+            "hour": "h",
+            "hours": "h",
+            "mins": "min",
+            "minute": "min",
+            "minutes": "min",
+            "sec": "s",
+            "seconds": "s",
+        }.get(unit, unit)
+        qualifiers.append(number + unit)
+    if not category and qualifiers:
+        category = "qualified"
+    if not category:
+        return None
+    return category, tuple(dict.fromkeys(qualifiers))
+
+
+def _target_state_candidates(
+    index: _IdentityIndex,
+    *,
+    families: set[str],
+    descriptor: tuple[str, tuple[str, ...]],
+) -> dict[str, list[InventoryAnchor]]:
+    """Find state owners in named families compatible with one source span."""
+
+    category, qualifiers = descriptor
+    compatible: dict[str, list[tuple[tuple[int, int], InventoryAnchor]]] = {}
+    for target, anchors in index.anchors.items():
+        if families and _target_family(index, target) not in families:
+            continue
+        for anchor in anchors:
+            candidate = _state_descriptor(anchor.state_raw)
+            if anchor.role != "Target" or candidate is None:
+                continue
+            candidate_category, candidate_qualifiers = candidate
+            if category != "qualified" and candidate_category != category:
+                continue
+            if not set(qualifiers) <= set(candidate_qualifiers):
+                continue
+            extra = len(set(candidate_qualifiers) - set(qualifiers))
+            rank = (int(set(candidate_qualifiers) != set(qualifiers)), extra)
+            compatible.setdefault(target, []).append((rank, anchor))
+    if not compatible:
+        return {}
+    best_rank = min(
+        rank for rows in compatible.values() for rank, _ in rows
+    )
+    compatible_anchors = {
+        target: [anchor for rank, anchor in rows if rank == best_rank]
+        for target, rows in compatible.items()
+        if any(rank == best_rank for rank, _ in rows)
+    }
+    qualified = {
+        target: anchors
+        for target, anchors in compatible_anchors.items()
+        if target in index.state_family_base
+    }
+    return qualified or compatible_anchors
+
+
+def _select_source_span_owner(
+    index: _IdentityIndex,
+    sentence: str,
+    active: _NumericMicroanalysisOwner | None,
+) -> tuple[_NumericMicroanalysisOwner | None, bool]:
+    """Update one paragraph's active owner from explicit source grammar."""
+
+    families = _explicit_sample_families(index, sentence)
+    descriptor = _source_state_descriptor(sentence)
+    context_changed = bool(families)
+    if not families:
+        if active is None:
+            return None, False
+        if descriptor is None:
+            return active, False
+        active_family = {_target_family(index, active.target)}
+        candidates = _target_state_candidates(
+            index, families=active_family, descriptor=descriptor
+        )
+        if len(candidates) != 1:
+            return active, False
+        selected_target = next(iter(candidates))
+        if selected_target != active.target:
+            return active, False
+        return active, False
+    if descriptor is None:
+        if active is not None and (
+            not families
+            or _target_family(index, active.target) in families
+        ):
+            return active, context_changed
+        return None, context_changed
+    if not families:
+        return None, context_changed
+    candidates = _target_state_candidates(
+        index, families=families, descriptor=descriptor
+    )
+    if len(candidates) != 1:
+        return None, context_changed
+    target, anchors = next(iter(candidates.items()))
+    described = [
+        (anchor, _state_descriptor(anchor.state_raw)) for anchor in anchors
+    ]
+    explicit = [
+        row
+        for row in described
+        if row[1] is not None and not row[1][0].startswith("raw:")
+    ]
+    if explicit:
+        anchors = [anchor for anchor, _ in explicit]
+    states = {
+        str(anchor.state_raw).strip()
+        for anchor in anchors
+        if str(anchor.state_raw or "").strip()
+    }
+    state_descriptors = {_state_descriptor(state) for state in states}
+    if len(state_descriptors) != 1 or not states:
+        return None, context_changed
+    state = min(states, key=lambda value: (len(value), value.casefold()))
+    state, complete_state_evidence = _microanalysis_complete_owner_state(
+        index, target, state
+    )
+    owner_evidence = tuple(
+        dict.fromkeys(
+            [
+                *(
+                    evidence
+                    for anchor in anchors
+                    for evidence in anchor.source_evidence
+                    if str(evidence).strip()
+                ),
+                *complete_state_evidence,
+            ]
+        )
+    )
+    return (
+        _NumericMicroanalysisOwner(
+            target=target,
+            state=state,
+            binding_evidence=(sentence,),
+            owner_evidence=owner_evidence,
+        ),
+        context_changed,
+    )
+
+
+def _source_numeric_microanalysis_owner_map(
+    index: _IdentityIndex, source_text: str
+) -> dict[str, _NumericMicroanalysisOwner]:
+    """Map numeric EDS locations to one source-backed sample/state owner."""
+
+    candidates: dict[str, dict[str, _NumericMicroanalysisOwner]] = {}
+    active: _NumericMicroanalysisOwner | None = None
+    for raw_paragraph in (source_text or "").splitlines():
+        paragraph = raw_paragraph.strip()
+        if not paragraph:
+            continue
+        if paragraph.startswith("#"):
+            active = None
+            continue
+        paragraph_has_eds = bool(_MICROANALYSIS_METHOD.search(paragraph))
+        for sentence in _source_discourse_sentences(paragraph):
+            selected, context_changed = _select_source_span_owner(
+                index, sentence, active
+            )
+            if selected is not None:
+                if active is not None and active.target == selected.target:
+                    selected = _NumericMicroanalysisOwner(
+                        target=selected.target,
+                        state=selected.state,
+                        binding_evidence=tuple(
+                            dict.fromkeys(
+                                [*active.binding_evidence, *selected.binding_evidence]
+                            )
+                        ),
+                        owner_evidence=tuple(
+                            dict.fromkeys(
+                                [*active.owner_evidence, *selected.owner_evidence]
+                            )
+                        ),
+                    )
+                active = selected
+            elif context_changed and paragraph_has_eds:
+                active = None
+            if active is None or not paragraph_has_eds:
+                continue
+            for location in _numeric_microanalysis_mentions(sentence):
+                located = _NumericMicroanalysisOwner(
+                    target=active.target,
+                    state=active.state,
+                    binding_evidence=tuple(
+                        dict.fromkeys([*active.binding_evidence, sentence])
+                    ),
+                    owner_evidence=active.owner_evidence,
+                )
+                existing = candidates.setdefault(location, {}).get(active.target)
+                if existing is None:
+                    candidates[location][active.target] = located
+                else:
+                    candidates[location][active.target] = _NumericMicroanalysisOwner(
+                        target=active.target,
+                        state=active.state,
+                        binding_evidence=tuple(
+                            dict.fromkeys(
+                                [
+                                    *existing.binding_evidence,
+                                    *located.binding_evidence,
+                                ]
+                            )
+                        ),
+                        owner_evidence=tuple(
+                            dict.fromkeys(
+                                [*existing.owner_evidence, *active.owner_evidence]
+                            )
+                        ),
+                    )
+    return {
+        location: next(iter(owners.values()))
+        for location, owners in candidates.items()
+        if len(owners) == 1
+    }
+
+
+def _recover_numeric_microanalysis_location_owners(
+    anchors: Sequence[InventoryAnchor], facts: Sequence[AxisFact], source_text: str
+) -> tuple[list[AxisFact], list[MaterializeIssue]]:
+    """Attach bare numeric EDS rows to one source-proven target owner."""
+
+    fact_rows = list(facts)
+    index = _build_identity_index(anchors, fact_rows)
+    source_locations = _source_numeric_eds_table_locations(source_text)
+    source_owners = _source_numeric_microanalysis_owner_map(index, source_text)
+    recovered: dict[str, dict[str, Any]] = {}
+    for fact_index, fact in enumerate(fact_rows):
+        if not _numeric_microanalysis_composition_row(
+            fact, source_locations=source_locations
+        ):
+            continue
+        location_id = _numeric_microanalysis_location(fact)
+        selected = source_owners.get(location_id)
+        if selected is None:
+            continue
+        observation_location = f"Point {location_id}"
+        data = deepcopy(fact.data)
+        before_state = str(data.get("material_state") or "").strip()
+        data["sample_id"] = observation_location
+        data["material_state"] = selected.state
+        data["_microanalysis_owner_recovered"] = True
+        data["source_evidence"] = list(
+            dict.fromkeys(
+                [
+                    *_evidence(data.get("source_evidence")),
+                    *selected.binding_evidence,
+                    *selected.owner_evidence,
+                ]
+            )
+        )
+        routed = fact.model_copy(
+            update={
+                "sample_id_raw": index.display_label(selected.target),
+                "data": data,
+                "source_evidence": list(
+                    dict.fromkeys(
+                        [
+                            *fact.source_evidence,
+                            *selected.binding_evidence,
+                            *selected.owner_evidence,
+                        ]
+                    )
+                ),
+            }
+        )
+        fact_rows[fact_index] = routed
+        audit = recovered.setdefault(
+            selected.target,
+            {
+                "after_owner": index.display_label(selected.target),
+                "before_owners": [],
+                "locations": [],
+                "facts": [],
+                "binding_evidence": [],
+                "owner_evidence": [],
+                "state_corrections": [],
+            },
+        )
+        audit["before_owners"].append(str(fact.sample_id_raw or "").strip())
+        audit["locations"].append(observation_location)
+        audit["facts"].append(fact.model_dump())
+        audit["binding_evidence"].extend(selected.binding_evidence)
+        audit["owner_evidence"].extend(selected.owner_evidence)
+        if before_state != selected.state:
+            audit["state_corrections"].append(
+                {
+                    "location": observation_location,
+                    "before_state": before_state,
+                    "after_state": selected.state,
+                    "source_evidence": list(selected.binding_evidence),
+                }
+            )
+
+    issues: list[MaterializeIssue] = []
+    for audit in recovered.values():
+        before_owners = list(dict.fromkeys(audit["before_owners"]))
+        locations = list(dict.fromkeys(audit["locations"]))
+        binding_evidence = list(dict.fromkeys(audit["binding_evidence"]))
+        owner_evidence = list(dict.fromkeys(audit["owner_evidence"]))
+        issues.append(
+            MaterializeIssue(
+                code="numeric_microanalysis_owner_recovered",
+                sample_id_raw=audit["after_owner"],
+                path=f"items.{audit['after_owner']}.Composition_Observations",
+                message=(
+                    "Numeric measured microanalysis rows were attached to the "
+                    "only source-backed material state owning those locations."
+                ),
+                evidence=[*binding_evidence, *owner_evidence],
+                expected={
+                    "owner": "one explicit target sample and state",
+                    "observation_location": "preserved Point label",
+                },
+                actual={
+                    "before_owner": before_owners[0]
+                    if len(before_owners) == 1
+                    else before_owners,
+                    "after_owner": audit["after_owner"],
+                    "observation_location": locations[0]
+                    if len(locations) == 1
+                    else locations,
+                    "binding_evidence": binding_evidence,
+                    "owner_evidence": owner_evidence,
+                    "state_corrections": audit["state_corrections"],
+                    "facts": audit["facts"],
+                },
+                suggested_action=(
+                    "Review only if the numbered EDS location belongs to a "
+                    "different source sample."
+                ),
+            )
+        )
+    return fact_rows, issues
+
+
 def materialize_candidate(
     anchors: Iterable[InventoryAnchor],
     facts: Iterable[AxisFact],
@@ -3917,9 +4529,15 @@ def materialize_candidate(
             anchor_rows, fact_rows, source_text
         )
     )
+    fact_rows, numeric_microanalysis_owner_issues = (
+        _recover_numeric_microanalysis_location_owners(
+            anchor_rows, fact_rows, source_text or ""
+        )
+    )
     issues = _chart_quarantine_issues_from_text(source_text)
     issues.extend(reference_owner_issues)
     issues.extend(microanalysis_owner_issues)
+    issues.extend(numeric_microanalysis_owner_issues)
     property_context_index = PropertyContextIndex(source_text)
     if quality_gate is not None:
         issues.extend(

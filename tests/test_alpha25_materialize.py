@@ -741,6 +741,258 @@ def test_microanalysis_point_row_stays_unresolved_without_unique_state_owner():
     )
 
 
+def _numeric_eds_fact(
+    location: str = "3",
+    *,
+    evidence: str | None = None,
+    component_count: int = 2,
+    measurement: str = "EDS point analysis",
+) -> CompositionFact:
+    table = evidence or (
+        "| Selected area for EDS point analysis |  |  |\n"
+        "| --- | --- | --- |\n"
+        "|  | 3 | 4 |\n"
+        "| C | 0 | 2.3 |\n"
+        "| Ni | 61.7 | 2.7 |"
+    )
+    components = [
+        {
+            "name_raw": "C",
+            "value_kind": "scalar",
+            "value_raw": "0",
+            "unit_raw": "wt%",
+            "data_nature": "reported",
+        },
+        {
+            "name_raw": "Ni",
+            "value_kind": "scalar",
+            "value_raw": "61.7",
+            "unit_raw": "wt%",
+            "data_nature": "reported",
+        },
+    ][:component_count]
+    return CompositionFact(
+        sample_id_raw=location,
+        fact_type="composition_observation",
+        data={
+            "observation_id": "temporary",
+            "source_type": "measured",
+            "material_state": "not_reported",
+            "sample_id": location,
+            "basis": "wt%",
+            "component_type": "elemental",
+            "components": components,
+            "measurement": measurement,
+            "raw_expression": "C 0, Ni 61.7 wt%",
+            "data_source": "table",
+            "source_evidence": [table],
+            "note": None,
+        },
+        source_evidence=[table],
+        confidence=0.9,
+    )
+
+
+def _state_anchor(sample: str, temperature: int) -> InventoryAnchor:
+    return InventoryAnchor(
+        sample_id_raw=sample,
+        material_name_raw="alloy 625",
+        state_raw=f"sintered at {temperature} °C",
+        role="Target",
+        data_nature="Experimental",
+        source_evidence=[f"{sample} sample sintered at {temperature} °C"],
+        confidence=0.95,
+    )
+
+
+def test_numeric_microanalysis_row_routes_to_unique_source_state_owner():
+    fact = _numeric_eds_fact()
+    source = (
+        "EDS analysis of the GA sample sintered at 1300 °C showed that "
+        "Point 3 represented the matrix.\n"
+        + fact.source_evidence[0]
+    )
+
+    result = materialize_candidate(
+        [_state_anchor("GA", 1225), _state_anchor("GA", 1300)],
+        [fact],
+        source_text=source,
+    )
+
+    assert [item["Sample_ID"] for item in result.document["items"]] == [
+        "GA [sintered at 1300 °C]"
+    ]
+    observation = result.document["items"][0]["Extracted_Data"]["Composition"][
+        "Composition_Observations"
+    ][0]
+    assert observation["sample_id"] == "Point 3"
+    assert observation["material_state"] == "sintered at 1300 °C"
+    assert "_microanalysis_owner_recovered" not in observation
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "numeric_microanalysis_owner_recovered"
+    )
+    assert issue.actual["before_owner"] == "3"
+    assert issue.actual["after_owner"] == "GA [sintered at 1300 °C]"
+    assert issue.actual["observation_location"] == "Point 3"
+    assert issue.actual["facts"] == [fact.model_dump()]
+    assert any("Point 3 represented the matrix" in row for row in issue.evidence)
+
+
+@pytest.mark.parametrize(
+    ("fact", "source"),
+    [
+        (
+            _numeric_eds_fact(
+                evidence=(
+                    "| Selected area for EDS point analysis |  |\n"
+                    "| --- | --- |\n"
+                    "|  | 4 |\n"
+                    "| C | 2.3 |\n"
+                    "| Ni | 2.7 |"
+                )
+            ),
+            (
+                "EDS analysis of the GA sample sintered at 1300 °C showed "
+                "that Point 3 represented the matrix.\n"
+                "| Selected area for EDS point analysis |  |\n"
+                "| --- | --- |\n"
+                "|  | 4 |\n"
+                "| C | 2.3 |\n"
+                "| Ni | 2.7 |"
+            ),
+        ),
+        (
+            _numeric_eds_fact(component_count=1),
+            (
+                "EDS analysis of the GA sample sintered at 1300 °C showed "
+                "that Point 3 represented the matrix.\n"
+                "| Selected area for EDS point analysis |  |  |\n"
+                "| --- | --- | --- |\n"
+                "|  | 3 | 4 |\n"
+                "| C | 0 | 2.3 |\n"
+                "| Ni | 61.7 | 2.7 |"
+            ),
+        ),
+        (
+            _numeric_eds_fact(measurement="fatigue specimen analysis"),
+            (
+                "Fatigue tests on the GA sample sintered at 1300 °C used "
+                "Specimen 3.\n"
+                "| Specimen | Stress | Life |\n"
+                "| 3 | 536.78 | 1.68e6 |"
+            ),
+        ),
+        (
+            _numeric_eds_fact(
+                evidence=(
+                    "| Mechanical test point | 3 | 4 |\n"
+                    "| --- | --- | --- |\n"
+                    "| Stress | 500 | 525 |\n"
+                    "| Strain | 0.1 | 0.2 |"
+                )
+            ),
+            (
+                "The GA sample sintered at 1300 °C was mechanically tested.\n"
+                "| Mechanical test point | 3 | 4 |\n"
+                "| --- | --- | --- |\n"
+                "| Stress | 500 | 525 |\n"
+                "| Strain | 0.1 | 0.2 |"
+            ),
+        ),
+    ],
+    ids=(
+        "missing_numeric_header",
+        "single_element",
+        "fatigue_table",
+        "non_eds_numeric_table",
+    ),
+)
+def test_unsafe_numeric_rows_remain_unresolved(
+    fact: CompositionFact, source: str
+):
+    result = materialize_candidate(
+        [_state_anchor("GA", 1225), _state_anchor("GA", 1300)],
+        [fact],
+        source_text=source,
+    )
+
+    assert result.document["items"] == []
+    assert any(row.code == "unresolved_sample_alias" for row in result.issues)
+    assert not any(
+        row.code == "numeric_microanalysis_owner_recovered"
+        for row in result.issues
+    )
+
+
+def test_numeric_microanalysis_conflicting_source_owners_remain_unresolved():
+    fact = _numeric_eds_fact()
+    source = (
+        "EDS analysis of the GA sample sintered at 1300 °C showed Point 3.\n"
+        "EDS analysis of the WA sample sintered at 1300 °C showed Point 3.\n"
+        + fact.source_evidence[0]
+    )
+
+    result = materialize_candidate(
+        [
+            _state_anchor("GA", 1225),
+            _state_anchor("GA", 1300),
+            _state_anchor("WA", 1225),
+            _state_anchor("WA", 1300),
+        ],
+        [fact],
+        source_text=source,
+    )
+
+    assert result.document["items"] == []
+    assert any(row.code == "unresolved_sample_alias" for row in result.issues)
+    assert not any(
+        row.code == "numeric_microanalysis_owner_recovered"
+        for row in result.issues
+    )
+
+
+def test_numeric_microanalysis_multiple_compatible_targets_remain_unresolved():
+    fact = _numeric_eds_fact()
+    source = (
+        "EDS analysis of the GA sample sintered at 1300 °C showed Point 3.\n"
+        + fact.source_evidence[0]
+    )
+
+    result = materialize_candidate(
+        [
+            InventoryAnchor(
+                sample_id_raw="GA",
+                material_name_raw="alloy 625",
+                state_raw="as-sintered at 1300 °C",
+                role="Target",
+                data_nature="Experimental",
+                source_evidence=["GA was as-sintered at 1300 °C"],
+                confidence=0.95,
+            ),
+            InventoryAnchor(
+                sample_id_raw="GA",
+                material_name_raw="alloy 625",
+                state_raw="directly sintered at 1300 °C",
+                role="Target",
+                data_nature="Experimental",
+                source_evidence=["GA was directly sintered at 1300 °C"],
+                confidence=0.95,
+            ),
+        ],
+        [fact],
+        source_text=source,
+    )
+
+    assert result.document["items"] == []
+    assert any(row.code == "unresolved_sample_alias" for row in result.issues)
+    assert not any(
+        row.code == "numeric_microanalysis_owner_recovered"
+        for row in result.issues
+    )
+
+
 def test_non_material_headers_and_test_subsamples_cannot_anchor_items():
     rejected = [
         "Material property",
