@@ -34,6 +34,7 @@ _LINEAR_RATE_UNIT = re.compile(
 _MASS_RATE_UNIT = re.compile(
     r"(?i)^(?:mg|g|kg)/(?:s|min|h|hr|hour)$"
 )
+_POWER_TOKEN = re.compile(r"(?i)(?:^|\s)power(?:$|\s)")
 
 
 def property_name_without_unit_suffix(raw_name: Any) -> str:
@@ -192,6 +193,26 @@ def _process_variant_label(
     return label
 
 
+def _energy_source_qualifier(raw_key: Any) -> str | None:
+    """Return an explicit energy-source label from a reported power name."""
+
+    key = re.sub(r"[_-]+", " ", str(raw_key or "")).strip().casefold()
+    key = re.sub(r"\s+", " ", key)
+    if not _POWER_TOKEN.search(key):
+        return None
+    if re.search(r"\bhot\s+wire\b", key):
+        return "hot_wire"
+    if re.search(r"\blaser\b", key):
+        return "laser"
+    if re.search(r"\b(?:electron\s+beam|e\s+beam)\b", key):
+        return "electron_beam"
+    if re.search(r"\bwire\b", key):
+        return "wire"
+    if re.search(r"\barc\b", key):
+        return "arc"
+    return None
+
+
 def prepare_process_variant_conditions(
     candidate: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -217,6 +238,29 @@ def prepare_process_variant_conditions(
         parameters = stage.get("parameters_raw")
         if not isinstance(parameters, list):
             continue
+
+        energy_rows: list[tuple[int, dict[str, Any], str]] = []
+        for parameter_index, raw in enumerate(parameters):
+            if not isinstance(raw, dict):
+                continue
+            qualifier = _energy_source_qualifier(raw.get("parameter_name_raw"))
+            if qualifier is not None:
+                energy_rows.append((parameter_index, raw, qualifier))
+        if len({qualifier for _, _, qualifier in energy_rows}) >= 2:
+            for parameter_index, raw, qualifier in energy_rows:
+                if raw.get("condition_label_raw"):
+                    continue
+                raw["condition_label_raw"] = qualifier
+                changes.append(
+                    {
+                        "path": (
+                            f"candidate_stages.{stage_index}.parameters_raw."
+                            f"{parameter_index}.condition_label_raw"
+                        ),
+                        "before": None,
+                        "after": qualifier,
+                    }
+                )
 
         alias_rows: list[tuple[int, dict[str, Any], str]] = []
         signatures_by_code: dict[str, set[tuple[str, str]]] = {}

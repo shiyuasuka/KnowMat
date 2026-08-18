@@ -74,6 +74,21 @@ def test_percent_presentation_variants_match() -> None:
     assert value_score(left, right) == 1.0
 
 
+def test_kilowatt_and_watt_values_match_after_conversion() -> None:
+    left = {
+        **_expert(),
+        "unit_raw": "kW",
+        "value": {**_expert()["value"], "number": 5.0, "raw": "5"},
+    }
+    right = {
+        **_expert(),
+        "unit_raw": "W",
+        "value": {**_expert()["value"], "number": 5000.0, "raw": "5000"},
+    }
+
+    assert value_score(left, right) == 1.0
+
+
 def test_core_tensile_alias_does_not_match_inside_crystallographic_word() -> None:
     crystallographic = {
         **_expert(),
@@ -114,6 +129,196 @@ def test_process_parameter_semantic_aliases_match(
     }
 
     assert semantic_score(left, right) == 1.0
+
+
+@pytest.mark.parametrize(
+    ("generic_semantic", "specific_semantic", "evidence"),
+    [
+        (
+            "duration",
+            "vacuum_sintering_time",
+            "vacuum sintering at 1255 °C with a holding time of 4 h",
+        ),
+        (
+            "duration",
+            "solution_treatment_time",
+            "solution treated at 1150 °C for 2 h",
+        ),
+        (
+            "duration",
+            "aging_time",
+            "aged at 745 °C for 20 h",
+        ),
+        (
+            "duration",
+            "annealing_time",
+            "annealed at 800 °C for 4 h",
+        ),
+        (
+            "process_temperature",
+            "heat_treatment_temperature",
+            "heat treated at 900 °C for 2 h",
+        ),
+        (
+            "process_temperature",
+            "homogenization_temperature",
+            "homogenized at 1065 °C before aging",
+        ),
+    ],
+)
+def test_guarded_thermal_process_semantic_families_match(
+    generic_semantic: str, specific_semantic: str, evidence: str
+) -> None:
+    left = {
+        **_expert(),
+        "axis": "Processing",
+        "semantic_key": generic_semantic,
+        "name_raw": generic_semantic,
+        "evidence": [evidence],
+    }
+    right = {
+        **_expert(),
+        "axis": "Processing",
+        "semantic_key": specific_semantic,
+        "name_raw": specific_semantic,
+        "evidence": [evidence],
+    }
+
+    assert semantic_score(left, right) == 1.0
+
+
+def test_generic_process_time_is_not_collapsed_without_thermal_context() -> None:
+    generic = {
+        **_expert(),
+        "axis": "Processing",
+        "semantic_key": "duration",
+        "name_raw": "duration",
+        "evidence": ["the mixing time was 4 h"],
+    }
+    delay = {
+        **_expert(),
+        "axis": "Processing",
+        "semantic_key": "interlayer_delay",
+        "name_raw": "interlayer delay",
+        "evidence": ["the interlayer delay was 4 h"],
+    }
+
+    assert semantic_score(generic, delay) < 1.0
+
+
+def test_different_thermal_operations_are_not_collapsed_by_shared_duration() -> None:
+    aged = {
+        **_expert(),
+        "axis": "Processing",
+        "semantic_key": "duration",
+        "name_raw": "duration",
+        "evidence": ["isothermally aged at 800 °C for 4 h"],
+    }
+    dried = {
+        **_expert(),
+        "axis": "Processing",
+        "semantic_key": "powder_drying_time",
+        "name_raw": "powder drying time",
+        "evidence": ["the powder was dried for 4 h"],
+    }
+
+    assert semantic_score(aged, dried) < 1.0
+
+
+def test_distinct_discrete_process_temperatures_do_not_match() -> None:
+    left = {
+        **_expert(),
+        "unit_raw": "°C",
+        "value": {**_expert()["value"], "number": 1225.0, "raw": "1225"},
+    }
+    right = {
+        **_expert(),
+        "unit_raw": "°C",
+        "value": {**_expert()["value"], "number": 1255.0, "raw": "1255"},
+    }
+
+    assert value_score(left, right) == 0.0
+
+
+def test_scalar_temperature_does_not_match_inequality_bound() -> None:
+    scalar = {
+        **_expert(),
+        "unit_raw": "°C",
+        "value": {
+            **_expert()["value"],
+            "kind": "scalar",
+            "number": 1180.0,
+            "raw": "1180",
+        },
+    }
+    inequality = {
+        **_expert(),
+        "unit_raw": "°C",
+        "value": {
+            **_expert()["value"],
+            "kind": "inequality",
+            "number": 1200.0,
+            "raw": "> 1200",
+            "operator": ">",
+            "bound": 1200.0,
+        },
+    }
+
+    assert value_score(scalar, inequality) == 0.0
+
+
+def test_named_thermal_variant_does_not_match_other_temperature_hold() -> None:
+    named = {
+        **_expert(),
+        "axis": "Processing",
+        "semantic_key": "s1290_hold_time",
+        "name_raw": "S1290 hold time",
+        "evidence": [
+            "holding temperatures were 1200, 1220, 1240, 1260, 1280, "
+            "1290 and 1300 °C for 4 h"
+        ],
+    }
+    other = {
+        **_expert(),
+        "axis": "Processing",
+        "semantic_key": "duration",
+        "name_raw": "duration",
+        "evidence": ["the sample was sintered at 1280 °C for 4 h"],
+    }
+
+    assert semantic_score(named, other) == 0.0
+
+
+def test_energy_source_condition_qualifies_power_without_becoming_test_condition() -> None:
+    system = [
+        {
+            **_expert(condition="hot_wire"),
+            "uid": "sys_1",
+            "source": "final_v5",
+            "axis": "Processing",
+            "semantic_key": "power",
+            "name_raw": "power",
+            "value": {**_expert()["value"], "number": 0.3, "raw": "0.3"},
+            "unit_raw": "kW",
+            "evidence": ["a hot wire power of 0.3 kW"],
+        }
+    ]
+    expert = [
+        {
+            **_expert(condition=""),
+            "axis": "Processing",
+            "semantic_key": "hot_wire_power",
+            "name_raw": "hot wire power",
+            "value": {**_expert()["value"], "number": 0.3, "raw": "0.3"},
+            "unit_raw": "kW",
+            "evidence": ["a hot wire power of 0.3 kW"],
+        }
+    ]
+
+    report = compare_claim_sets(system, expert)
+
+    assert report["modes"]["loose"]["micro"]["matched"] == 1
+    assert report["modes"]["strict"]["micro"]["matched"] == 1
 
 
 def test_process_stage_codes_are_not_collapsed_as_parameter_aliases() -> None:

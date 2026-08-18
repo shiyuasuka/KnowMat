@@ -257,6 +257,91 @@ def test_process_variant_conditions_preserve_substeps_and_multi_value_time() -> 
     assert len(changes) == 6
 
 
+def test_process_variant_conditions_preserve_distinct_energy_source_powers() -> None:
+    candidate = {
+        "candidate_stages": [
+            {
+                "parameters_raw": [
+                    {
+                        "parameter_name_raw": "Laser Power",
+                        "value_raw": "5000",
+                        "unit_raw": "W",
+                        "source_evidence": "| Laser Power (W) | 5000 |",
+                    },
+                    {
+                        "parameter_name_raw": "Wire Power",
+                        "value_raw": "300",
+                        "unit_raw": "W",
+                        "source_evidence": "| Wire Power (W) | 300 |",
+                    },
+                ]
+            },
+            {
+                "parameters_raw": [
+                    {
+                        "parameter_name_raw": "input laser power",
+                        "value_raw": "5",
+                        "unit_raw": "kW",
+                        "source_evidence": "an input laser power of 5 kW",
+                    },
+                    {
+                        "parameter_name_raw": "hot wire power",
+                        "value_raw": "0.3",
+                        "unit_raw": "kW",
+                        "source_evidence": "a hot wire power of 0.3 kW",
+                    },
+                ]
+            },
+        ]
+    }
+
+    prepared, changes = prepare_process_variant_conditions(candidate)
+    first_stage = prepared["candidate_stages"][0]["parameters_raw"]
+    second_stage = prepared["candidate_stages"][1]["parameters_raw"]
+
+    assert [row["condition_label_raw"] for row in first_stage] == [
+        "laser",
+        "wire",
+    ]
+    assert [row["condition_label_raw"] for row in second_stage] == [
+        "laser",
+        "hot_wire",
+    ]
+    assert len(changes) == 4
+    assert all(change["before"] is None for change in changes)
+    assert "condition_label_raw" not in candidate["candidate_stages"][0][
+        "parameters_raw"
+    ][0]
+
+
+def test_process_variant_conditions_do_not_label_single_energy_power() -> None:
+    candidate = {
+        "candidate_stages": [
+            {
+                "parameters_raw": [
+                    {
+                        "parameter_name_raw": "Laser Power",
+                        "value_raw": "250",
+                        "unit_raw": "W",
+                        "source_evidence": "laser power was 250 W",
+                    },
+                    {
+                        "parameter_name_raw": "scan speed",
+                        "value_raw": "1000",
+                        "unit_raw": "mm/s",
+                        "source_evidence": "scan speed was 1000 mm/s",
+                    },
+                ]
+            }
+        ]
+    }
+
+    prepared, changes = prepare_process_variant_conditions(candidate)
+
+    assert prepared == candidate
+    assert changes == []
+
+
 def test_process_variant_route_compat_records_condition_audit() -> None:
     seen: list[dict] = []
 
@@ -301,6 +386,22 @@ def test_process_variant_route_compat_records_condition_audit() -> None:
                         "source_evidence": "taking roughly 16 h total",
                     }
                 ]
+            },
+            {
+                "parameters_raw": [
+                    {
+                        "parameter_name_raw": "Laser Power",
+                        "value_raw": "5000",
+                        "unit_raw": "W",
+                        "source_evidence": "Laser Power (W): 5000",
+                    },
+                    {
+                        "parameter_name_raw": "Wire Power",
+                        "value_raw": "300",
+                        "unit_raw": "W",
+                        "source_evidence": "Wire Power (W): 300",
+                    },
+                ]
             }
         ]
     }
@@ -312,7 +413,16 @@ def test_process_variant_route_compat_records_condition_audit() -> None:
     assert seen[0]["candidate_stages"][0]["parameters_raw"][0][
         "condition_label_raw"
     ] == "taking roughly 16 h total"
-    assert audit[0]["rule_id"] == "compat.process_variant_condition.v1"
+    assert [row["condition_label_raw"] for row in seen[0]["candidate_stages"][1][
+        "parameters_raw"
+    ]] == ["laser", "wire"]
+    assert len(audit) == 3
+    assert {row["rule_id"] for row in audit} == {
+        "compat.process_variant_condition.v1"
+    }
     assert "condition_label_raw" not in candidate["candidate_stages"][0][
+        "parameters_raw"
+    ][0]
+    assert "condition_label_raw" not in candidate["candidate_stages"][1][
         "parameters_raw"
     ][0]

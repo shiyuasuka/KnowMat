@@ -62,6 +62,43 @@ _PROCESS_PREFIX = re.compile(
     r"^(?:(?:laser_)?powder_bed_fusion|lpbf|pbf_lb|pbf_eb|ebpbf|"
     r"directed_energy_deposition|ded|waam|am)_+"
 )
+_THERMAL_PROCESS_OPERATIONS = (
+    ("sintering", re.compile(r"\b(?:vacuum\s+)?sinter(?:ed|ing)?\b")),
+    (
+        "solution",
+        re.compile(r"\bsolution\s+(?:treat(?:ed|ment)?|anneal(?:ed|ing)?)\b"),
+    ),
+    (
+        "aging",
+        re.compile(r"\b(?:ag(?:e|ed|ing|eing)|age\s+hardening)\b"),
+    ),
+    ("annealing", re.compile(r"\banneal(?:ed|ing)?\b")),
+    ("homogenization", re.compile(r"\bhomogeni[sz](?:ed|ation)?\b")),
+    (
+        "hot_isostatic_pressing",
+        re.compile(r"\b(?:hot\s+isostatic\s+press(?:ed|ing)?|hip(?:ing)?)\b"),
+    ),
+    ("stress_relief", re.compile(r"\bstress\s+relie(?:ved|f)\b")),
+    ("curing", re.compile(r"\bcur(?:ed|ing)\b")),
+    ("debinding", re.compile(r"\bdeb(?:ind(?:ing)?|ound)\b")),
+    ("drying", re.compile(r"\bdry(?:ing|ied)\b")),
+    ("heat_treatment", re.compile(r"\bheat\s+treat(?:ed|ment)?\b")),
+)
+_THERMAL_TIME_KEYS = {"duration", "time", "hold_time", "holding_time"}
+_THERMAL_TEMPERATURE_KEYS = {
+    "heating_temperature",
+    "heat_treatment_temperature",
+    "process_temperature",
+    "treatment_temperature",
+    "thermal_environment_temperature",
+}
+_ENERGY_SOURCE_CONDITIONS = {
+    "laser": "laser",
+    "wire": "wire",
+    "hot wire": "hot_wire",
+    "electron beam": "electron_beam",
+    "arc": "arc",
+}
 
 
 def fold(value: Any) -> str:
@@ -430,6 +467,98 @@ def load_expert_claims(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _process_context(claim: dict[str, Any]) -> str:
+    parts = [
+        str(claim.get("semantic_key") or ""),
+        str(claim.get("name_raw") or ""),
+        str(claim.get("condition") or ""),
+    ]
+    parts.extend(str(row) for row in claim.get("evidence") or [])
+    return fold(" ".join(parts))
+
+
+@lru_cache(maxsize=32768)
+def _thermal_process_operation(context: str) -> str | None:
+    return next(
+        (
+            operation
+            for operation, pattern in _THERMAL_PROCESS_OPERATIONS
+            if pattern.search(context)
+        ),
+        None,
+    )
+
+
+def _thermal_process_dimension(
+    claim: dict[str, Any], value: str
+) -> str | None:
+    """Fold time/temperature only within the same thermal operation."""
+
+    is_time = value in _THERMAL_TIME_KEYS or value.endswith(
+        ("_time", "_holding_time", "_dwell_time")
+    )
+    is_temperature = (
+        value in _THERMAL_TEMPERATURE_KEYS or value.endswith("_temperature")
+    )
+    if not is_time and not is_temperature:
+        return None
+    context = _process_context(claim)
+    operation = _thermal_process_operation(context)
+    if operation is None:
+        return None
+    if is_time:
+        return f"thermal_{operation}_time"
+    if is_temperature:
+        return f"thermal_{operation}_temperature"
+    return None
+
+
+def _energy_source_condition(claim: dict[str, Any]) -> str | None:
+    return _ENERGY_SOURCE_CONDITIONS.get(fold(claim.get("condition")))
+
+
+def _matching_condition(claim: dict[str, Any]) -> str:
+    if _energy_source_condition(claim) is not None:
+        return ""
+    return str(claim.get("condition") or "")
+
+
+def _thermal_variant_temperature(claim: dict[str, Any]) -> float | None:
+    key = slug(claim.get("semantic_key") or claim.get("name_raw"))
+    match = re.search(r"(?:^|_)(?:s|ha)(\d{3,4})(?:_|$)", key)
+    return float(match.group(1)) if match else None
+
+
+def _reported_temperatures(claim: dict[str, Any]) -> tuple[float, ...]:
+    evidence = " ".join(str(row) for row in claim.get("evidence") or [])
+    return tuple(
+        float(row)
+        for row in re.findall(
+            r"([-+]?\d+(?:\.\d+)?)\s*(?:\^?\s*\\circ|[°º])\s*c\b",
+            evidence,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _thermal_variant_compatible(
+    left: dict[str, Any], right: dict[str, Any]
+) -> bool:
+    left_target = _thermal_variant_temperature(left)
+    right_target = _thermal_variant_temperature(right)
+    if left_target is not None and right_target is not None:
+        return math.isclose(left_target, right_target, abs_tol=2.0)
+    for target, other in ((left_target, right), (right_target, left)):
+        if target is None:
+            continue
+        reported = _reported_temperatures(other)
+        if reported and not any(
+            math.isclose(target, value, abs_tol=2.0) for value in reported
+        ):
+            return False
+    return True
+
+
 def _canonical_semantic(claim: dict[str, Any]) -> str:
     value = slug(claim.get("semantic_key") or claim.get("name_raw"))
     name = slug(claim.get("name_raw"))
@@ -452,6 +581,12 @@ def _canonical_semantic(claim: dict[str, Any]) -> str:
         while _PROCESS_PREFIX.match(value):
             value = _PROCESS_PREFIX.sub("", value, count=1)
         value = re.sub(r"_range$", "", value)
+        thermal_dimension = _thermal_process_dimension(claim, value)
+        if thermal_dimension is not None:
+            return thermal_dimension
+        energy_source = _energy_source_condition(claim)
+        if value == "power" and energy_source is not None:
+            return f"{energy_source}_power"
         if re.fullmatch(
             r"(?:laser_)?(?:beam_)?spot_(?:size|diameter)|"
             r"(?:laser_)?beam_(?:size|diameter)",
@@ -516,6 +651,10 @@ def _canonical_semantic(claim: dict[str, Any]) -> str:
 
 def semantic_score(left: dict[str, Any], right: dict[str, Any]) -> float:
     if left.get("axis") != right.get("axis"):
+        return 0.0
+    if left.get("axis") == "Processing" and not _thermal_variant_compatible(
+        left, right
+    ):
         return 0.0
     left_key = _canonical_semantic(left)
     right_key = _canonical_semantic(right)
@@ -584,6 +723,7 @@ def _unit(value: Any) -> str:
         "at": "percent", "at percent": "percent", "at pct": "percent", "%": "percent",
         "mpa": "mpa", "gpa": "gpa", "c": "degc", "degree c": "degc", "deg c": "degc",
         "um": "um", "mum": "um", "micron": "um", "microns": "um", "mm": "mm",
+        "w": "w", "kw": "kw",
     }
     if "%" in raw_compact or raw_compact in {
         "wt", "wtpercent", "wtpct", "at", "atpercent", "atpct", "percent", "pct"
@@ -617,6 +757,8 @@ def _converted_numbers(claim: dict[str, Any]) -> tuple[tuple[float, ...], str]:
     unit = _unit(claim.get("unit_raw"))
     if unit == "gpa":
         return tuple(row * 1000.0 for row in numbers), "mpa"
+    if unit == "kw":
+        return tuple(row * 1000.0 for row in numbers), "w"
     if unit == "k":
         return tuple(row - 273.15 for row in numbers), "degc"
     if unit == "um":
@@ -636,7 +778,25 @@ def value_score(left: dict[str, Any], right: dict[str, Any]) -> float:
     if left_numbers and right_numbers:
         if len(left_numbers) != len(right_numbers):
             return 0.0
-        closeness = [math.isclose(a, b, rel_tol=0.03, abs_tol=max(1e-6, 0.005 * max(abs(a), abs(b), 1.0))) for a, b in zip(left_numbers, right_numbers)]
+        left_kind = fold((left.get("value") or {}).get("kind"))
+        right_kind = fold((right.get("value") or {}).get("kind"))
+        if (left_kind == "inequality") != (right_kind == "inequality"):
+            return 0.0
+        if left_unit == right_unit == "degc":
+            closeness = [
+                math.isclose(a, b, rel_tol=0.001, abs_tol=2.0)
+                for a, b in zip(left_numbers, right_numbers)
+            ]
+        else:
+            closeness = [
+                math.isclose(
+                    a,
+                    b,
+                    rel_tol=0.03,
+                    abs_tol=max(1e-6, 0.005 * max(abs(a), abs(b), 1.0)),
+                )
+                for a, b in zip(left_numbers, right_numbers)
+            ]
         return 1.0 if all(closeness) else 0.0
     if bool(left_numbers) != bool(right_numbers):
         return 0.0
@@ -707,7 +867,7 @@ def _owner_dimension(key: str, value: Any) -> str:
 
 
 def condition_score(left: dict[str, Any], right: dict[str, Any]) -> float:
-    a, b = str(left.get("condition") or ""), str(right.get("condition") or "")
+    a, b = _matching_condition(left), _matching_condition(right)
     a_tokens, b_tokens = _tokens(a), _tokens(b)
     if not a_tokens and not b_tokens:
         return 1.0
@@ -729,7 +889,7 @@ def deduplicate_claims(claims: Iterable[dict[str, Any]]) -> list[dict[str, Any]]
             [claim.get("axis"), _canonical_semantic(claim), numbers,
              fold((claim.get("value") or {}).get("text") or (claim.get("value") or {}).get("raw")),
              unit, fold((claim.get("owner") or {}).get("sample_id")),
-             fold((claim.get("owner") or {}).get("state")), fold(claim.get("condition"))],
+             fold((claim.get("owner") or {}).get("state")), fold(_matching_condition(claim))],
             ensure_ascii=False, sort_keys=True,
         )
         if signature in seen:
@@ -752,7 +912,7 @@ def deduplicate_unique_claims(claims: Iterable[dict[str, Any]]) -> list[dict[str
              fold((claim.get("value") or {}).get("text") or (claim.get("value") or {}).get("raw")),
              unit, fold(owner.get("material_name")), _owner_dimension("state", owner.get("state")),
              fold(owner.get("region")), fold(owner.get("orientation")), fold(owner.get("role")),
-             fold(claim.get("condition")), claim.get("origin")],
+             fold(_matching_condition(claim)), claim.get("origin")],
             ensure_ascii=False, sort_keys=True,
         )
         if signature in seen:
