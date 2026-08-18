@@ -446,6 +446,165 @@ def test_flatten_composition_is_atomic_and_skips_not_reported_parameter() -> Non
     assert len(processing) == 1  # stage identity only; absent power is not a fact
 
 
+def _point_composition_document(*locations: str) -> dict:
+    return {
+        "items": [
+            {
+                "Item_ID": "item_ga_1300",
+                "Sample_ID": "GA sample sintered at 1300 °C",
+                "Role": "Target",
+                "Data_Nature": "Experimental",
+                "Extracted_Data": {
+                    "Composition": {
+                        "Material_Identity": {
+                            "material_name_raw": "binder-jet printed alloy 625"
+                        },
+                        "Composition_Observations": [
+                            {
+                                "sample_id": location,
+                                "material_state": "sintered 1300 °C for 4 h",
+                                "basis": "wt%",
+                                "source_type": "measured",
+                                "components": [
+                                    {
+                                        "canonical_name": "Ni",
+                                        "value_kind": "scalar",
+                                        "value": 61.7,
+                                        "value_raw": "61.7",
+                                        "unit_raw": "wt%",
+                                        "data_nature": "reported",
+                                    }
+                                ],
+                            }
+                            for location in locations
+                        ],
+                    },
+                    "Processing": {"Process_Route": {"stages": []}},
+                    "Structure": {
+                        "Structure_Observations": [],
+                        "Characterization": [],
+                    },
+                    "Properties": [],
+                },
+            }
+        ]
+    }
+
+
+def test_flatten_composition_preserves_material_owner_and_projects_point_location() -> None:
+    claims = flatten_v11(
+        _point_composition_document("Point 3"),
+        source="final_v5",
+        paper_key="paper",
+    )
+
+    assert len(claims) == 1
+    assert claims[0]["owner"]["sample_id"] == "GA sample sintered at 1300 °C"
+    assert claims[0]["owner"]["location"] == "Point 3"
+    assert claims[0]["owner"]["region"] is None
+
+
+def test_composition_point_matches_across_sample_and_region_representations() -> None:
+    system = {
+        **_expert(sample="S1280", condition=""),
+        "uid": "sys_1",
+        "source": "final_v5",
+        "axis": "Composition",
+        "semantic_key": "composition_element_ni",
+        "name_raw": "Ni",
+        "unit_raw": "wt%",
+        "owner": {
+            **_expert()["owner"],
+            "sample_id": "S1280",
+            "state": "sintered 1280 °C for 4 h",
+            "region": "EDS point 1",
+        },
+    }
+    expert = {
+        **system,
+        "uid": "clm_1",
+        "source": "expert",
+        "owner": {
+            **system["owner"],
+            "sample_id": "Point 1",
+            "region": "grain boundary/precipitate",
+        },
+    }
+
+    report = compare_claim_sets([system], [expert])
+
+    assert report["modes"]["strict"]["micro"]["matched"] == 1
+
+
+def test_composition_point_alias_does_not_hide_specimen_conflict() -> None:
+    system = {
+        **_expert(sample="GA", condition=""),
+        "uid": "sys_1",
+        "source": "final_v5",
+        "axis": "Composition",
+        "semantic_key": "composition_element_ni",
+        "owner": {
+            **_expert()["owner"],
+            "sample_id": "GA",
+            "location": "Point 1",
+        },
+    }
+    expert = {
+        **system,
+        "uid": "clm_1",
+        "source": "expert",
+        "owner": {
+            **system["owner"],
+            "sample_id": "WA",
+            "location": "EDS point 1",
+        },
+    }
+
+    report = compare_claim_sets([system], [expert])
+
+    assert report["modes"]["loose"]["micro"]["matched"] == 1
+    assert report["modes"]["strict"]["micro"]["matched"] == 0
+
+
+def test_morphology_region_is_not_treated_as_a_point_alias() -> None:
+    system = {
+        **_expert(sample="S1280", condition=""),
+        "uid": "sys_1",
+        "source": "final_v5",
+        "axis": "Composition",
+        "semantic_key": "composition_element_ni",
+        "owner": {
+            **_expert()["owner"],
+            "sample_id": "S1280",
+            "region": "matrix",
+            "location": "Point 1",
+        },
+    }
+    expert = {
+        **system,
+        "uid": "clm_1",
+        "source": "expert",
+        "owner": {**system["owner"], "location": "Point 2"},
+    }
+
+    report = compare_claim_sets([system], [expert])
+
+    assert report["modes"]["strict"]["micro"]["matched"] == 0
+
+
+def test_unique_composition_keeps_equal_values_at_distinct_points() -> None:
+    claims = flatten_v11(
+        _point_composition_document("Point 1", "Point 2"),
+        source="final_v5",
+        paper_key="paper",
+    )
+
+    report = compare_claim_sets(claims, [])
+
+    assert report["counts"]["system"] == 2
+    assert report["counts"]["unique_system"] == 2
+
+
 def test_flatten_process_uses_stage_context_and_canonical_value_unit_pair() -> None:
     document = {
         "items": [

@@ -109,6 +109,18 @@ def fold(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", text).strip()
 
 
+def _microanalysis_location(value: Any) -> str:
+    """Normalize one literal numbered microanalysis observation location."""
+
+    text = fold(value)
+    match = re.fullmatch(
+        r"(?:(?:eds|edx|sem|tem)(?: analysis)? )?"
+        r"(?:point|spot|area|location) (\d+)",
+        text,
+    )
+    return f"location {int(match.group(1))}" if match else ""
+
+
 def slug(value: Any) -> str:
     return fold(value).replace(" ", "_") or "unknown"
 
@@ -244,7 +256,14 @@ def _value(row: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
     return value, None if unit is None else str(unit)
 
 
-def _owner(item: dict[str, Any], *, sample_id: Any = None, state: Any = None, region: Any = None) -> dict[str, Any]:
+def _owner(
+    item: dict[str, Any],
+    *,
+    sample_id: Any = None,
+    state: Any = None,
+    region: Any = None,
+    location: Any = None,
+) -> dict[str, Any]:
     extracted = item.get("Extracted_Data") or {}
     identity = ((extracted.get("Composition") or {}).get("Material_Identity") or {})
     material_name = (
@@ -258,6 +277,7 @@ def _owner(item: dict[str, Any], *, sample_id: Any = None, state: Any = None, re
         "sample_id": None if sample in (None, "") else str(sample),
         "state": None if state in (None, "") else str(state),
         "region": None if region in (None, "") else str(region),
+        "location": None if location in (None, "") else str(location),
         "orientation": None,
         "role": str(item.get("Role") or "Target"),
     }
@@ -304,7 +324,23 @@ def flatten_v11(document: dict[str, Any], *, source: str, paper_key: str) -> lis
         for obs_index, observation in enumerate(composition.get("Composition_Observations") or []):
             if not isinstance(observation, dict):
                 continue
-            owner = _owner(item, sample_id=observation.get("sample_id"), state=observation.get("material_state"))
+            observation_sample = observation.get("sample_id")
+            location = (
+                observation_sample
+                if _microanalysis_location(observation_sample)
+                else observation.get("location_raw")
+            )
+            owner = _owner(
+                item,
+                sample_id=(
+                    None
+                    if _microanalysis_location(observation_sample)
+                    else observation_sample
+                ),
+                state=observation.get("material_state"),
+                region=observation.get("region_raw"),
+                location=location,
+            )
             condition = None
             for component_index, component in enumerate(observation.get("components") or []):
                 if not isinstance(component, dict):
@@ -868,17 +904,54 @@ def _reference_designation_alias(
     )
 
 
+def _project_owner_dimensions(claim: dict[str, Any]) -> dict[str, str]:
+    """Separate a material specimen, morphology region, and EDS location."""
+
+    owner = claim.get("owner") or {}
+    dimensions = {
+        key: _owner_dimension(key, owner.get(key))
+        for key in ("sample_id", "state", "region", "orientation")
+    }
+    dimensions["location"] = ""
+    if claim.get("axis") != "Composition":
+        return dimensions
+
+    locations = [
+        location
+        for location in (_microanalysis_location(owner.get("location")),)
+        if location
+    ]
+    for key in ("sample_id", "region"):
+        location = _microanalysis_location(owner.get(key))
+        if not location:
+            continue
+        locations.append(location)
+        dimensions[key] = ""
+    unique_locations = list(dict.fromkeys(locations))
+    if len(unique_locations) == 1:
+        dimensions["location"] = unique_locations[0]
+    elif unique_locations:
+        dimensions["location"] = " | ".join(sorted(unique_locations))
+    return dimensions
+
+
 def owner_score(left: dict[str, Any], right: dict[str, Any]) -> float:
     left_owner = left.get("owner") or {}
     right_owner = right.get("owner") or {}
+    left_dimensions = _project_owner_dimensions(left)
+    right_dimensions = _project_owner_dimensions(right)
     reference_alias = _reference_designation_alias(left_owner, right_owner)
     scores: list[float] = []
-    for key in ("sample_id", "state", "region", "orientation"):
-        a, b = _owner_dimension(key, left_owner.get(key)), _owner_dimension(key, right_owner.get(key))
+    for key in ("sample_id", "state", "location", "region", "orientation"):
+        a, b = left_dimensions[key], right_dimensions[key]
         if a and b:
             scores.append(
                 1.0
-                if a == b or a in b or b in a or (key == "sample_id" and reference_alias)
+                if (
+                    a == b
+                    or (key != "location" and (a in b or b in a))
+                    or (key == "sample_id" and reference_alias)
+                )
                 else _jaccard(_tokens(a), _tokens(b))
             )
         elif a or b:
@@ -903,14 +976,20 @@ def owner_conflict(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
     left_owner = left.get("owner") or {}
     right_owner = right.get("owner") or {}
+    left_dimensions = _project_owner_dimensions(left)
+    right_dimensions = _project_owner_dimensions(right)
     reference_alias = _reference_designation_alias(left_owner, right_owner)
-    for key in ("sample_id", "state", "region", "orientation"):
-        a, b = _owner_dimension(key, left_owner.get(key)), _owner_dimension(key, right_owner.get(key))
+    for key in ("sample_id", "state", "location", "region", "orientation"):
+        a, b = left_dimensions[key], right_dimensions[key]
         if not a or not b:
             continue
         if key == "sample_id" and reference_alias:
             continue
-        if a == b or a in b or b in a:
+        if a == b:
+            continue
+        if key == "location":
+            return True
+        if a in b or b in a:
             continue
         if _jaccard(_tokens(a), _tokens(b)) >= 0.6:
             continue
@@ -958,11 +1037,12 @@ def deduplicate_claims(claims: Iterable[dict[str, Any]]) -> list[dict[str, Any]]
     seen: set[str] = set()
     for claim in claims:
         numbers, unit = _converted_numbers(claim)
+        owner = _project_owner_dimensions(claim)
         signature = json.dumps(
             [claim.get("axis"), _canonical_semantic(claim), numbers,
              fold((claim.get("value") or {}).get("text") or (claim.get("value") or {}).get("raw")),
-             unit, fold((claim.get("owner") or {}).get("sample_id")),
-             fold((claim.get("owner") or {}).get("state")), fold(_matching_condition(claim))],
+             unit, owner["sample_id"], owner["state"], owner["location"],
+             fold(_matching_condition(claim))],
             ensure_ascii=False, sort_keys=True,
         )
         if signature in seen:
@@ -980,11 +1060,13 @@ def deduplicate_unique_claims(claims: Iterable[dict[str, Any]]) -> list[dict[str
     for claim in claims:
         numbers, unit = _converted_numbers(claim)
         owner = claim.get("owner") or {}
+        dimensions = _project_owner_dimensions(claim)
         signature = json.dumps(
             [claim.get("axis"), _canonical_semantic(claim), numbers,
              fold((claim.get("value") or {}).get("text") or (claim.get("value") or {}).get("raw")),
-             unit, fold(owner.get("material_name")), _owner_dimension("state", owner.get("state")),
-             fold(owner.get("region")), fold(owner.get("orientation")), fold(owner.get("role")),
+             unit, fold(owner.get("material_name")), dimensions["state"],
+             dimensions["location"], dimensions["region"], dimensions["orientation"],
+             fold(owner.get("role")),
              fold(_matching_condition(claim)), claim.get("origin")],
             ensure_ascii=False, sort_keys=True,
         )
