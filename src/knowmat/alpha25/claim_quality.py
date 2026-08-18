@@ -62,6 +62,9 @@ _STRUCTURAL_COMPOSITION_VALUE = re.compile(
     r"(?i)\b(?:appear(?:s|ed)?|form(?:s|ed|ation)?|observed|present|located|"
     r"precipitat(?:e|ed|ion)|matrix|film|phase|structure|interface|region)\b"
 )
+_STRUCTURAL_CONTEXT_ONLY_NAME = re.compile(
+    r"(?i)^\s*(?:interior|wall|matrix|interface|region|location|area|zone)\s*$"
+)
 _MEASURED_COMPOSITION_CONTEXT = re.compile(
     r"(?i)(?:\bmeasur(?:e|ed|ement)|\bactual|\banaly(?:sis|sed|zed)|"
     r"\bquantif(?:y|ied|ication)|\b(?:eds|edx|icp|xrf|oes)\b|spectro|"
@@ -423,6 +426,53 @@ def _gate_property(fact: PropertyFact) -> tuple[AxisFact | None, list[ClaimQuali
     return fact, []
 
 
+def _gate_structure(fact: StructureFact) -> tuple[AxisFact | None, list[ClaimQualityIssue]]:
+    if fact.fact_type != "structure_observation":
+        return fact, []
+    data = deepcopy(fact.data)
+    accepted: list[dict[str, Any]] = []
+    issues: list[ClaimQualityIssue] = []
+    for index, entity in enumerate(data.get("entities") or []):
+        if not isinstance(entity, dict):
+            continue
+        entity_type = _fold(entity.get("entity_type"))
+        name = str(entity.get("name_raw") or "").strip()
+        features = [
+            feature
+            for feature in entity.get("features") or []
+            if isinstance(feature, dict)
+        ]
+        context_only = entity_type in {"area", "location", "region", "zone"} or bool(
+            _STRUCTURAL_CONTEXT_ONLY_NAME.fullmatch(name)
+        )
+        if context_only and not features:
+            issues.append(
+                ClaimQualityIssue(
+                    code="structure_context_entity_removed",
+                    sample_id_raw=fact.sample_id_raw,
+                    fact_type=fact.fact_type,
+                    path=f"data.entities[{index}]",
+                    message=(
+                        "An empty region/location label is observation context, not "
+                        "an independent structural presence claim."
+                    ),
+                    evidence=_fact_evidence(fact),
+                    expected={
+                        "entity": "structural entity or context with quantitative features"
+                    },
+                    actual={"removed_entity": deepcopy(entity)},
+                    suggested_action=(
+                        "Review the source only if the location owns an explicit "
+                        "structural feature."
+                    ),
+                )
+            )
+            continue
+        accepted.append(entity)
+    data["entities"] = accepted
+    return fact.model_copy(update={"data": data}), issues
+
+
 def filter_axis_facts(
     facts: Iterable[AxisFact], *, mode: ClaimQualityMode = "safe"
 ) -> ClaimQualityResult:
@@ -450,7 +500,7 @@ def filter_axis_facts(
         elif isinstance(fact, PropertyFact):
             cleaned, fact_issues = _gate_property(fact)
         elif isinstance(fact, StructureFact):
-            cleaned, fact_issues = fact, []
+            cleaned, fact_issues = _gate_structure(fact)
         else:  # pragma: no cover - AxisFact is a closed discriminated union.
             cleaned, fact_issues = fact, []
         issues.extend(fact_issues)
@@ -609,20 +659,21 @@ def semantic_fact_signature(fact: AxisFact) -> str:
     )
 
 
-def deduplicate_axis_facts(
+def deduplicate_axis_facts_with_audit(
     facts: Iterable[AxisFact], *, mode: ClaimQualityMode = "safe"
-) -> list[AxisFact]:
-    """Merge semantic duplicates while preserving all literal evidence."""
+) -> ClaimQualityResult:
+    """Merge semantic duplicates and return a complete removal audit."""
 
     rows = list(facts)
     if mode == "off":
-        return rows
+        return ClaimQualityResult(accepted=rows, issues=[])
     if mode not in {"safe", "strict"}:
         raise ValueError(f"Unsupported claim quality mode: {mode!r}")
 
     merged: dict[str, AxisFact] = {}
     order: list[str] = []
     passthrough: list[tuple[int, AxisFact]] = []
+    issues: list[ClaimQualityIssue] = []
     for index, fact in enumerate(rows):
         # Structure/process observations can repeat the same semantic entity in
         # different regions, sequence positions, or prose spans that the compact
@@ -638,6 +689,27 @@ def deduplicate_axis_facts(
             merged[signature] = fact
             order.append(signature)
             continue
+        issues.append(
+            ClaimQualityIssue(
+                code="semantic_duplicate_merged",
+                sample_id_raw=fact.sample_id_raw,
+                fact_type=fact.fact_type,
+                path="data",
+                message=(
+                    "A property alias duplicate was merged into one condition-aware claim."
+                ),
+                evidence=_fact_evidence(fact),
+                expected={"surviving_signature": signature},
+                actual={
+                    "removed_duplicate": fact.model_dump(),
+                    "surviving_fact_before_merge": existing.model_dump(),
+                },
+                suggested_action=(
+                    "Review only if the aliases represent different scientific "
+                    "properties under the cited condition."
+                ),
+            )
+        )
         evidence = list(existing.source_evidence)
         for row in fact.source_evidence:
             if row not in evidence:
@@ -651,7 +723,18 @@ def deduplicate_axis_facts(
     property_rows = [merged[key] for key in order]
     # Preserve original relative ordering for non-property facts; property IDs are
     # regenerated deterministically after materialization.
-    return [fact for _, fact in passthrough] + property_rows
+    return ClaimQualityResult(
+        accepted=[fact for _, fact in passthrough] + property_rows,
+        issues=issues,
+    )
+
+
+def deduplicate_axis_facts(
+    facts: Iterable[AxisFact], *, mode: ClaimQualityMode = "safe"
+) -> list[AxisFact]:
+    """Merge semantic duplicates while preserving all literal evidence."""
+
+    return deduplicate_axis_facts_with_audit(facts, mode=mode).accepted
 
 
 __all__ = [
@@ -659,6 +742,7 @@ __all__ = [
     "ClaimQualityIssue",
     "ClaimQualityResult",
     "deduplicate_axis_facts",
+    "deduplicate_axis_facts_with_audit",
     "filter_axis_facts",
     "semantic_fact_signature",
 ]

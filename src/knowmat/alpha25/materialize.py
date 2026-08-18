@@ -21,7 +21,7 @@ from knowmat.alpha25.contracts import (
 )
 from knowmat.alpha25.claim_quality import (
     ClaimQualityMode,
-    deduplicate_axis_facts,
+    deduplicate_axis_facts_with_audit,
     filter_axis_facts,
     semantic_fact_signature,
 )
@@ -3098,11 +3098,26 @@ def materialize_candidate(
             )
             continue
         grouped_facts: dict[str, list[dict[str, Any]]] = {}
-        group_facts = (
-            deduplicate_axis_facts(group["facts"], mode=quality_mode)
-            if quality_mode != "off"
-            else group["facts"]
-        )
+        if quality_mode != "off":
+            deduplicated = deduplicate_axis_facts_with_audit(
+                group["facts"], mode=quality_mode
+            )
+            group_facts = deduplicated.accepted
+            issues.extend(
+                MaterializeIssue(
+                    code=issue.code,
+                    sample_id_raw=issue.sample_id_raw,
+                    path=issue.path,
+                    message=issue.message,
+                    evidence=issue.evidence,
+                    expected=issue.expected,
+                    actual=issue.actual,
+                    suggested_action=issue.suggested_action,
+                )
+                for issue in deduplicated.issues
+            )
+        else:
+            group_facts = group["facts"]
         for fact in group_facts:
             grouped_facts.setdefault(fact.fact_type, []).append(_fact_data(fact))
 

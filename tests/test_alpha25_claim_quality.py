@@ -1,11 +1,13 @@
 from knowmat.alpha25.claim_quality import (
     deduplicate_axis_facts,
+    deduplicate_axis_facts_with_audit,
     filter_axis_facts,
 )
 from knowmat.alpha25.contracts import (
     CompositionFact,
     ProcessingFact,
     PropertyFact,
+    StructureFact,
 )
 
 
@@ -167,6 +169,61 @@ def test_semantic_property_aliases_deduplicate_and_union_evidence():
     assert merged[0].source_evidence == [
         "A1 UTS was 1000 MPa.",
         "The ultimate tensile strength of A1 was 1000 MPa.",
+    ]
+
+
+def test_semantic_property_duplicate_keeps_complete_issue_audit():
+    first = _property(name="UTS", value="1000", evidence="A1 UTS was 1000 MPa.")
+    second = _property(
+        name="ultimate tensile strength",
+        value="1000",
+        evidence="The ultimate tensile strength of A1 was 1000 MPa.",
+    )
+
+    result = deduplicate_axis_facts_with_audit([first, second])
+
+    assert len(result.accepted) == 1
+    assert [issue.code for issue in result.issues] == ["semantic_duplicate_merged"]
+    assert result.issues[0].actual["removed_duplicate"] == second.model_dump()
+    assert result.issues[0].actual["surviving_fact_before_merge"] == first.model_dump()
+
+
+def test_empty_structure_region_is_removed_with_audit_in_safe_mode():
+    evidence = "The boundary separated the continuous precipitation region."
+    fact = StructureFact(
+        sample_id_raw="A1",
+        fact_type="structure_observation",
+        data={
+            "observation_id": "temporary",
+            "structure_kind": "phase",
+            "material_state": "not_reported",
+            "sample_id": "A1",
+            "source_type": "measured",
+            "original": evidence,
+            "simplified": evidence,
+            "entities": [
+                {
+                    "entity_id": "temporary",
+                    "entity_type": "region",
+                    "role": "reported",
+                    "name_raw": "CP region",
+                    "features": [],
+                    "raw_expression": "continuous precipitation region",
+                    "source_evidence": [evidence],
+                }
+            ],
+            "features": [],
+            "source_evidence": [evidence],
+        },
+        source_evidence=[evidence],
+        confidence=0.8,
+    )
+
+    result = filter_axis_facts([fact], mode="safe")
+
+    assert result.accepted[0].data["entities"] == []
+    assert [issue.code for issue in result.issues] == [
+        "structure_context_entity_removed"
     ]
 
 

@@ -429,6 +429,9 @@ def test_empty_region_entity_does_not_become_a_structure_presence_claim():
     result = materialize_candidate([_anchor("Alloy-A")], [fact])
 
     assert result.document["items"] == []
+    assert any(
+        issue.code == "structure_context_entity_removed" for issue in result.issues
+    )
     assert any(issue.code == "empty_item_removed" for issue in result.issues)
 
 
