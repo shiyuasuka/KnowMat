@@ -284,6 +284,9 @@ _CITATION_MARKER = re.compile(
     r"|\[[0-9,;\s-]+\]\s*$"
     r")"
 )
+_CITED_NOMINAL_COMPOSITION_LABEL = re.compile(
+    r"(?i)^\s*nominal\s+composition\s*\[[0-9,;\s-]+\]\s*$"
+)
 _NON_MATERIAL_CONTEXT_LABEL = re.compile(
     r"(?ix)^\s*(?:"
     r"(?:dft|density\s+functional\s+theory)"
@@ -3335,6 +3338,170 @@ def _chart_quarantine_issues_from_text(source_text: str | None) -> list[Material
     return issues
 
 
+def _cited_nominal_composition_row(fact: AxisFact, label: str) -> bool:
+    """Return whether a fact is a literal multi-element nominal table row."""
+
+    if not isinstance(fact, CompositionFact) or fact.fact_type != "composition_observation":
+        return False
+    data = fact.data
+    if str(data.get("data_source") or "").strip().casefold() != "table":
+        return False
+    components = [
+        row for row in data.get("components") or [] if isinstance(row, dict)
+    ]
+    reported = [
+        row
+        for row in components
+        if str(row.get("name_raw") or "").strip()
+        and str(row.get("value_raw") or "").strip()
+        and re.search(r"\d", str(row.get("value_raw") or ""))
+    ]
+    if len(reported) < 2:
+        return False
+    folded_label = unicodedata.normalize("NFKC", label).casefold()
+    return any(
+        folded_label in unicodedata.normalize("NFKC", evidence).casefold()
+        for evidence in fact.source_evidence
+    )
+
+
+def _recover_cited_nominal_composition_owners(
+    anchors: Sequence[InventoryAnchor], facts: Sequence[AxisFact]
+) -> tuple[list[InventoryAnchor], list[AxisFact], list[MaterializeIssue]]:
+    """Give an explicit cited nominal-composition row its own reference owner.
+
+    The global inventory is authoritative for target materials, but a provider
+    can legitimately extract a multi-element literature row without emitting a
+    separate inventory anchor for that reference.  Recover only the narrow case
+    where the row label carries a citation, at least one row fragment declares
+    nominal composition, and every promoted fragment copies that exact row label
+    from a table.  Bare headers and analysis-point numbers remain unresolved.
+    """
+
+    anchor_rows = list(anchors)
+    fact_rows = list(facts)
+    grouped: dict[str, list[tuple[int, AxisFact]]] = {}
+    labels: dict[str, str] = {}
+    for index, fact in enumerate(fact_rows):
+        label = str(fact.sample_id_raw or "").strip()
+        if not _CITED_NOMINAL_COMPOSITION_LABEL.fullmatch(label):
+            continue
+        key = _identity_key(label)
+        grouped.setdefault(key, []).append((index, fact))
+        labels.setdefault(key, label)
+
+    issues: list[MaterializeIssue] = []
+    for key, rows in grouped.items():
+        label = labels[key]
+        eligible = [
+            (index, fact)
+            for index, fact in rows
+            if _cited_nominal_composition_row(fact, label)
+        ]
+        if not eligible or not any(
+            str(fact.data.get("source_type") or "").strip().casefold()
+            == "nominal"
+            for _, fact in eligible
+        ):
+            continue
+        reference_anchors = [
+            anchor
+            for anchor in anchor_rows
+            if _identity_key(anchor.sample_id_raw) == key
+            and anchor.role == "Reference"
+            and str(anchor.material_name_raw or "").strip()
+            and is_plausible_material_identity(anchor.material_name_raw)
+        ]
+        reference_anchor = (
+            max(reference_anchors, key=lambda anchor: anchor.confidence)
+            if reference_anchors
+            else None
+        )
+        material_name = (
+            str(reference_anchor.material_name_raw).strip()
+            if reference_anchor is not None
+            else ""
+        )
+        citation = re.search(r"\[[0-9,;\s-]+\]", label)
+        display = (
+            f"{material_name} {citation.group(0)} [reference]"
+            if material_name and citation is not None
+            else f"{label} [reference]"
+        )
+        related = [
+            (index, fact)
+            for index, fact in rows
+            if (
+                fact.fact_type == "material_identity"
+                and any(
+                    unicodedata.normalize("NFKC", label).casefold()
+                    in unicodedata.normalize("NFKC", source).casefold()
+                    for source in fact.source_evidence
+                )
+            )
+        ]
+        promoted = sorted([*eligible, *related], key=lambda row: row[0])
+        evidence = list(
+            dict.fromkeys(
+                source
+                for _, fact in promoted
+                for source in fact.source_evidence
+                if str(source).strip()
+            )
+        )
+        anchor_rows.append(
+            InventoryAnchor(
+                sample_id_raw=display,
+                material_name_raw=material_name or display,
+                state_raw="nominal composition",
+                role="Reference",
+                data_nature="Literature_Experimental",
+                source_evidence=evidence,
+                confidence=max(fact.confidence for _, fact in promoted),
+            )
+        )
+        recovered_facts: list[dict[str, Any]] = []
+        for index, fact in promoted:
+            data = deepcopy(fact.data)
+            if _identity_key(data.get("sample_id")) == key:
+                data["sample_id"] = display
+            if (
+                fact.fact_type == "composition_observation"
+                and _is_unresolved_alias(data.get("material_state"))
+            ):
+                data["material_state"] = "nominal composition"
+            recovered = fact.model_copy(
+                update={"sample_id_raw": display, "data": data}
+            )
+            fact_rows[index] = recovered
+            recovered_facts.append(fact.model_dump())
+        issues.append(
+            MaterializeIssue(
+                code="reference_composition_owner_recovered",
+                sample_id_raw=display,
+                path=f"items.{display}",
+                message=(
+                    "A cited multi-element nominal-composition table row was "
+                    "materialized as an independent literature reference owner."
+                ),
+                evidence=evidence,
+                expected={
+                    "owner": "independent cited nominal-composition reference"
+                },
+                actual={
+                    "before_owner": label,
+                    "after_owner": display,
+                    "facts": recovered_facts,
+                },
+                suggested_action=(
+                    "Review only if the cited row is not a standalone reference "
+                    "composition."
+                ),
+            )
+        )
+    return anchor_rows, fact_rows, issues
+
+
 def materialize_candidate(
     anchors: Iterable[InventoryAnchor],
     facts: Iterable[AxisFact],
@@ -3354,7 +3521,11 @@ def materialize_candidate(
         else None
     )
     fact_rows = quality_gate.accepted if quality_gate is not None else list(facts)
+    anchor_rows, fact_rows, reference_owner_issues = (
+        _recover_cited_nominal_composition_owners(anchor_rows, fact_rows)
+    )
     issues = _chart_quarantine_issues_from_text(source_text)
+    issues.extend(reference_owner_issues)
     property_context_index = PropertyContextIndex(source_text)
     if quality_gate is not None:
         issues.extend(

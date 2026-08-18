@@ -839,17 +839,58 @@ def value_score(left: dict[str, Any], right: dict[str, Any]) -> float:
     return score
 
 
+def _material_designations(value: Any) -> set[str]:
+    """Return explicit grade/designation tokens, not broad material classes."""
+
+    text = fold(value)
+    return {
+        f"{family}:{grade}"
+        for family, grade in re.findall(
+            r"\b(alloy|grade|inconel)\s+([a-z]*\d[a-z0-9.-]*)\b", text
+        )
+    }
+
+
+def _reference_designation_alias(
+    left_owner: dict[str, Any], right_owner: dict[str, Any]
+) -> bool:
+    left_role = fold(left_owner.get("role"))
+    right_role = fold(right_owner.get("role"))
+    if left_role != "reference" or right_role != "reference":
+        return False
+    left_state = _owner_dimension("state", left_owner.get("state"))
+    right_state = _owner_dimension("state", right_owner.get("state"))
+    if not left_state or left_state != right_state:
+        return False
+    return bool(
+        _material_designations(left_owner.get("material_name"))
+        & _material_designations(right_owner.get("material_name"))
+    )
+
+
 def owner_score(left: dict[str, Any], right: dict[str, Any]) -> float:
     left_owner = left.get("owner") or {}
     right_owner = right.get("owner") or {}
+    reference_alias = _reference_designation_alias(left_owner, right_owner)
     scores: list[float] = []
     for key in ("sample_id", "state", "region", "orientation"):
         a, b = _owner_dimension(key, left_owner.get(key)), _owner_dimension(key, right_owner.get(key))
         if a and b:
-            scores.append(1.0 if a == b or a in b or b in a else _jaccard(_tokens(a), _tokens(b)))
+            scores.append(
+                1.0
+                if a == b or a in b or b in a or (key == "sample_id" and reference_alias)
+                else _jaccard(_tokens(a), _tokens(b))
+            )
         elif a or b:
             scores.append(0.35)
-    material_score = _jaccard(_tokens(left_owner.get("material_name")), _tokens(right_owner.get("material_name")))
+    material_score = (
+        1.0
+        if reference_alias
+        else _jaccard(
+            _tokens(left_owner.get("material_name")),
+            _tokens(right_owner.get("material_name")),
+        )
+    )
     if material_score:
         scores.append(material_score)
     if fold(left_owner.get("role")) and fold(right_owner.get("role")):
@@ -862,9 +903,12 @@ def owner_conflict(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
     left_owner = left.get("owner") or {}
     right_owner = right.get("owner") or {}
+    reference_alias = _reference_designation_alias(left_owner, right_owner)
     for key in ("sample_id", "state", "region", "orientation"):
         a, b = _owner_dimension(key, left_owner.get(key)), _owner_dimension(key, right_owner.get(key))
         if not a or not b:
+            continue
+        if key == "sample_id" and reference_alias:
             continue
         if a == b or a in b or b in a:
             continue

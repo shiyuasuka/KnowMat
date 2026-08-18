@@ -346,6 +346,72 @@ def test_strict_rejects_wrong_sample_while_loose_matches() -> None:
     assert [row["code"] for row in issues] == ["wrong_owner"]
 
 
+def test_strict_matches_cited_nominal_reference_owner_by_alloy_designation() -> None:
+    system = [
+        {
+            **_expert(sample="nickel-based alloy 625 [18] [reference]", condition=""),
+            "uid": "sys_1",
+            "source": "final_v5",
+            "axis": "Composition",
+            "semantic_key": "composition_element_ni",
+            "name_raw": "Ni",
+            "owner": {
+                "material_id": "item_1",
+                "material_name": "nickel-based alloy 625",
+                "sample_id": "nickel-based alloy 625 [18] [reference]",
+                "state": "nominal composition",
+                "region": None,
+                "orientation": None,
+                "role": "Reference",
+            },
+            "unit_raw": "wt%",
+        }
+    ]
+    expert = [
+        {
+            **system[0],
+            "uid": "clm_1",
+            "source": "expert",
+            "owner": {
+                "material_id": "expert_1",
+                "material_name": "binder-jet printed alloy 625",
+                "sample_id": "nominal alloy 625",
+                "state": "nominal composition",
+                "region": None,
+                "orientation": None,
+                "role": "Reference",
+            },
+        }
+    ]
+
+    report = compare_claim_sets(system, expert)
+
+    assert report["modes"]["strict"]["micro"]["matched"] == 1
+
+
+def test_reference_alloy_designation_does_not_override_state_conflict() -> None:
+    system = _expert(sample="alloy 625 [reference]", condition="")
+    system["owner"] = {
+        **system["owner"],
+        "material_name": "nickel-based alloy 625",
+        "sample_id": "alloy 625 [reference]",
+        "state": "as-built",
+        "role": "Reference",
+    }
+    expert = {**system, "uid": "clm_1", "source": "expert"}
+    expert["owner"] = {
+        **system["owner"],
+        "material_name": "binder-jet printed alloy 625",
+        "sample_id": "nominal alloy 625",
+        "state": "nominal composition",
+    }
+
+    report = compare_claim_sets([system], [expert])
+
+    assert report["modes"]["loose"]["micro"]["matched"] == 1
+    assert report["modes"]["strict"]["micro"]["matched"] == 0
+
+
 def test_strict_rejects_missing_condition() -> None:
     system = [{**_expert(condition=""), "uid": "sys_1", "source": "final_v5"}]
     report = compare_claim_sets(system, [_expert(condition="25 °C")])

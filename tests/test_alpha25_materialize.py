@@ -460,6 +460,84 @@ def _composition_fact(outer_sample: str, inner_sample: str, evidence: str):
     )
 
 
+def test_cited_nominal_composition_row_recovers_independent_reference_owner():
+    label = "Nominal composition [18]"
+    evidence = (
+        "| Elements | Ni | Cr | Mo |\n"
+        "| Nominal composition [18] | >58 | 20–23 | 8–10 |"
+    )
+    fact = _composition_fact(label, label, evidence)
+    fact.data["source_type"] = "nominal"
+    fact.data["data_source"] = "table"
+    fact.data["components"] = [
+        {
+            "name_raw": name,
+            "value_kind": kind,
+            "value_raw": value,
+            "unit_raw": "wt%",
+            "data_nature": "reported",
+        }
+        for name, kind, value in (
+            ("Ni", "inequality", ">58"),
+            ("Cr", "range", "20–23"),
+            ("Mo", "range", "8–10"),
+        )
+    ]
+
+    # A real paper already has target samples in its global inventory.  That
+    # authoritative inventory currently prevents this independently reported
+    # literature row from creating a new owner.
+    result = materialize_candidate([_anchor("GA")], [fact])
+
+    assert len(result.document["items"]) == 1
+    item = result.document["items"][0]
+    assert item["Sample_ID"] == "Nominal composition [18] [reference]"
+    assert item["Role"] == "Reference"
+    assert item["Data_Nature"] == "Literature_Experimental"
+    observations = item["Extracted_Data"]["Composition"][
+        "Composition_Observations"
+    ]
+    assert [row["name_raw"] for row in observations[0]["components"]] == [
+        "Ni",
+        "Cr",
+        "Mo",
+    ]
+    assert observations[0]["material_state"] == "nominal composition"
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "reference_composition_owner_recovered"
+    )
+    assert issue.actual["before_owner"] == label
+    assert issue.actual["after_owner"] == item["Sample_ID"]
+    assert issue.evidence == [evidence]
+
+
+def test_uncited_nominal_composition_header_remains_unresolved():
+    label = "Nominal composition"
+    evidence = "| Nominal composition | >58 | 20–23 | 8–10 |"
+    fact = _composition_fact(label, label, evidence)
+    fact.data["source_type"] = "nominal"
+    fact.data["data_source"] = "table"
+    fact.data["components"] = [
+        {
+            "name_raw": name,
+            "value_kind": "scalar",
+            "value_raw": value,
+            "unit_raw": "wt%",
+            "data_nature": "reported",
+        }
+        for name, value in (("Ni", "58"), ("Cr", "20"), ("Mo", "8"))
+    ]
+
+    result = materialize_candidate([], [fact])
+
+    assert result.document["items"] == []
+    assert any(
+        issue.code == "unresolved_sample_alias" for issue in result.issues
+    )
+
+
 def test_non_material_headers_and_test_subsamples_cannot_anchor_items():
     rejected = [
         "Material property",
