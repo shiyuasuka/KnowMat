@@ -41,6 +41,226 @@ def test_claim_quality_mode_defaults_to_safe_and_supports_three_levels(monkeypat
         assert _claim_quality_mode() == "off"
 
 
+def _tensile_property(
+    sample: str = "A",
+    *,
+    condition: str | None = None,
+    evidence: str = "A had an ultimate tensile strength of 900 MPa",
+) -> PropertyFact:
+    return PropertyFact(
+        sample_id_raw=sample,
+        data={
+            "property_id_candidate": "temp",
+            "property_name_raw": "ultimate tensile strength",
+            "value_raw": "900",
+            "unit_raw": "MPa",
+            "test_method_raw": "tensile tests",
+            "test_standard_raw": None,
+            "test_condition_raw": condition,
+            "test_specimen_raw": None,
+            "raw_note": None,
+            "data_source": "text",
+            "source_evidence": [evidence],
+            "confidence": 0.9,
+        },
+        source_evidence=[evidence],
+        confidence=0.9,
+    )
+
+
+def test_unique_paper_level_tensile_context_is_recovered_verbatim(monkeypatch):
+    monkeypatch.delenv("KNOWMAT2_ALPHA25_PROPERTY_CONTEXT_RECOVERY", raising=False)
+    method = (
+        "Dog-bone-shaped tensile test specimens with a gauge length of 5 mm "
+        "were extracted from the as-built samples. The specimens were subjected "
+        "to uniaxial tensile tests at a strain rate of 5 × 10^-3 s^-1 using an "
+        "Instron 1361 testing machine. All tensile tests were repeated at least "
+        "three times."
+    )
+    source = f"## Tensile test\n\n{method}\n"
+
+    result = materialize_candidate(
+        [_anchor("A")], [_tensile_property()], source_text=source
+    )
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["test_condition_raw"] == method
+    issue = next(
+        row for row in result.issues if row.code == "property_test_context_recovered"
+    )
+    assert issue.actual["before"]["test_condition_raw"] is None
+    assert issue.actual["after"]["test_condition_raw"] == method
+    assert issue.evidence[0]["line_start"] == 3
+
+
+def test_existing_property_condition_is_never_overwritten():
+    source = (
+        "## Tensile testing\n\n"
+        "Tensile tests were performed at 650 °C at a strain rate of 1 × 10^-3 s^-1.\n"
+    )
+
+    result = materialize_candidate(
+        [_anchor("A")],
+        [_tensile_property(condition="room temperature")],
+        source_text=source,
+    )
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["test_condition_raw"] == "room temperature"
+    assert not any(
+        issue.code == "property_test_context_recovered" for issue in result.issues
+    )
+
+
+def test_incompatible_paper_level_tensile_contexts_remain_ambiguous():
+    source = "\n\n".join(
+        [
+            "## Tensile testing",
+            "Tensile tests were performed at room temperature at a strain rate of 1 × 10^-3 s^-1.",
+            "Tensile tests were performed at 650 °C at a strain rate of 2 × 10^-3 s^-1.",
+        ]
+    )
+
+    result = materialize_candidate(
+        [_anchor("A")], [_tensile_property()], source_text=source
+    )
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["test_condition_raw"] in (None, "")
+    issue = next(
+        row for row in result.issues if row.code == "ambiguous_property_test_context"
+    )
+    assert len(issue.evidence) == 2
+
+
+def test_property_local_temperature_disambiguates_tensile_context():
+    source = "\n\n".join(
+        [
+            "## Tensile testing",
+            "Tensile tests were performed at room temperature at a strain rate of 1 × 10^-3 s^-1.",
+            "Tensile tests were performed at 650 °C at a strain rate of 2 × 10^-3 s^-1.",
+        ]
+    )
+    fact = _tensile_property(
+        evidence="At 650 °C, A had an ultimate tensile strength of 900 MPa"
+    )
+
+    result = materialize_candidate([_anchor("A")], [fact], source_text=source)
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["test_condition_raw"].startswith("Tensile tests were performed at 650 °C")
+
+
+def test_material_state_temperature_is_not_promoted_to_test_temperature():
+    source = (
+        "## Mechanical testing\n\n"
+        "Rate controlled tensile tests at 5 mm/min were performed on samples "
+        "sintered at 1280, 1290 and 1300 °C using an MTS 880.\n"
+    )
+
+    result = materialize_candidate(
+        [_anchor("A")], [_tensile_property()], source_text=source
+    )
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["test_condition_raw"] in (None, "")
+    assert not any(
+        issue.code == "property_test_context_recovered" for issue in result.issues
+    )
+
+
+def test_property_context_recovery_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_PROPERTY_CONTEXT_RECOVERY", "0")
+    source = (
+        "## Tensile testing\n\n"
+        "Tensile tests were performed at room temperature at a strain rate of 1 × 10^-3 s^-1.\n"
+    )
+
+    result = materialize_candidate(
+        [_anchor("A")], [_tensile_property()], source_text=source
+    )
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["test_condition_raw"] in (None, "")
+
+
+def test_core_tensile_abbreviation_receives_the_same_context_as_full_name():
+    source = (
+        "## Mechanical testing\n\n"
+        "Rate controlled tensile tests at 5 mm/min were performed using an MTS 880.\n"
+    )
+    fact = _tensile_property()
+    fact.data["property_name_raw"] = "UTS"
+
+    result = materialize_candidate([_anchor("A")], [fact], source_text=source)
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["test_condition_raw"] == (
+        "Rate controlled tensile tests at 5 mm/min were performed using an MTS 880."
+    )
+
+
+def test_fatigue_protocol_is_not_appended_to_tensile_condition():
+    source = (
+        "## Mechanical testing\n\n"
+        "Tensile test samples were designed according to ASTM E8. "
+        "The tensile tests were performed at a displacement rate of 1 mm/min. "
+        "Strain controlled fatigue test samples were tested according to ASTM E606.\n"
+    )
+
+    result = materialize_candidate(
+        [_anchor("A")], [_tensile_property()], source_text=source
+    )
+
+    condition = result.document["items"][0]["Extracted_Data"]["Properties"][0][
+        "test_condition_raw"
+    ]
+    assert "ASTM E8" in condition
+    assert "1 mm/min" in condition
+    assert "fatigue" not in condition
+    assert "E606" not in condition
+
+
+def test_distinct_nearby_tensile_protocol_is_not_merged_by_proximity():
+    source = "\n\n".join(
+        [
+            "## Mechanical testing",
+            "Quasistatic tensile tests were performed at a strain rate of 1 × 10^-3 s^-1.",
+            "In situ tensile tests were performed at a strain rate of 1 × 10^-3 s^-1 using synchrotron diffraction.",
+        ]
+    )
+
+    result = materialize_candidate(
+        [_anchor("A")], [_tensile_property()], source_text=source
+    )
+
+    condition = result.document["items"][0]["Extracted_Data"]["Properties"][0][
+        "test_condition_raw"
+    ]
+    assert "Quasistatic tensile tests" in condition
+    assert "synchrotron" not in condition
+
+
+def test_unusual_tensile_properties_wording_remains_a_distinct_protocol():
+    source = "\n\n".join(
+        [
+            "## Experimental procedure",
+            "The RT tensile properties were conducted on a testing machine at a strain rate of 2.5 × 10^-4 s^-1.",
+            "High-temperature tensile testing was performed at 650 °C at a strain rate of 1 × 10^-3 s^-1.",
+        ]
+    )
+
+    result = materialize_candidate(
+        [_anchor("A")], [_tensile_property()], source_text=source
+    )
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["test_condition_raw"] in (None, "")
+    assert any(
+        issue.code == "ambiguous_property_test_context" for issue in result.issues
+    )
+
+
 def _composition_fact(outer_sample: str, inner_sample: str, evidence: str):
     return CompositionFact(
         sample_id_raw=outer_sample,

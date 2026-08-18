@@ -25,6 +25,7 @@ from knowmat.alpha25.claim_quality import (
     filter_axis_facts,
     semantic_fact_signature,
 )
+from knowmat.alpha25.property_context import PropertyContextIndex
 
 
 _ID_FIELDS = {
@@ -2943,6 +2944,7 @@ def materialize_candidate(
     )
     fact_rows = quality_gate.accepted if quality_gate is not None else list(facts)
     issues = _chart_quarantine_issues_from_text(source_text)
+    property_context_index = PropertyContextIndex(source_text)
     if quality_gate is not None:
         issues.extend(
             MaterializeIssue(
@@ -3277,6 +3279,68 @@ def materialize_candidate(
                     )
                 )
                 continue
+            context_decision = property_context_index.recover(prop)
+            if context_decision.status == "recovered":
+                original_prop = deepcopy(prop)
+                prop = deepcopy(prop)
+                prop["test_condition_raw"] = context_decision.condition_raw
+                issues.append(
+                    MaterializeIssue(
+                        code="property_test_context_recovered",
+                        sample_id_raw=sample_id,
+                        path=f"items.{sample_id}.Properties",
+                        message=(
+                            "An empty Property test condition was restored from the "
+                            "unique compatible tensile procedure in the complete source text."
+                        ),
+                        evidence=[
+                            candidate.audit_dict()
+                            for candidate in context_decision.selected
+                        ],
+                        expected={
+                            "binding": "one source-verbatim compatible test context",
+                            "overwrite_existing_condition": False,
+                        },
+                        actual={
+                            "before": original_prop,
+                            "after": deepcopy(prop),
+                            "reason": context_decision.reason,
+                        },
+                        suggested_action=(
+                            "Review the source line spans if this paper uses multiple "
+                            "tensile protocols for the same property family."
+                        ),
+                    )
+                )
+            elif context_decision.status == "ambiguous":
+                issues.append(
+                    MaterializeIssue(
+                        code="ambiguous_property_test_context",
+                        sample_id_raw=sample_id,
+                        path=f"items.{sample_id}.Properties",
+                        message=(
+                            "The Property condition remained unchanged because multiple "
+                            "incompatible tensile procedures could not be resolved from "
+                            "property-local evidence."
+                        ),
+                        evidence=[
+                            candidate.audit_dict()
+                            for candidate in context_decision.candidates
+                        ],
+                        expected={
+                            "binding": "one uniquely supported test context",
+                            "action": "preserve the original empty condition when ambiguous",
+                        },
+                        actual={
+                            "fact": deepcopy(prop),
+                            "reason": context_decision.reason,
+                        },
+                        suggested_action=(
+                            "Manually bind the condition only when the source identifies "
+                            "which protocol produced this value."
+                        ),
+                    )
+                )
             invalid_series = _invalid_nonnegative_chart_series(
                 prop,
                 chart_csv_references=chart_csv_references,
