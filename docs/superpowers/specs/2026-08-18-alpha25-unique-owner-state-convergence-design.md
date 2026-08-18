@@ -50,18 +50,32 @@ explicit in Alpha25 facts and inventory anchors:
   `aged 2 h`, `annealed 8 h`, or `fully heat treated`;
 - feedstock qualifiers, such as `powder` or `as-received powder`; and
 - composition-source qualifiers, such as `nominal`, `measured`, `provided`,
-  `manufacturer analysis`, and `EDS analysis`.
+  `manufacturer analysis`, and `EDS analysis`; and
+- a source-named manufacturing qualifier, but only when the base anchor uses
+  explicit process grammar such as `deposited by X`, `X process`, or
+  `X-fabricated`, exactly one longer inventory identity contains that qualifier,
+  and both identities agree on Target/Reference role.
 
 These tokens are not material-specific aliases. A qualifier is applied only when the
 current fact owner family plus the qualifier identifies exactly one indexed target.
+Material classes such as `HEA` or `alloy` never qualify as manufacturing evidence.
+Likewise, explicit Target/Reference disagreement blocks residual-label merging even
+when the remaining text matches another source sample.
+
+Measured/nominal table suffixes such as `(M)` and `(N)` remain composition-source
+annotations. Repetition frequency cannot make one of those columns replace the
+source-backed base material display label. Numeric sample states such as `120 s
+Delay` are retained only when the inventory repeats the same value in `state_raw`
+and supplies a plausible parent material; a bare table header is still rejected.
 
 ### Auditing
 
 Every successful reassignment records `fact_owner_state_reconciled` in the existing
-`issues.json` and `issues.md`, including the original fact, previous owner label,
-selected target, evidence, and rule. An eligible but multi-target decision records
-`ambiguous_fact_owner_state` and preserves the original routing behavior. No separate
-audit file is added.
+`issues.json` and `issues.md`. Records are grouped by `(before_owner, after_owner,
+rule)` so a dense table does not create one review issue per cell. Each grouped issue
+still contains the complete ordered facts and per-fact evidence. An eligible but
+multi-target decision records `ambiguous_fact_owner_state` and preserves the original
+routing behavior. No separate audit file is added.
 
 ### Scope safeguards
 
@@ -79,6 +93,8 @@ Focused tests cover source-generic cases for:
 - WA/GA-like base samples versus their powder/feedstock inventory items;
 - T0/T5-like samples with uniquely named aging durations;
 - provided/manufacturer versus measured/EDS composition observations; and
+- Target/Reference role conflicts, explicit process-qualified aliases, and material
+  class suffixes that must not be interpreted as processes; and
 - ambiguous siblings that must not be guessed, broadcast, or silently moved.
 
 First rematerialize the five highest-signal papers (`paper_012`, `paper_019`,
@@ -88,7 +104,9 @@ to v9. Then rematerialize all 30 papers and run the same expert-GT evaluation.
 Acceptance requires:
 
 - 30/30 promotable, zero fatal validations, and zero schema-envelope mismatches;
-- 6,445 unique claims with no loose-recall loss caused by deletion;
+- at least 6,445 unique claims, with any increase explained by restoring distinct
+  source states rather than duplicating one claim, and no loose-recall loss caused by
+  deletion;
 - no decrease in aggregate unique strict or core-tensile strict F1;
 - a material reduction in wrong-owner tags; and
 - no unexplained paper-level regression. Any rule that fails these gates is reverted

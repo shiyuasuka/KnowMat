@@ -1017,6 +1017,123 @@ def test_unique_material_descriptor_anchor_redirects_to_its_short_code():
     assert len(observations) == 2
 
 
+def test_residual_alias_cannot_merge_reference_process_variant_into_target():
+    anchors = [
+        InventoryAnchor(
+            sample_id_raw="Ti64",
+            material_name_raw="Ti64",
+            state_raw=None,
+            role="Target",
+            data_nature="Experimental",
+            source_evidence=["Ti64 was deposited by WAAM"],
+            confidence=0.95,
+        ),
+        InventoryAnchor(
+            sample_id_raw="L-PBF Ti64",
+            material_name_raw="L-PBF",
+            state_raw="as-built",
+            role="Reference",
+            data_nature="Literature",
+            source_evidence=["literature data for L-PBF Ti64"],
+            confidence=0.9,
+        ),
+    ]
+
+    result = materialize_candidate(
+        anchors,
+        [
+            _structure_fact("Ti64", "Ti64 was deposited by WAAM"),
+            _structure_fact("L-PBF Ti64", "L-PBF Ti64 had columnar grains"),
+        ],
+    )
+
+    assert {item["Sample_ID"] for item in result.document["items"]} == {
+        "Ti64",
+        "L-PBF Ti64",
+    }
+
+
+def test_source_named_process_qualifier_reconciles_bare_target_alias():
+    anchors = [
+        InventoryAnchor(
+            sample_id_raw="Ti64",
+            material_name_raw="Ti64",
+            state_raw=None,
+            role="Target",
+            data_nature="Experimental",
+            source_evidence=["Ti64 material was deposited by the WAAM process"],
+            confidence=0.95,
+        ),
+        InventoryAnchor(
+            sample_id_raw="WAAM Ti64",
+            material_name_raw="WAAM Ti64 wall",
+            state_raw=None,
+            role="Target",
+            data_nature="Experimental",
+            source_evidence=["WAAM Ti64 wall"],
+            confidence=0.95,
+        ),
+        InventoryAnchor(
+            sample_id_raw="L-PBF Ti64",
+            material_name_raw="L-PBF",
+            state_raw="as-built",
+            role="Reference",
+            data_nature="Literature",
+            source_evidence=["literature data for L-PBF Ti64"],
+            confidence=0.9,
+        ),
+    ]
+
+    result = materialize_candidate(
+        anchors,
+        [
+            _structure_fact("Ti64", "Ti64 was deposited by the WAAM process"),
+            _structure_fact("L-PBF Ti64", "L-PBF Ti64 had columnar grains"),
+        ],
+    )
+
+    assert {item["Sample_ID"] for item in result.document["items"]} == {
+        "WAAM Ti64",
+        "L-PBF Ti64",
+    }
+
+
+def test_material_class_suffix_is_not_treated_as_process_qualifier():
+    anchors = [
+        InventoryAnchor(
+            sample_id_raw="Al5Ti5",
+            material_name_raw="Al5Ti5",
+            state_raw=None,
+            role="Target",
+            data_nature="Experimental",
+            source_evidence=["Al5Ti5 HEA showed high corrosion resistance"],
+            confidence=0.95,
+        ),
+        InventoryAnchor(
+            sample_id_raw="Al5Ti5 HEA",
+            material_name_raw="Al5Ti5 HEA",
+            state_raw=None,
+            role="Target",
+            data_nature="Experimental",
+            source_evidence=["Al5Ti5 HEA"],
+            confidence=0.95,
+        ),
+    ]
+
+    result = materialize_candidate(
+        anchors,
+        [
+            _structure_fact("Al5Ti5", "Al5Ti5 contained fine grains"),
+            _structure_fact("Al5Ti5 HEA", "Al5Ti5 HEA contained precipitates"),
+        ],
+    )
+
+    assert {item["Sample_ID"] for item in result.document["items"]} == {
+        "Al5Ti5",
+        "Al5Ti5 HEA",
+    }
+
+
 def test_source_initialism_remains_display_label_when_long_name_is_more_frequent():
     anchors = [
         InventoryAnchor(
@@ -1128,6 +1245,58 @@ def test_forbidden_base_identity_cannot_bypass_filter_via_state_expansion():
     result = materialize_candidate(anchors, facts)
 
     assert [item["Sample_ID"] for item in result.document["items"]] == ["S1"]
+
+
+def test_inventory_declared_numeric_delay_states_remain_distinct_samples():
+    anchors = [
+        InventoryAnchor(
+            sample_id_raw=delay,
+            material_name_raw="Ti-6Al-4V wall",
+            state_raw=delay.casefold(),
+            role="Target",
+            data_nature="Experimental",
+            source_evidence=[f"Hardness map-{delay}"],
+            confidence=0.9,
+        )
+        for delay in ("0 s Delay", "120 s Delay", "300 s Delay")
+    ]
+    # A weaker chunk may repeat the same source label without carrying the
+    # inventory state. It must not veto the independently grounded state row.
+    anchors.append(
+        InventoryAnchor(
+            sample_id_raw="120 s Delay",
+            material_name_raw="Ti-6Al-4V wall",
+            state_raw=None,
+            role="Target",
+            data_nature="Experimental",
+            source_evidence=["120 s Delay wall"],
+            confidence=0.7,
+        )
+    )
+
+    result = materialize_candidate(
+        anchors,
+        [
+            _structure_fact(delay, f"{delay} wall contained fine grains")
+            for delay in ("0 s Delay", "120 s Delay", "300 s Delay")
+        ],
+    )
+
+    assert [item["Sample_ID"] for item in result.document["items"]] == [
+        "0 s Delay",
+        "120 s Delay",
+        "300 s Delay",
+    ]
+
+
+def test_bare_numeric_delay_header_still_cannot_create_material_item():
+    result = materialize_candidate(
+        [_anchor("Ti-6Al-4V")],
+        [_structure_fact("120 s Delay", "120 s Delay")],
+    )
+
+    assert result.document["items"] == []
+    assert any(issue.code == "unresolved_sample_alias" for issue in result.issues)
 
 
 def test_free_text_state_descriptions_do_not_create_material_items():
@@ -1324,6 +1493,25 @@ def test_existing_base_absorbs_test_orientation_and_composition_column_labels():
     result = materialize_candidate(anchors, facts)
 
     assert [item["Sample_ID"] for item in result.document["items"]] == ["EPBF", "T5"]
+
+
+def test_repeated_composition_source_labels_cannot_replace_base_state_owner():
+    anchors = [
+        _anchor("T5"),
+        *[_anchor("$ T5 (M) $") for _ in range(6)],
+        *[_anchor("$ T5 (N) $") for _ in range(6)],
+    ]
+    half_hour = _structure_fact("T5", "T5 at 1030 °C/0.5h had fine precipitates")
+    half_hour.data["material_state"] = "1030 °C/0.5h"
+    two_hours = _structure_fact("T5", "T5 at 1030 °C/2h had coarse precipitates")
+    two_hours.data["material_state"] = "1030 °C/2h"
+
+    result = materialize_candidate(anchors, [half_hour, two_hours])
+
+    assert [item["Sample_ID"] for item in result.document["items"]] == [
+        "T5 [1030 °C/0.5h]",
+        "T5 [1030 °C/2h]",
+    ]
 
 
 def test_trailing_source_sample_code_routes_to_existing_identity():
@@ -1787,6 +1975,81 @@ def test_state_evidence_narrows_a_base_label_to_the_matching_state():
         len(row["Extracted_Data"]["Structure"]["Structure_Observations"]) == 1
         for row in items.values()
     )
+    assert sum(
+        issue.code == "fact_owner_state_reconciled" for issue in result.issues
+    ) == 2
+
+
+def test_observation_local_numeric_states_create_unique_family_members():
+    half_hour = _structure_fact("T0", "T0 at 1030 °C/0.5h had fine precipitates")
+    half_hour.data["material_state"] = "1030 °C/0.5h"
+    two_hours = _structure_fact("T0", "T0 at 1030 °C/2h had coarse precipitates")
+    two_hours.data["material_state"] = "1030 °C/2h"
+
+    result = materialize_candidate([_anchor("T0")], [half_hour, two_hours])
+
+    assert [row["Sample_ID"] for row in result.document["items"]] == [
+        "T0 [1030 °C/0.5h]",
+        "T0 [1030 °C/2h]",
+    ]
+    assert sum(
+        issue.code == "fact_owner_state_reconciled" for issue in result.issues
+    ) == 2
+
+
+def test_owner_state_audit_groups_facts_with_the_same_transition():
+    first = _structure_fact("T0", "T0 at 1030 °C/0.5h had fine precipitates")
+    first.data["material_state"] = "1030 °C/0.5h"
+    second = _structure_fact("T0", "T0 at 1030 °C/0.5h had ordered precipitates")
+    second.data["material_state"] = "1030 °C/0.5h"
+
+    result = materialize_candidate([_anchor("T0")], [first, second])
+
+    audits = [
+        issue for issue in result.issues
+        if issue.code == "fact_owner_state_reconciled"
+    ]
+    assert len(audits) == 1
+    assert audits[0].actual["before_owner"] == "T0"
+    assert audits[0].actual["after_owner"] == "T0 [1030 °C/0.5h]"
+    assert len(audits[0].actual["facts"]) == 2
+    assert len(audits[0].evidence) == 2
+
+
+def test_unqualified_observation_state_does_not_invent_numeric_state_item():
+    fact = _structure_fact("T0", "T0 was examined in the initial condition")
+    fact.data["material_state"] = "Initial"
+
+    result = materialize_candidate([_anchor("T0")], [fact])
+
+    assert [row["Sample_ID"] for row in result.document["items"]] == ["T0"]
+    assert not any(
+        issue.code == "fact_owner_state_reconciled" for issue in result.issues
+    )
+
+
+def test_local_initial_state_is_not_replaced_by_post_test_table_sibling():
+    initial = _structure_fact(
+        "T0",
+        "| State | Initial | 1% creep strain |\n| lattice | 0.3586 | 0.3595 |",
+    )
+    initial.data["material_state"] = "Initial state"
+    creep = _structure_fact(
+        "T0",
+        "| State | Initial | 1% creep strain |\n| lattice | 0.3586 | 0.3595 |",
+    )
+    creep.data["material_state"] = "1% creep strain"
+
+    result = materialize_candidate([_anchor("T0")], [initial, creep])
+
+    assert [row["Sample_ID"] for row in result.document["items"]] == ["T0"]
+    states = {
+        row["material_state"]
+        for row in result.document["items"][0]["Extracted_Data"]["Structure"][
+            "Structure_Observations"
+        ]
+    }
+    assert states == {"Initial state", "1% creep strain"}
 
 
 def test_table_specimen_state_narrows_property_to_matching_state():
@@ -1929,6 +2192,31 @@ def test_shared_state_qualifier_is_narrowed_by_material_family():
         source_evidence=[evidence],
         confidence=0.9,
     )
+
+    result = materialize_candidate(anchors, [fact])
+
+    assert [row["Sample_ID"] for row in result.document["items"]] == [
+        "WA [sintered at 1225 °C]"
+    ]
+
+
+def test_base_descriptor_is_not_collapsed_into_one_of_its_generated_states():
+    anchors = [
+        _anchor("WA", "sintered at 1225 °C"),
+        _anchor("WA", "sintered at 1300 °C"),
+        InventoryAnchor(
+            sample_id_raw="WA",
+            material_name_raw="WA",
+            state_raw=None,
+            role="Target",
+            data_nature="Experimental",
+            source_evidence=["WA powder alloy"],
+            confidence=0.9,
+        ),
+    ]
+    evidence = "WA samples sintered at 1225 °C had grain sizes of 80 ± 25 µm"
+    fact = _structure_fact("WA", evidence)
+    fact.data["material_state"] = "sintered at 1225 °C"
 
     result = materialize_candidate(anchors, [fact])
 

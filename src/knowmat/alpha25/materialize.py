@@ -1761,6 +1761,30 @@ def _presentation_parent_text(value: Any) -> str:
     return text if text and text != original else ""
 
 
+def _composition_source_parent_text(value: Any) -> str:
+    """Strip a terminal measured/nominal composition column annotation.
+
+    ``(M)`` and ``(N)`` distinguish composition sources in many tables; they do
+    not rename the material or a prepared state.  Preserve a trailing generated
+    state suffix so the same rule works for both ``T5 (M)`` and
+    ``T5 (M) [heat-treated]`` without model-, paper-, or material-specific
+    aliases.
+    """
+
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    state_suffix = ""
+    state_match = re.match(r"(?s)^(.*?)\s*(\[[^\[\]]+\])\s*$", text)
+    if state_match:
+        text, state_suffix = state_match.groups()
+    compact_tex = re.sub(r"\^\s*\{?\s*[A-Za-z0-9]+\s*\}?\s*\$?\s*$", "", text)
+    compact_tex = compact_tex.strip(" $\\")
+    match = re.match(r"(?is)^(.+?)\s*\(\s*[MN]\s*\)\s*$", compact_tex)
+    if not match:
+        return ""
+    parent = match.group(1).strip(" $\\")
+    return f"{parent} {state_suffix}".strip()
+
+
 def _existing_identity_parent(value: Any) -> str:
     """Return a source label's base identity for non-material qualifiers."""
 
@@ -1779,14 +1803,10 @@ def _existing_identity_parent(value: Any) -> str:
     if trailing_sample:
         return _identity_key(trailing_sample.group(1))
 
-    # Composition-table annotations such as ``A (M)`` and ``A (N)`` mean
-    # measured/nominal composition, not distinct material samples. Superscript
-    # footnote markers are presentation only. The caller still requires the
-    # extracted base identity to exist in the same paper inventory.
-    compact_tex = re.sub(r"\^\s*\{?\s*[A-Za-z0-9]+\s*\}?\s*\$?\s*$", "", text)
-    compact_tex = compact_tex.strip(" $\\")
-    match = re.match(r"(?is)^(.+?)\s*\(\s*[MN]\s*\)\s*$", compact_tex)
-    return _identity_key(match.group(1)) if match else ""
+    # The caller still requires the extracted base identity to exist in the
+    # same paper inventory before applying this presentation-only redirect.
+    composition_parent = _composition_source_parent_text(text)
+    return _identity_key(composition_parent) if composition_parent else ""
 
 
 def _anchor_is_structural_entity(anchor: InventoryAnchor) -> bool:
@@ -1868,6 +1888,36 @@ def _anchor_is_structural_entity(anchor: InventoryAnchor) -> bool:
         or (sample and material and (sample == material or sample.startswith(material + "row")))
         or structural_name
         or compact_structural_name
+    )
+
+
+def _anchor_is_explicit_state_sample(anchor: InventoryAnchor) -> bool:
+    """Return whether an otherwise metric-like label is a declared sample state.
+
+    Numeric state labels such as ``120 s Delay`` are also measurement-shaped, so
+    the generic non-material filter rejects them in isolation.  An inventory row
+    is stronger evidence: retain the label only when the provider copied the same
+    explicit state into ``state_raw`` and supplied a plausible parent material.
+    This does not legalize bare table headers or test conditions as material items.
+    """
+
+    sample = str(anchor.sample_id_raw or "").strip()
+    state = str(anchor.state_raw or "").strip()
+    material = str(anchor.material_name_raw or "").strip()
+    if not (
+        sample
+        and state
+        and material
+        and _EXPLICIT_STATE_ID.fullmatch(sample)
+        and is_plausible_material_identity(material)
+    ):
+        return False
+    sample_descriptor = _state_descriptor(sample)
+    state_descriptor = _state_descriptor(state)
+    return bool(
+        sample_descriptor is not None
+        and state_descriptor is not None
+        and sample_descriptor == state_descriptor
     )
 
 
@@ -2203,25 +2253,44 @@ class _IdentityIndex:
 
     def display_label(self, canonical: str) -> str:
         labels = self.labels.get(canonical) or Counter({canonical: 1})
+        # A composition table can repeat measured/nominal columns many more
+        # times than it repeats the actual sample heading. Frequency must not
+        # let ``T5 (M)`` replace the source-backed base label ``T5``. Only
+        # suppress the annotated forms when an unannotated label for this exact
+        # canonical identity is present; otherwise a literal source sample that
+        # happens to contain parentheses remains unchanged.
+        unannotated = Counter(
+            {
+                label: count
+                for label, count in labels.items()
+                if not _composition_source_parent_text(label)
+            }
+        )
+        display_labels = unannotated or labels
         source_codes = [
             label
-            for label in labels
+            for label in display_labels
             if re.fullmatch(r"[A-Za-z]{2,6}", label)
             and any(
                 other != label
                 and _source_initialism(other) == label.casefold()
-                for other in labels
+                for other in display_labels
             )
         ]
         if source_codes:
             return min(
                 source_codes,
-                key=lambda label: (-labels[label], len(label), label.casefold()),
+                key=lambda label: (
+                    -display_labels[label],
+                    len(label),
+                    label.casefold(),
+                ),
             )
         selected = min(
-            labels,
+            display_labels,
             key=lambda label: (
-                -labels[label],
+                -display_labels[label],
+                _identity_key(label) != canonical,
                 len(re.sub(r"[A-Za-z0-9]", "", label)),
                 len(label),
                 label.casefold(),
@@ -2270,6 +2339,100 @@ def _fact_primary_owners(index: _IdentityIndex, fact: AxisFact) -> set[str]:
     return owners
 
 
+def _fact_material_state_label(fact: AxisFact) -> str:
+    """Return an observation-local material state, never a test condition."""
+
+    if fact.fact_type not in {"composition_observation", "structure_observation"}:
+        return ""
+    value = str(fact.data.get("material_state") or "").strip()
+    return "" if _is_unresolved_alias(value) else value
+
+
+def _register_fact_local_states(
+    index: _IdentityIndex, facts: Sequence[AxisFact]
+) -> None:
+    """Index uniquely owned material states copied inside observations.
+
+    Projected tables can preserve a state in ``material_state`` even when no
+    inventory row repeats that column header.  Register that state only against
+    one already source-backed material family.  Raw numeric temperature/time
+    labels are accepted here because the schema field itself declares material
+    state; the same strings remain insufficient when they occur as bare headers.
+    """
+
+    candidates: dict[
+        tuple[str, tuple[str, tuple[str, ...]]], list[tuple[AxisFact, str]]
+    ] = {}
+    for fact in facts:
+        state = _fact_material_state_label(fact)
+        descriptor = _state_descriptor(state)
+        if descriptor is None:
+            continue
+        if re.search(
+            r"(?i)\b(?:creep|fatigue|tensile|compression|strain|deform|fractur)\w*\b",
+            state,
+        ):
+            # Post-test/deformation context remains on the observation itself;
+            # it does not define another independently prepared material item.
+            continue
+        category, qualifiers = descriptor
+        if category.startswith("raw:") and not qualifiers:
+            continue
+        owners = {
+            target
+            for label in [*_fact_identity_labels(fact), fact.sample_id_raw]
+            for target in index.resolve_exact(label)
+        }
+        if len(owners) != 1:
+            continue
+        owner = next(iter(owners))
+        base = index.state_family_base.get(owner, owner)
+        candidates.setdefault((base, descriptor), []).append((fact, state))
+
+    for (base, descriptor), rows in sorted(candidates.items()):
+        existing = {
+            target
+            for target in index.state_descriptor_targets.get(descriptor, set())
+            if index.state_family_base.get(target, target) == base
+        }
+        if len(existing) == 1:
+            continue
+        if existing:
+            # Multiple pre-existing state items with one normalized descriptor
+            # are ambiguous; an observation-local restatement cannot pick one.
+            continue
+        fact, state = min(
+            rows,
+            key=lambda row: (
+                len(str(row[1])),
+                str(row[1]).casefold(),
+                -float(row[0].confidence),
+            ),
+        )
+        base_anchors = index.anchors.get(base, [])
+        if not base_anchors:
+            continue
+        parent = max(base_anchors, key=lambda anchor: anchor.confidence)
+        display = f"{index.display_label(base)} [{state}]"
+        canonical = index.add_primary(display)
+        if canonical is None:
+            continue
+        index.add_anchor_as(
+            InventoryAnchor(
+                sample_id_raw=display,
+                material_name_raw=parent.material_name_raw,
+                state_raw=state,
+                role=parent.role,
+                data_nature=parent.data_nature,
+                source_evidence=list(fact.source_evidence),
+                confidence=fact.confidence,
+            ),
+            canonical,
+        )
+        index.add_state_alias(state, canonical)
+        index.add_state_family(canonical, base)
+
+
 def _build_identity_index(
     anchors: Sequence[InventoryAnchor], facts: Sequence[AxisFact]
 ) -> _IdentityIndex:
@@ -2292,10 +2455,18 @@ def _build_identity_index(
     # plausible after ``[state]`` is appended. Precompute the forbidden keys so
     # a deterministic table anchor with the same label cannot resurrect a phase,
     # region, method, or test-piece identity rejected from another chunk.
+    explicit_state_keys = {
+        _identity_key(anchor.sample_id_raw)
+        for anchor in anchors
+        if _anchor_is_explicit_state_sample(anchor)
+    }
     non_material_keys = {
         _identity_key(anchor.sample_id_raw)
         for anchor in anchors
-        if _is_non_material_label(anchor.sample_id_raw)
+        if (
+            _is_non_material_label(anchor.sample_id_raw)
+            and _identity_key(anchor.sample_id_raw) not in explicit_state_keys
+        )
         or _anchor_is_structural_entity(anchor)
     }
     material_anchors: list[InventoryAnchor] = []
@@ -2315,6 +2486,12 @@ def _build_identity_index(
         for anchor in anchors
         if is_plausible_material_identity(anchor.sample_id_raw)
     }
+    candidate_roles: dict[str, set[str]] = {}
+    for anchor in anchors:
+        sample_key = _identity_key(anchor.sample_id_raw)
+        role = str(anchor.role or "").strip().casefold()
+        if sample_key and role and not _is_unresolved_alias(role):
+            candidate_roles.setdefault(sample_key, set()).add(role)
     redirects: dict[str, str] = {}
 
     # Slash-qualified rows are sometimes explicit source specimen IDs rather
@@ -2456,8 +2633,98 @@ def _build_identity_index(
             elif sample_key.endswith(descriptor):
                 residual = sample_key[: -len(descriptor)]
             if residual in candidate_keys:
+                sample_roles = candidate_roles.get(sample_key, set())
+                residual_roles = candidate_roles.get(residual, set())
+                if (
+                    sample_roles
+                    and residual_roles
+                    and sample_roles.isdisjoint(residual_roles)
+                ):
+                    # Explicit Target/Reference disagreement is source evidence
+                    # that these are different material owners.  For example,
+                    # a reference process variant must not donate its process
+                    # prefix and absorb the target base alloy merely because
+                    # the remaining text matches that alloy's sample code.
+                    continue
                 redirects[sample_key] = residual
                 break
+
+    # A provider may first call the target by its bare alloy code and then use
+    # a process-qualified source identity (for example ``X`` and ``WAAM X``).
+    # Reconcile that pair only when the bare anchor's own copied evidence names
+    # the extra qualifier, both anchors agree on role, and exactly one longer
+    # candidate qualifies. State/feedstock prefixes remain independent owners.
+    # This also keeps reference process variants from absorbing a target base.
+    for base_key in sorted(candidate_keys):
+        if len(base_key) < 3 or base_key in redirects:
+            continue
+        base_roles = candidate_roles.get(base_key, set())
+        evidence_text = normalize_source_alias(
+            " ".join(
+                str(evidence)
+                for anchor in anchors
+                if _identity_key(anchor.sample_id_raw) == base_key
+                for evidence in anchor.source_evidence
+            )
+        )
+        if not evidence_text:
+            continue
+        qualified: set[str] = set()
+        for candidate in candidate_keys:
+            if candidate == base_key or redirects.get(candidate) == base_key:
+                continue
+            candidate_roles_for_key = candidate_roles.get(candidate, set())
+            if (
+                base_roles
+                and candidate_roles_for_key
+                and base_roles.isdisjoint(candidate_roles_for_key)
+            ):
+                continue
+            extra = ""
+            if candidate.endswith(base_key):
+                extra = candidate[: -len(base_key)]
+            elif candidate.startswith(base_key):
+                extra = candidate[len(base_key) :]
+            if len(extra) < 3 or extra not in evidence_text:
+                continue
+            descriptor = _state_descriptor(extra)
+            if descriptor is not None and not descriptor[0].startswith("raw:"):
+                continue
+            process_markers = {
+                f"{extra}{suffix}"
+                for suffix in (
+                    "process",
+                    "deposition",
+                    "deposited",
+                    "fabrication",
+                    "fabricated",
+                    "manufacturing",
+                    "manufactured",
+                    "printing",
+                    "printed",
+                    "processing",
+                    "processed",
+                    "production",
+                    "produced",
+                )
+            }
+            process_markers.update(
+                f"{verb}{article}{extra}"
+                for verb in (
+                    "depositedby",
+                    "fabricatedby",
+                    "manufacturedby",
+                    "printedby",
+                    "processedby",
+                    "producedby",
+                )
+                for article in ("", "the")
+            )
+            if not any(marker in evidence_text for marker in process_markers):
+                continue
+            qualified.add(candidate)
+        if len(qualified) == 1:
+            redirects[base_key] = next(iter(qualified))
 
     qualified_by_base: dict[str, set[str]] = {}
     for anchor in anchors:
@@ -2500,7 +2767,11 @@ def _build_identity_index(
                 descriptor_owners.setdefault(descriptor, set()).add(sample_key)
     for descriptor, owners in descriptor_owners.items():
         canonical_owners = {redirected_key(owner) for owner in owners}
-        if descriptor not in candidate_keys or len(canonical_owners) != 1:
+        if (
+            descriptor not in candidate_keys
+            or descriptor in expanded_base_keys
+            or len(canonical_owners) != 1
+        ):
             continue
         owner = next(iter(canonical_owners))
         if redirected_key(descriptor) != owner:
@@ -2696,23 +2967,63 @@ def _build_identity_index(
             for label in [*_fact_identity_labels(fact), fact.sample_id_raw]:
                 if index.add_primary(label) is not None:
                     break
+    _register_fact_local_states(index, facts)
     return index
 
 
-def _group_route(index: _IdentityIndex, fact: AxisFact) -> tuple[str, ...]:
-    state_context = [*fact.source_evidence]
+def _fact_local_state_context(fact: AxisFact) -> list[str]:
+    values: list[str] = []
     for key in (
         "material_state",
-        "test_condition_raw",
-        "test_specimen_raw",
         "state_raw",
+        "test_specimen_raw",
     ):
         value = fact.data.get(key)
-        if value not in (None, "", [], {}):
-            state_context.append(str(value))
+        if value not in (None, "", [], {}) and not _is_unresolved_alias(value):
+            values.append(str(value))
+    return values
+
+
+def _fact_state_context(fact: AxisFact) -> list[str]:
+    state_context = [*_fact_local_state_context(fact), *fact.source_evidence]
+    condition = fact.data.get("test_condition_raw")
+    if condition not in (None, "", [], {}):
+        state_context.append(str(condition))
+    return state_context
+
+
+def _fact_declared_targets(
+    index: _IdentityIndex, fact: AxisFact
+) -> tuple[str, ...]:
+    """Resolve the first explicit fact owner before state-evidence narrowing."""
+
+    for label in [*_fact_identity_labels(fact), fact.sample_id_raw]:
+        targets = index.resolve_label(label) or index.resolve_state_label(label)
+        if targets:
+            return targets
+    return ()
+
+
+def _group_route(index: _IdentityIndex, fact: AxisFact) -> tuple[str, ...]:
+    state_context = _fact_state_context(fact)
 
     def narrow_state_family(targets: tuple[str, ...]) -> tuple[str, ...]:
-        state_targets = index.resolve_state_evidence(state_context)
+        local_state_context = _fact_local_state_context(fact)
+        local_state_targets = index.resolve_state_evidence(local_state_context)
+        if local_state_targets:
+            state_targets = local_state_targets
+        elif any(
+            fact.data.get(key) not in (None, "", [], {})
+            and not _is_unresolved_alias(fact.data.get(key))
+            for key in ("material_state", "state_raw")
+        ):
+            # An observation-local state is more specific than a copied table
+            # spanning several columns. If the local value has no indexed state,
+            # keep the declared material owner instead of borrowing a sibling
+            # state merely mentioned elsewhere in that table.
+            return targets
+        else:
+            state_targets = index.resolve_state_evidence(state_context)
         # Prefer a uniquely qualified state member of the resolved base before
         # accepting the base itself as a textual match.  State registration can
         # legitimately contain both entries because the source named the state
@@ -3003,7 +3314,11 @@ def materialize_candidate(
                 _owner_agnostic_fact_signature(fact), set()
             ).update(primary_owners)
     groups: dict[str, dict[str, Any]] = {}
+    owner_state_audits: dict[
+        tuple[str, str, str], dict[str, list[Any]]
+    ] = {}
     for fact in fact_rows:
+        declared_targets = _fact_declared_targets(identity_index, fact)
         targets = _group_route(identity_index, fact)
         if not targets:
             labels = [*_fact_identity_labels(fact), fact.sample_id_raw]
@@ -3027,6 +3342,32 @@ def materialize_candidate(
                 )
             )
             continue
+        if len(declared_targets) == 1 and len(targets) == 1:
+            previous = declared_targets[0]
+            selected = targets[0]
+            previous_base = identity_index.state_family_base.get(previous, previous)
+            selected_base = identity_index.state_family_base.get(selected, selected)
+            if selected != previous and selected_base == previous_base:
+                before_owner = identity_index.display_label(previous)
+                after_owner = identity_index.display_label(selected)
+                local_state = _fact_material_state_label(fact)
+                rule = (
+                    "observation_local_material_state"
+                    if local_state
+                    else "unique_state_evidence"
+                )
+                audit = owner_state_audits.setdefault(
+                    (before_owner, after_owner, rule),
+                    {"facts": [], "evidence": []},
+                )
+                audit["facts"].append(fact.model_dump())
+                audit["evidence"].append(
+                    {
+                        "fact_index": len(audit["facts"]) - 1,
+                        "source_evidence": list(fact.source_evidence),
+                        "material_state": local_state or None,
+                    }
+                )
         if not _fact_primary_owners(identity_index, fact):
             related_specific_owners = {
                 owner
@@ -3065,6 +3406,38 @@ def materialize_candidate(
                 },
             )
             group["facts"].append(fact)
+
+    for (before_owner, after_owner, rule), audit in sorted(
+        owner_state_audits.items()
+    ):
+        fact_count = len(audit["facts"])
+        issues.append(
+            MaterializeIssue(
+                code="fact_owner_state_reconciled",
+                sample_id_raw=after_owner,
+                path=f"items.{after_owner}",
+                message=(
+                    f"{fact_count} fact{'s' if fact_count != 1 else ''} declared on "
+                    "a material family were narrowed to the only state in that "
+                    "family supported by local evidence."
+                ),
+                evidence=audit["evidence"],
+                expected={
+                    "binding": "one source-backed state in the declared material family",
+                    "broadcast": False,
+                },
+                actual={
+                    "before_owner": before_owner,
+                    "after_owner": after_owner,
+                    "rule": rule,
+                    "facts": audit["facts"],
+                },
+                suggested_action=(
+                    "Review the copied state label if the source uses the same "
+                    "qualifier for multiple material states."
+                ),
+            )
+        )
 
     items: list[dict[str, Any]] = []
     sorted_groups = sorted(
