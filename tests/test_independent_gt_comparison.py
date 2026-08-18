@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from knowmat.evaluation.independent_gt_comparison import (
     compare_claim_sets,
     flatten_v11,
@@ -82,6 +84,51 @@ def test_core_tensile_alias_does_not_match_inside_crystallographic_word() -> Non
     report = compare_claim_sets([crystallographic], [])
 
     assert report["unique_modes"]["strict"]["core_tensile"]["system"] == 0
+
+
+@pytest.mark.parametrize(
+    ("system_semantic", "expert_semantic"),
+    [
+        ("beam_diameter", "lpbf_laser_spot_diameter"),
+        ("hatch_spacing", "lpbf_hatch_space"),
+        ("preheat_temperature", "lpbf_build_plate_temperature"),
+        ("oxygen_content", "lpbf_oxygen_limit"),
+        ("duration", "hold_time"),
+        ("atmosphere", "deposition_environment"),
+    ],
+)
+def test_process_parameter_semantic_aliases_match(
+    system_semantic: str, expert_semantic: str
+) -> None:
+    left = {
+        **_expert(),
+        "axis": "Processing",
+        "semantic_key": system_semantic,
+        "name_raw": system_semantic,
+    }
+    right = {
+        **_expert(),
+        "axis": "Processing",
+        "semantic_key": expert_semantic,
+        "name_raw": expert_semantic,
+    }
+
+    assert semantic_score(left, right) == 1.0
+
+
+def test_process_stage_codes_are_not_collapsed_as_parameter_aliases() -> None:
+    left = {
+        **_expert(),
+        "axis": "Processing",
+        "semantic_key": "process_stage_A2.AM.PBF_LB",
+    }
+    right = {
+        **_expert(),
+        "axis": "Processing",
+        "semantic_key": "process_stage_A2.AM.DED_GENERIC",
+    }
+
+    assert semantic_score(left, right) < 1.0
 
 
 def test_strict_rejects_wrong_sample_while_loose_matches() -> None:

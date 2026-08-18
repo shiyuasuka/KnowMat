@@ -1,0 +1,179 @@
+# GPT-5.6-sol independent expert GT vs business GT vs final v5
+
+## Executive verdict
+
+**Professional conclusion: the adjudicated GPT-5.6-sol expert GT is the most reliable factual ledger; among the two evaluated system outputs, business GT is more accurate overall, while final v5 contains more source-supported correct facts but also materially more unsupported projections, owner/value errors, and cross-item duplicates.**
+
+- Business GT unique loose F1: **0.374**; final v5: **0.251**.
+- Business GT unique strict F1: **0.128**; final v5: **0.113**. Strict matching additionally requires compatible owner/state/condition.
+- Business GT unique core-tensile loose F1: **0.721**; final v5: **0.483**.
+- Evidence adjudication confirmed 984 correct business-GT tags and 1081 correct final-v5 tags, but final v5 accumulated 4847 core factual-error tags versus 3699 for business GT.
+- Cross-item duplicate tags: business GT 1284; final v5 1796.
+- Paper-level professional ranking: business GT leads on **24/30** papers; final v5 on **6/30**.
+- The audit-tag totals are diagnostic counts and may overlap; precision/recall/F1 comes only from the one-to-one claim matcher below.
+
+## Expert-GT provenance
+
+- Blind seal: `2026-08-18T08:55:41+00:00`
+- Blind manifest SHA-256: `5278ca2dd788d7f2bfde9940bd768a67fee9dc6e1a1727e7822723dbb23d7155`
+- Sealed independent claims: `3267`
+- Official adjudicated claims: `3286`
+- Accepted post-unblinding amendments: `89` (19 add, 70 replace); rejected: `2`.
+- Adjudicated validation: `passed`; sealed artifact hash check: `150/150 matched; 0 mismatch`.
+- Chart evidence audit: `95/95` CSVs covered by the sealed validation.
+- Papers: `30/30`
+- Loose match = same axis + compatible scientific semantic + compatible value/unit.
+- Strict match = loose match + compatible material owner/state/region + test condition.
+- Item IDs are never used as scientific identity. One-to-one matching prevents duplicates from inflating matches.
+- This is an evidence-validated LLM expert reference, not an independently human-certified universal gold standard; the blind seal and all post-unblinding amendments are supplied for audit.
+
+## Unique scientific claims: strict metrics
+
+| System | Axis | Matched | System | Expert | Precision | Recall | F1 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| business_gt | Composition | 114 | 637 | 856 | 0.179 | 0.133 | 0.153 |
+| business_gt | Processing | 82 | 821 | 555 | 0.100 | 0.148 | 0.119 |
+| business_gt | Structure | 103 | 931 | 773 | 0.111 | 0.133 | 0.121 |
+| business_gt | Characterization | 12 | 724 | 294 | 0.017 | 0.041 | 0.024 |
+| business_gt | Properties | 115 | 428 | 617 | 0.269 | 0.186 | 0.220 |
+| business_gt | **micro** | 426 | 3541 | 3095 | 0.120 | 0.138 | 0.128 |
+| business_gt | **unique core tensile** | 108 | 255 | 222 | 0.424 | 0.486 | 0.453 |
+| final_v5 | Composition | 210 | 988 | 856 | 0.213 | 0.245 | 0.228 |
+| final_v5 | Processing | 82 | 780 | 555 | 0.105 | 0.148 | 0.123 |
+| final_v5 | Structure | 153 | 3087 | 773 | 0.050 | 0.198 | 0.079 |
+| final_v5 | Characterization | 10 | 609 | 294 | 0.016 | 0.034 | 0.022 |
+| final_v5 | Properties | 90 | 1052 | 617 | 0.086 | 0.146 | 0.108 |
+| final_v5 | **micro** | 545 | 6516 | 3095 | 0.084 | 0.176 | 0.113 |
+| final_v5 | **unique core tensile** | 83 | 420 | 222 | 0.198 | 0.374 | 0.259 |
+
+## Unique scientific claims: loose metrics
+
+| System | Axis | Matched | System | Expert | Precision | Recall | F1 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| business_gt | Composition | 442 | 637 | 856 | 0.694 | 0.516 | 0.592 |
+| business_gt | Processing | 204 | 821 | 555 | 0.248 | 0.368 | 0.297 |
+| business_gt | Structure | 317 | 931 | 773 | 0.340 | 0.410 | 0.372 |
+| business_gt | Characterization | 54 | 724 | 294 | 0.075 | 0.184 | 0.106 |
+| business_gt | Properties | 223 | 428 | 617 | 0.521 | 0.361 | 0.427 |
+| business_gt | **micro** | 1240 | 3541 | 3095 | 0.350 | 0.401 | 0.374 |
+| business_gt | **unique core tensile** | 172 | 255 | 222 | 0.675 | 0.775 | 0.721 |
+| final_v5 | Composition | 508 | 988 | 856 | 0.514 | 0.593 | 0.551 |
+| final_v5 | Processing | 173 | 780 | 555 | 0.222 | 0.312 | 0.259 |
+| final_v5 | Structure | 288 | 3087 | 773 | 0.093 | 0.373 | 0.149 |
+| final_v5 | Characterization | 30 | 609 | 294 | 0.049 | 0.102 | 0.066 |
+| final_v5 | Properties | 206 | 1052 | 617 | 0.196 | 0.334 | 0.247 |
+| final_v5 | **micro** | 1205 | 6516 | 3095 | 0.185 | 0.389 | 0.251 |
+| final_v5 | **unique core tensile** | 155 | 420 | 222 | 0.369 | 0.698 | 0.483 |
+
+## Raw item assignments: strict metrics
+
+| System | Axis | Matched | System | Expert | Precision | Recall | F1 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| business_gt | Composition | 115 | 752 | 875 | 0.153 | 0.131 | 0.141 |
+| business_gt | Processing | 101 | 1757 | 650 | 0.057 | 0.155 | 0.084 |
+| business_gt | Structure | 105 | 1076 | 795 | 0.098 | 0.132 | 0.112 |
+| business_gt | Characterization | 13 | 1096 | 340 | 0.012 | 0.038 | 0.018 |
+| business_gt | Properties | 115 | 436 | 626 | 0.264 | 0.184 | 0.217 |
+| business_gt | **micro** | 449 | 5117 | 3286 | 0.088 | 0.137 | 0.107 |
+| business_gt | **unique core tensile** | 108 | 255 | 222 | 0.424 | 0.486 | 0.453 |
+| final_v5 | Composition | 231 | 1001 | 875 | 0.231 | 0.264 | 0.246 |
+| final_v5 | Processing | 94 | 876 | 650 | 0.107 | 0.145 | 0.123 |
+| final_v5 | Structure | 154 | 3185 | 795 | 0.048 | 0.194 | 0.077 |
+| final_v5 | Characterization | 16 | 655 | 340 | 0.024 | 0.047 | 0.032 |
+| final_v5 | Properties | 90 | 1066 | 626 | 0.084 | 0.144 | 0.106 |
+| final_v5 | **micro** | 585 | 6783 | 3286 | 0.086 | 0.178 | 0.116 |
+| final_v5 | **unique core tensile** | 83 | 420 | 222 | 0.198 | 0.374 | 0.259 |
+
+## Raw item assignments: loose metrics
+
+| System | Axis | Matched | System | Expert | Precision | Recall | F1 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| business_gt | Composition | 469 | 752 | 875 | 0.624 | 0.536 | 0.577 |
+| business_gt | Processing | 244 | 1757 | 650 | 0.139 | 0.375 | 0.203 |
+| business_gt | Structure | 325 | 1076 | 795 | 0.302 | 0.409 | 0.347 |
+| business_gt | Characterization | 65 | 1096 | 340 | 0.059 | 0.191 | 0.091 |
+| business_gt | Properties | 223 | 436 | 626 | 0.511 | 0.356 | 0.420 |
+| business_gt | **micro** | 1326 | 5117 | 3286 | 0.259 | 0.404 | 0.316 |
+| business_gt | **unique core tensile** | 172 | 255 | 222 | 0.675 | 0.775 | 0.721 |
+| final_v5 | Composition | 529 | 1001 | 875 | 0.528 | 0.605 | 0.564 |
+| final_v5 | Processing | 208 | 876 | 650 | 0.237 | 0.320 | 0.273 |
+| final_v5 | Structure | 289 | 3185 | 795 | 0.091 | 0.364 | 0.145 |
+| final_v5 | Characterization | 34 | 655 | 340 | 0.052 | 0.100 | 0.068 |
+| final_v5 | Properties | 206 | 1066 | 626 | 0.193 | 0.329 | 0.243 |
+| final_v5 | **micro** | 1266 | 6783 | 3286 | 0.187 | 0.385 | 0.251 |
+| final_v5 | **unique core tensile** | 155 | 420 | 222 | 0.369 | 0.698 | 0.483 |
+
+## Evidence-adjudicated error profile
+
+| System | Audit tag | Count |
+|---|---|---:|
+| business_gt | `confirmed_correct` | 984 |
+| business_gt | `confirmed_missing` | 2152 |
+| business_gt | `unsupported_claim` | 1911 |
+| business_gt | `wrong_owner` | 406 |
+| business_gt | `wrong_axis` | 34 |
+| business_gt | `wrong_origin` | 17 |
+| business_gt | `value_conflict` | 283 |
+| business_gt | `unit_conflict` | 244 |
+| business_gt | `condition_conflict` | 804 |
+| business_gt | `duplicate_claim` | 1284 |
+| business_gt | `likely_ocr_error` | 100 |
+| business_gt | `likely_chart_error` | 0 |
+| final_v5 | `confirmed_correct` | 1081 |
+| final_v5 | `confirmed_missing` | 2177 |
+| final_v5 | `unsupported_claim` | 2936 |
+| final_v5 | `wrong_owner` | 552 |
+| final_v5 | `wrong_axis` | 61 |
+| final_v5 | `wrong_origin` | 18 |
+| final_v5 | `value_conflict` | 493 |
+| final_v5 | `unit_conflict` | 219 |
+| final_v5 | `condition_conflict` | 568 |
+| final_v5 | `duplicate_claim` | 1796 |
+| final_v5 | `likely_ocr_error` | 47 |
+| final_v5 | `likely_chart_error` | 0 |
+
+These are source-evidence adjudication tags, not mutually exclusive confusion-matrix cells. They identify the failure mode: omission, unsupported fact, wrong material/sample attribution, wrong axis/origin, value/unit/condition conflict, or duplication.
+
+## Automated residual-difference queue
+
+| System | Issue code | Count |
+|---|---|---:|
+| business_gt | `condition_conflict` | 83 |
+| business_gt | `expert_gt_missing_or_unsupported` | 3239 |
+| business_gt | `system_missing` | 1960 |
+| business_gt | `unit_conflict` | 181 |
+| business_gt | `value_conflict` | 369 |
+| business_gt | `wrong_owner` | 794 |
+| final_v5 | `condition_conflict` | 109 |
+| final_v5 | `expert_gt_missing_or_unsupported` | 4735 |
+| final_v5 | `system_missing` | 2020 |
+| final_v5 | `unit_conflict` | 181 |
+| final_v5 | `value_conflict` | 599 |
+| final_v5 | `wrong_owner` | 572 |
+
+This queue is matcher-generated against the final adjudicated ledger. It is useful for locating disagreements but is not itself the professional verdict.
+
+## Sealed vs adjudicated audit
+
+The blind seal remains the historical pre-unblinding record. Official metrics use adjudicated GT; sealed metrics are retained below solely to show the effect of accepted corrections.
+
+| System | Metric | Sealed F1 | Adjudicated F1 | Delta |
+|---|---|---:|---:|---:|
+| business_gt | unique loose micro | 0.370 | 0.374 | +0.004 |
+| business_gt | unique strict micro | 0.125 | 0.128 | +0.003 |
+| business_gt | unique core tensile | 0.718 | 0.721 | +0.003 |
+| final_v5 | unique loose micro | 0.250 | 0.251 | +0.001 |
+| final_v5 | unique strict micro | 0.111 | 0.113 | +0.003 |
+| final_v5 | unique core tensile | 0.480 | 0.483 | +0.002 |
+
+## Professional interpretation
+
+- **Who is more accurate?** Business GT. Its unique loose, unique strict, and core-tensile F1 are all higher; it leads the paper-level professional ranking on 24/30 papers and has fewer total core factual-error tags and duplicates.
+- **Who has more correct extracted content?** Final v5 has more individually confirmed correct tags, so it is not simply worse or hallucinated wholesale. Its problem is precision and organization: supported facts are mixed with many repeated projections and facts assigned to the wrong item/state/condition.
+- **Who has more omissions?** Both omit substantial expert-ledger content. Evidence-tagged omissions are close, with final v5 slightly higher in this adjudication. The missing content is concentrated in owner/state-specific process, structure, characterization, and property facts rather than only headline tensile values.
+- **What are the factual errors?** Final v5 has substantially more unsupported projections, wrong-owner tags, value conflicts, and duplicates. Business GT is more conservative but has more condition-conflict and slightly more unit-conflict tags, so it is not uniformly better on every error class.
+- **Why are strict F1 values low?** The professional ledger is atomic and owner/state/condition-specific, while both v11 outputs often bundle, replicate, or omit those dimensions. Strict F1 is therefore a demanding attribution score, not a statement that only that fraction of sentences is scientifically true.
+
+A post-materialization validation caught one concrete nominal-versus-measured composition error in an amendment: the PBF-EB Ti-22Al-25Nb sample contains 21.93 at.% Nb in the reported table, not nominal 25 at.%. It was corrected before official scoring. Two non-atomic umbrella claims were rejected. The sealed corpus was never changed.
+
+Per-paper metrics are in the CSV. Per-claim evidence decisions and full audit payloads are retained in the adjudication files and machine-readable JSON report.

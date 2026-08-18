@@ -58,6 +58,10 @@ _PROPERTY_ALIASES = {
     "microhardness": "vickers_hardness",
     "vickers_hardness": "vickers_hardness",
 }
+_PROCESS_PREFIX = re.compile(
+    r"^(?:(?:laser_)?powder_bed_fusion|lpbf|pbf_lb|pbf_eb|ebpbf|"
+    r"directed_energy_deposition|ded|waam|am)_+"
+)
 
 
 def fold(value: Any) -> str:
@@ -444,6 +448,69 @@ def _canonical_semantic(claim: dict[str, Any]) -> str:
         elements = [row for row in tokens if row not in ignored and 1 <= len(row) <= 3]
         if elements:
             return f"composition_element_{elements[-1]}"
+    if claim.get("axis") == "Processing" and not value.startswith("process_stage_"):
+        while _PROCESS_PREFIX.match(value):
+            value = _PROCESS_PREFIX.sub("", value, count=1)
+        value = re.sub(r"_range$", "", value)
+        if re.fullmatch(
+            r"(?:laser_)?(?:beam_)?spot_(?:size|diameter)|"
+            r"(?:laser_)?beam_(?:size|diameter)",
+            value,
+        ):
+            return "beam_diameter"
+        if value in {
+            "hatch_space",
+            "hatch_spacing",
+            "scan_spacing",
+            "scanning_spacing",
+        }:
+            return "hatch_spacing"
+        if value in {
+            "build_plate_temperature",
+            "build_plate_preheat",
+            "substrate_temperature",
+            "preheat_temperature",
+        }:
+            return "preheat_temperature"
+        if value in {
+            "heating_temperature",
+            "heat_treatment_temperature",
+            "process_temperature",
+            "treatment_temperature",
+            "thermal_environment_temperature",
+        }:
+            return "process_temperature"
+        if value in {
+            "oxygen_content",
+            "oxygen_concentration",
+            "oxygen_level",
+            "oxygen_limit",
+        }:
+            return "oxygen_content"
+        if value in {
+            "duration",
+            "time",
+            "hold_time",
+            "holding_time",
+            "delay_time",
+            "exposure_time",
+        }:
+            return "duration"
+        if value in {
+            "atmosphere",
+            "environment",
+            "build_environment",
+            "deposition_environment",
+        }:
+            return "atmosphere"
+        if value in {
+            "energy_density",
+            "volumetric_energy_density",
+            "volume_energy_density",
+        }:
+            return "energy_density"
+        if value in {"feed_rate", "wire_feed_rate"}:
+            return "wire_feed_rate"
     return value
 
 
