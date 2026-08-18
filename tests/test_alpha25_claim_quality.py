@@ -105,6 +105,270 @@ def test_numeric_condition_is_deferred_without_evidence_unit_provenance():
     assert result.issues == []
 
 
+def test_source_locator_is_not_promoted_as_a_property_result():
+    result = filter_axis_facts(
+        [
+            _property(
+                name="tensile properties",
+                value="Table 2",
+                unit="",
+                evidence="Table 2 Tensile properties of H230AM and H230 at 900 °C",
+            )
+        ]
+    )
+
+    assert result.accepted == []
+    assert [issue.code for issue in result.issues] == [
+        "property_non_result_quarantined"
+    ]
+    assert result.issues[0].actual["reason"] == "source_locator"
+
+
+def test_measurement_method_is_not_promoted_as_a_property_result():
+    result = filter_axis_facts(
+        [
+            _property(
+                name="relative density",
+                value="measured by image method",
+                unit="",
+                evidence="The relative density is measured by image method.",
+            )
+        ]
+    )
+
+    assert result.accepted == []
+    assert [issue.code for issue in result.issues] == [
+        "property_non_result_quarantined"
+    ]
+    assert result.issues[0].actual["reason"] == "measurement_method"
+
+
+def test_nonnumeric_test_protocol_is_not_promoted_as_a_property_result():
+    result = filter_axis_facts(
+        [
+            _property(
+                name="tensile test",
+                value="six specimens",
+                unit="not_reported",
+                evidence="The tensile tests were conducted on six specimens.",
+            )
+        ]
+    )
+
+    assert result.accepted == []
+    assert [issue.code for issue in result.issues] == [
+        "property_non_result_quarantined"
+    ]
+    assert result.issues[0].actual["reason"] == "protocol_record"
+
+
+def test_numeric_result_with_test_word_in_name_is_preserved():
+    fact = _property(
+        name="fatigue test result",
+        value="1e6",
+        unit="cycles",
+        evidence="The fatigue test result was 1e6 cycles.",
+    )
+
+    result = filter_axis_facts([fact])
+
+    assert result.accepted == [fact]
+    assert result.issues == []
+
+
+def test_categorical_property_does_not_inherit_a_physical_unit():
+    result = filter_axis_facts(
+        [
+            _property(
+                name="wall width",
+                value="progressively increases with wall height",
+                unit="mm",
+                evidence="The wall width progressively increases with wall height.",
+            )
+        ]
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["unit_raw"] is None
+    assert [issue.code for issue in result.issues] == [
+        "property_categorical_unit_removed"
+    ]
+    assert result.issues[0].actual["before"]["unit_raw"] == "mm"
+    assert result.issues[0].actual["after"]["unit_raw"] is None
+
+
+def test_textual_number_preserves_its_physical_unit():
+    fact = _property(
+        name="tensile strength",
+        value="more than one gigapascal",
+        unit="GPa",
+        evidence="The tensile strength was more than one gigapascal.",
+    )
+
+    result = filter_axis_facts([fact])
+
+    assert result.accepted == [fact]
+    assert result.issues == []
+
+
+def test_directional_percentage_with_physical_unit_is_reclassified_as_relative_change():
+    evidence = (
+        "| Preheat Temp (C) | 39.3% \\uparrow | 242.3 | "
+        "8.5% \\uparrow | delay \\uparrow heat buildup \\downarrow |"
+    )
+    result = filter_axis_facts(
+        [
+            _property(
+                name="Preheat Temp",
+                value="39.3% \\uparrow",
+                unit="C",
+                evidence=evidence,
+            )
+        ]
+    )
+
+    assert len(result.accepted) == 1
+    data = result.accepted[0].data
+    assert data["property_name_raw"] == "Preheat Temp relative change"
+    assert data["value_raw"] == "39.3% \\uparrow"
+    assert data["unit_raw"] == "%"
+    assert [issue.code for issue in result.issues] == [
+        "property_relative_quantity_reclassified"
+    ]
+    assert result.issues[0].actual["before"]["unit_raw"] == "C"
+    assert result.issues[0].actual["after"]["unit_raw"] == "%"
+
+
+def test_percentage_of_room_temperature_property_is_reclassified_as_retention():
+    evidence = (
+        "At 300 °C, the yield strength of the AF sample decreased to as low as "
+        "37% of its room-temperature counterpart."
+    )
+    result = filter_axis_facts(
+        [
+            _property(
+                name="yield strength",
+                value="37%",
+                unit="%",
+                evidence=evidence,
+            )
+        ]
+    )
+
+    assert len(result.accepted) == 1
+    data = result.accepted[0].data
+    assert data["property_name_raw"] == "yield strength retention"
+    assert data["value_raw"] == "37%"
+    assert data["unit_raw"] == "%"
+    assert [issue.code for issue in result.issues] == [
+        "property_relative_quantity_reclassified"
+    ]
+
+
+def test_percentage_of_named_baseline_property_is_reclassified_as_retention():
+    evidence = (
+        "The AF sample retained approximately 83% of the room-temperature "
+        "yield strength at 200 °C."
+    )
+    result = filter_axis_facts(
+        [
+            _property(
+                name="yield strength",
+                value="83%",
+                unit="%",
+                evidence=evidence,
+            )
+        ]
+    )
+
+    assert result.accepted[0].data["property_name_raw"] == "yield strength retention"
+    assert [issue.code for issue in result.issues] == [
+        "property_relative_quantity_reclassified"
+    ]
+
+
+def test_intrinsically_percent_properties_are_not_reclassified_without_a_baseline():
+    facts = [
+        _property(
+            name="elongation",
+            value="12%",
+            unit="%",
+            evidence="The elongation was 12%.",
+        ),
+        _property(
+            name="relative density",
+            value="99.5%",
+            unit="%",
+            evidence="The relative density reached 99.5%.",
+        ),
+        _property(
+            name="porosity",
+            value="0.4%",
+            unit="%",
+            evidence="The measured porosity was 0.4%.",
+        ),
+    ]
+
+    result = filter_axis_facts(facts)
+
+    assert result.accepted == facts
+    assert result.issues == []
+
+
+def test_already_relative_property_name_is_not_qualified_twice():
+    fact = _property(
+        name="yield strength retention",
+        value="83%",
+        unit="%",
+        evidence=(
+            "The yield strength retention was 83% of the room-temperature value."
+        ),
+    )
+
+    result = filter_axis_facts([fact])
+
+    assert result.accepted == [fact]
+    assert result.issues == []
+
+
+def test_existing_change_name_only_receives_percent_unit_without_duplicate_suffix():
+    result = filter_axis_facts(
+        [
+            _property(
+                name="average hardness increase",
+                value="approximately 4%",
+                unit="not_reported",
+                evidence=(
+                    "Approximately a 4% increase in average hardness was observed "
+                    "when the interlayer delay increased from 0 to 300 s."
+                ),
+            )
+        ]
+    )
+
+    assert result.accepted[0].data["property_name_raw"] == "average hardness increase"
+    assert result.accepted[0].data["unit_raw"] == "%"
+    assert [issue.code for issue in result.issues] == [
+        "property_relative_quantity_reclassified"
+    ]
+
+
+def test_unrelated_change_word_in_evidence_does_not_reclassify_percent_property():
+    fact = _property(
+        name="elongation",
+        value="12%",
+        unit="not_reported",
+        evidence=(
+            "The elongation was 12% after the test temperature increased to 300 °C."
+        ),
+    )
+
+    result = filter_axis_facts([fact])
+
+    assert result.accepted == [fact]
+    assert result.issues == []
+
+
 def test_table_header_and_body_quotes_jointly_ground_value_and_unit():
     evidence = "| Sample | Nb (at.%) |\n| A1 | 21.93 |"
     result = filter_axis_facts(

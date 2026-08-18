@@ -28,6 +28,62 @@ def test_property_alias_and_unit_value_match() -> None:
     assert value_score(left, right) == 1.0
 
 
+def test_tex_and_unicode_micrometre_units_match() -> None:
+    left = {
+        **_expert(),
+        "unit_raw": r"\mum",
+        "value": {**_expert()["value"], "number": 12.4, "raw": "12.4"},
+    }
+    right = {
+        **_expert(),
+        "unit_raw": "µm",
+        "value": {**_expert()["value"], "number": 12.4, "raw": "12.4"},
+    }
+
+    assert value_score(left, right) == 1.0
+
+
+def test_kelvin_and_celsius_values_match_after_conversion() -> None:
+    left = {
+        **_expert(),
+        "unit_raw": "K",
+        "value": {**_expert()["value"], "number": 1303.15, "raw": "1303.15"},
+    }
+    right = {
+        **_expert(),
+        "unit_raw": "°C",
+        "value": {**_expert()["value"], "number": 1030.0, "raw": "1030"},
+    }
+
+    assert value_score(left, right) == 1.0
+
+
+def test_vickers_load_notation_variants_match() -> None:
+    left = {**_expert(), "unit_raw": "HV_{0.1}"}
+    right = {**_expert(), "unit_raw": "HV₀.₁"}
+
+    assert value_score(left, right) == 1.0
+
+
+def test_percent_presentation_variants_match() -> None:
+    left = {**_expert(), "unit_raw": "%RD"}
+    right = {**_expert(), "unit_raw": "%"}
+
+    assert value_score(left, right) == 1.0
+
+
+def test_core_tensile_alias_does_not_match_inside_crystallographic_word() -> None:
+    crystallographic = {
+        **_expert(),
+        "semantic_key": "crystallographic_plane_111_2theta",
+        "name_raw": "crystallographic plane (111) 2theta",
+    }
+
+    report = compare_claim_sets([crystallographic], [])
+
+    assert report["unique_modes"]["strict"]["core_tensile"]["system"] == 0
+
+
 def test_strict_rejects_wrong_sample_while_loose_matches() -> None:
     system = [{**_expert(sample="S2"), "uid": "sys_1", "source": "final_v5"}]
     expert = [_expert(sample="S1")]

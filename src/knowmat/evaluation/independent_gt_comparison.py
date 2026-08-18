@@ -434,7 +434,9 @@ def _canonical_semantic(claim: dict[str, Any]) -> str:
             if candidate in _PROPERTY_ALIASES:
                 return _PROPERTY_ALIASES[candidate]
             for alias, canonical in _PROPERTY_ALIASES.items():
-                if alias in candidate:
+                if re.search(
+                    rf"(?:^|_){re.escape(alias)}(?:_|$)", candidate
+                ):
                     return canonical
     if claim.get("axis") == "Composition":
         tokens = [row for row in re.split(r"_+", value) if row]
@@ -498,14 +500,49 @@ def evidence_score(left: dict[str, Any], right: dict[str, Any]) -> float:
 
 
 def _unit(value: Any) -> str:
-    text = fold(value).replace("microm", "um")
+    raw = unicodedata.normalize("NFKC", str(value or ""))
+    raw = re.sub(
+        r"\\(?:text|mathrm|operatorname)\s*\{([^{}]*)\}",
+        r"\1",
+        raw,
+    )
+    raw = raw.replace("{", "").replace("}", "").replace("$", "")
+    raw = raw.replace(r"\mu", "u").replace("µ", "u").replace("μ", "u")
+    raw = raw.replace("−", "-").replace("⁻", "^-").replace("²", "2")
+    raw_compact = re.sub(r"\s+", "", raw).casefold()
+    text = fold(raw).replace("microm", "um")
+    compact = text.replace(" ", "")
     aliases = {
         "wt": "percent", "wt percent": "percent", "wt pct": "percent", "wt%": "percent",
         "at": "percent", "at percent": "percent", "at pct": "percent", "%": "percent",
         "mpa": "mpa", "gpa": "gpa", "c": "degc", "degree c": "degc", "deg c": "degc",
         "um": "um", "mum": "um", "micron": "um", "microns": "um", "mm": "mm",
     }
-    return aliases.get(text, text)
+    if "%" in raw_compact or raw_compact in {
+        "wt", "wtpercent", "wtpct", "at", "atpercent", "atpct", "percent", "pct"
+    }:
+        return "percent"
+    if compact in {"um", "mum", "micron", "microns"}:
+        return "um"
+    if compact in {"um2", "um^2", "um-2", "um^-2"}:
+        return "um^-2"
+    if compact in {"m2", "m^2", "m-2", "m^-2"}:
+        return "m^-2"
+    if compact in {"g/cm3", "gcm3", "g/cc", "gcc"}:
+        return "g/cm3"
+    if compact in {"cycle", "cycles"}:
+        return "cycle"
+    if compact in {"s", "sec", "second", "seconds"}:
+        return "s"
+    if compact in {"min", "minute", "minutes"}:
+        return "min"
+    if compact in {"h", "hr", "hrs", "hour", "hours"}:
+        return "h"
+    hardness = re.fullmatch(r"hv(?:ickers)?([0-9]+(?:\.[0-9]+)?)?", compact)
+    if hardness:
+        load = hardness.group(1)
+        return f"hv{load}" if load else "hv"
+    return aliases.get(text, aliases.get(compact, text))
 
 
 def _converted_numbers(claim: dict[str, Any]) -> tuple[tuple[float, ...], str]:
@@ -513,8 +550,14 @@ def _converted_numbers(claim: dict[str, Any]) -> tuple[tuple[float, ...], str]:
     unit = _unit(claim.get("unit_raw"))
     if unit == "gpa":
         return tuple(row * 1000.0 for row in numbers), "mpa"
+    if unit == "k":
+        return tuple(row - 273.15 for row in numbers), "degc"
     if unit == "um":
         return tuple(row / 1000.0 for row in numbers), "mm"
+    if unit == "h":
+        return tuple(row * 3600.0 for row in numbers), "s"
+    if unit == "min":
+        return tuple(row * 60.0 for row in numbers), "s"
     return numbers, unit
 
 

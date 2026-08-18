@@ -29,6 +29,10 @@ ClaimQualityMode = Literal["off", "safe", "strict"]
 
 
 _NUMBER = re.compile(r"(?<![A-Za-z0-9])[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?")
+_TEXTUAL_NUMBER = re.compile(
+    r"(?i)\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+    r"twelve|hundred|thousand|million|billion)\b"
+)
 _PLACEHOLDER_VALUES = {
     "",
     "n a",
@@ -54,6 +58,7 @@ _NON_VALUE_ACTIONS = {
     "examined",
     "investigated",
     "measured",
+    "published",
     "reported",
     "studied",
     "tested",
@@ -93,6 +98,49 @@ _PROPERTY_ALIASES = {
     "microhardness": "vickers hardness",
     "vickers microhardness": "vickers hardness",
 }
+_PERCENT_QUANTITY = re.compile(r"(?i)(?:%|\bpercent(?:age)?\b|\bpct\.?\b)")
+_RELATIVE_CHANGE_CUE = re.compile(
+    r"(?ix)(?:"
+    r"\\(?:up|down)arrow"
+    r"|[↑↓↗↘]"
+    r"|\b(?:increase|decrease|change|reduction|drop|gain|loss)"
+    r"(?:d|s|ed|ing)?\b"
+    r")"
+)
+_REFERENCE_BASELINE_CUE = re.compile(
+    r"(?ix)\b(?:"
+    r"room[\s-]*temperature|ambient[\s-]*temperature|room\s*temp(?:erature)?|rt"
+    r"|baseline|counterpart|reference\s+(?:value|condition|sample|material)"
+    r"|initial\s+value|original\s+value"
+    r")\b"
+)
+_PERCENT_OF_REFERENCE = re.compile(
+    r"(?is)(?:%|\bpercent(?:age)?\b).{0,80}?\bof\b.{0,100}?"
+    r"(?:room[\s-]*temperature|ambient[\s-]*temperature|room\s*temp(?:erature)?|rt\b"
+    r"|baseline|counterpart|reference\s+(?:value|condition|sample|material)"
+    r"|initial\s+value|original\s+value)"
+)
+_RELATIVE_PROPERTY_NAME = re.compile(
+    r"(?i)\b(?:retention|relative|change|increase|decrease|reduction|drop|gain|loss|"
+    r"percentage\s+(?:change|difference)|percent\s+(?:change|difference))\b"
+)
+_SOURCE_LOCATOR_VALUE = re.compile(
+    r"(?ix)^\s*(?:supplementary\s+)?(?:table|fig(?:ure)?)\s*"
+    r"[A-Za-z0-9._-]*\s*$"
+)
+_METHOD_ONLY_VALUE = re.compile(
+    r"(?ix)(?:"
+    r"^\s*(?:measur(?:e|ed|ement)|determin(?:e|ed|ation)|evaluat(?:e|ed|ion)|"
+    r"calculat(?:e|ed|ion)|assess(?:ed|ment)|characteriz(?:e|ed|ation)|"
+    r"test(?:ed|ing)?|report(?:ed|ing))\s+(?:by|using|via|with)\b"
+    r"|\b(?:measurements?|tests?|curves?|data|properties)\s+"
+    r"(?:were\s+)?(?:measured|determined|evaluated|calculated|reported)\s*$"
+    r")"
+)
+_COMPARISON_HEADING_VALUE = re.compile(r"(?i)^\s*comparison\s+of\b")
+_PROPERTY_PROTOCOL_NAME = re.compile(
+    r"(?i)\b(?:tests?|testing|measurements?|prediction)\b"
+)
 _DROP_SIGNATURE_KEYS = {
     "candidate_stage_id",
     "stage_index_candidate",
@@ -410,6 +458,36 @@ def _gate_property(fact: PropertyFact) -> tuple[AxisFact | None, list[ClaimQuali
                 actual=fact.data,
             )
         ]
+    property_name = str(fact.data.get("property_name_raw") or "").strip()
+    non_result_reason = ""
+    if _SOURCE_LOCATOR_VALUE.fullmatch(str(value or "")):
+        non_result_reason = "source_locator"
+    elif _METHOD_ONLY_VALUE.search(str(value or "")):
+        non_result_reason = "measurement_method"
+    elif _COMPARISON_HEADING_VALUE.search(str(value or "")):
+        non_result_reason = "comparison_heading"
+    elif not _numbers(value) and _PROPERTY_PROTOCOL_NAME.search(property_name):
+        non_result_reason = "protocol_record"
+    if non_result_reason:
+        return None, [
+            ClaimQualityIssue(
+                code="property_non_result_quarantined",
+                sample_id_raw=fact.sample_id_raw,
+                fact_type=fact.fact_type,
+                path="data.value_raw",
+                message=(
+                    "A source locator, method, protocol, or comparison heading is "
+                    "not an observed material-property result."
+                ),
+                evidence=evidence,
+                expected={"value_raw": "explicit material response"},
+                actual={"reason": non_result_reason, "fact": deepcopy(fact.data)},
+                suggested_action=(
+                    "Review the preserved evidence and restore only an explicit "
+                    "property outcome, not its test protocol or source locator."
+                ),
+            )
+        ]
     value_numbers = _numbers(value)
     evidence_numbers = _numbers("\n".join(evidence))
     if value_numbers and evidence_numbers and not _value_is_grounded(value, evidence):
@@ -423,7 +501,104 @@ def _gate_property(fact: PropertyFact) -> tuple[AxisFact | None, list[ClaimQuali
                 actual=fact.data,
             )
         ]
-    return fact, []
+
+    data = deepcopy(fact.data)
+    property_name = str(data.get("property_name_raw") or "").strip()
+    value_text = str(value or "").strip()
+    unit_key = _unit_key(data.get("unit_raw"))
+    evidence_text = "\n".join(evidence)
+    has_percent_value = bool(_PERCENT_QUANTITY.search(value_text))
+    reference_relative = bool(
+        has_percent_value
+        and _REFERENCE_BASELINE_CUE.search(evidence_text)
+        and _PERCENT_OF_REFERENCE.search(evidence_text)
+    )
+    dimensional_relative_change = bool(
+        has_percent_value
+        and unit_key not in {"", "%"}
+        and _RELATIVE_CHANGE_CUE.search(f"{property_name}\n{value_text}")
+    )
+    already_relative = bool(_RELATIVE_PROPERTY_NAME.search(property_name))
+
+    classification = ""
+    if reference_relative:
+        classification = "retention"
+    elif dimensional_relative_change:
+        classification = "relative change"
+    if not classification:
+        unit_raw = data.get("unit_raw")
+        data_source = _fold(data.get("data_source"))
+        if (
+            not value_numbers
+            and not _TEXTUAL_NUMBER.search(value_text)
+            and data_source not in {"chart", "figure", "image"}
+            and unit_raw not in (None, "")
+            and not _placeholder(unit_raw)
+        ):
+            before = deepcopy(data)
+            data["unit_raw"] = None
+            return fact.model_copy(update={"data": data}), [
+                ClaimQualityIssue(
+                    code="property_categorical_unit_removed",
+                    sample_id_raw=fact.sample_id_raw,
+                    fact_type=fact.fact_type,
+                    path="data.unit_raw",
+                    message=(
+                        "A purely categorical property response cannot carry a "
+                        "dimensional unit copied from an absolute-value field."
+                    ),
+                    evidence=evidence,
+                    expected={"unit_raw": None, "value_semantics": "categorical"},
+                    actual={"before": before, "after": deepcopy(data)},
+                    suggested_action=(
+                        "Review only if the cited source reports a numeric magnitude "
+                        "for this categorical response."
+                    ),
+                )
+            ]
+        return fact, []
+
+    before = deepcopy(data)
+    if classification == "retention" and not already_relative:
+        data["property_name_raw"] = f"{property_name} retention".strip()
+    elif classification == "relative change" and not already_relative:
+        data["property_name_raw"] = f"{property_name} relative change".strip()
+    data["unit_raw"] = "%"
+    if data == before:
+        return fact, []
+
+    cleaned = fact.model_copy(update={"data": data})
+    return cleaned, [
+        ClaimQualityIssue(
+            code="property_relative_quantity_reclassified",
+            sample_id_raw=fact.sample_id_raw,
+            fact_type=fact.fact_type,
+            path="data.property_name_raw",
+            message=(
+                "A source-explicit relative quantity was separated from the "
+                "corresponding absolute physical property."
+            ),
+            evidence=evidence,
+            expected={
+                "quantity_semantics": classification,
+                "unit_raw": "%",
+                "absolute_property_unit": "not applicable to this relative value",
+            },
+            actual={
+                "before": before,
+                "after": deepcopy(data),
+                "reason": (
+                    "percent_of_reference_baseline"
+                    if reference_relative
+                    else "directional_percent_with_incompatible_unit"
+                ),
+            },
+            suggested_action=(
+                "Review the cited baseline or change direction only if the source "
+                "intended an absolute measurement."
+            ),
+        )
+    ]
 
 
 def _gate_structure(fact: StructureFact) -> tuple[AxisFact | None, list[ClaimQualityIssue]]:

@@ -313,6 +313,13 @@ _STRUCTURAL_PROPERTY_MEASUREMENT = re.compile(
     r"density|number\s+density|aspect\s+ratio|area|volume|morphology|distribution|"
     r"equivalent\s+circle|circularity|misorientation)\b"
 )
+_CRYSTALLOGRAPHIC_STRUCTURE_PROPERTY = re.compile(
+    r"(?i)\b(?:lattice\s+(?:parameter|constant|misfit)|"
+    r"(?:interplanar\s+|d[\s-]*)spacing|diffraction\s+peak\s+position|"
+    r"crystallographic\s+planes?|"
+    r"peak\s+position(?:\s+for)?\s+crystallographic|"
+    r"2\s*theta|2θ)\b"
+)
 _MATERIAL_RESPONSE_PROPERTY = re.compile(
     r"(?i)\b(?:strength|stress|strain|hardness|ductility|elongation|modulus|"
     r"toughness|fatigue|creep|conductivity|resistivity|corrosion)\b"
@@ -322,6 +329,17 @@ _CHART_POINT_PAIR = re.compile(
     r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*,\s*"
     r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s*\)",
     re.I,
+)
+_MORPHOLOGY_IDENTITY_DESCRIPTOR = re.compile(
+    r"(?ix)^\s*(?:"
+    r"spherical|near[\s-]*spherical|irregular(?:ly)?(?:[\s-]*shaped)?|"
+    r"angular|elongated|dendritic|satellite(?:d)?"
+    r")(?:\s+(?:shape|morphology))?(?:\s+(?:for|of)\s+.+)?\s*$"
+)
+_MATERIAL_IDENTITY_TERM = re.compile(
+    r"(?i)\b(?:alloy|steel|superalloy|composite|nanocomposite|intermetallic|"
+    r"metal|ceramic|titanium|aluminium|aluminum|nickel|cobalt|copper|"
+    r"magnesium)\b"
 )
 
 
@@ -1420,10 +1438,19 @@ def _property_to_structure_observation(
     """Reclassify an unambiguous structural measurement from Properties."""
 
     name = str(row.get("property_name_raw") or "").strip()
+    normalized_name = re.sub(r"[_-]+", " ", name)
+    is_crystallographic = bool(
+        _CRYSTALLOGRAPHIC_STRUCTURE_PROPERTY.search(normalized_name)
+    )
     if (
         not name
-        or not _STRUCTURAL_PROPERTY_SUBJECT.search(name)
-        or not _STRUCTURAL_PROPERTY_MEASUREMENT.search(name)
+        or not (
+            is_crystallographic
+            or (
+                _STRUCTURAL_PROPERTY_SUBJECT.search(name)
+                and _STRUCTURAL_PROPERTY_MEASUREMENT.search(name)
+            )
+        )
         or _MATERIAL_RESPONSE_PROPERTY.search(name)
     ):
         return None
@@ -1444,6 +1471,8 @@ def _property_to_structure_observation(
         structure_kind = "defect"
     elif "interface" in lowered or "boundary" in lowered:
         structure_kind = "interface"
+    elif is_crystallographic:
+        structure_kind = "phase_assemblage"
     else:
         structure_kind = "other"
     unit = str(row.get("unit_raw") or "").strip()
@@ -3139,6 +3168,77 @@ def _group_material_identities(group: dict[str, Any]) -> list[dict[str, Any]]:
     return _deduplicate(identities)
 
 
+def _morphology_only_material_identity(row: dict[str, Any]) -> bool:
+    """Return whether a material-name slot contains only shape/morphology prose."""
+
+    name = str(row.get("material_name_raw") or "").strip()
+    if not name or not _MORPHOLOGY_IDENTITY_DESCRIPTOR.fullmatch(name):
+        return False
+    other = " ".join(
+        str(row.get(key) or "").strip()
+        for key in ("material_family", "designation_raw")
+    )
+    return not _MATERIAL_IDENTITY_TERM.search(other) and not (
+        _looks_like_composition_designation(other)
+    )
+
+
+def _material_identity_rank(
+    row: dict[str, Any], *, sample_id: str
+) -> tuple[int, int, int, int, int, int]:
+    name = str(row.get("material_name_raw") or "").strip()
+    designation = str(row.get("designation_raw") or "").strip()
+    family = str(row.get("material_family") or "").strip()
+    feedstock = str(row.get("feedstock_form") or "").strip()
+    combined = " ".join(
+        value for value in (name, designation, family, feedstock) if value
+    )
+    sample_key = normalize_source_alias(sample_id)
+    combined_key = normalize_source_alias(combined)
+    designation_like = bool(
+        _looks_like_composition_designation(combined)
+        or re.search(r"[A-Za-z].*\d|\d.*[A-Za-z]", combined)
+    )
+    material_named = bool(_MATERIAL_IDENTITY_TERM.search(combined))
+    sample_linked = bool(sample_key and sample_key in combined_key)
+    populated = sum(bool(value) for value in (name, designation, family, feedstock))
+    return (
+        int(bool(name) and material_named),
+        int(designation_like),
+        int(material_named),
+        int(sample_linked),
+        populated,
+        min(len(re.findall(r"[A-Za-z0-9]+", combined)), 12),
+    )
+
+
+def _select_material_identity(
+    identities: Sequence[dict[str, Any]], *, sample_id: str
+) -> tuple[dict[str, Any] | None, bool]:
+    """Replace a morphology-only first identity with a fuller grounded candidate."""
+
+    if not identities:
+        return None, False
+    first = identities[0]
+    if not _morphology_only_material_identity(first):
+        return first, False
+    candidates = [
+        row for row in identities[1:] if not _morphology_only_material_identity(row)
+    ]
+    if not candidates:
+        return first, False
+    selected = max(
+        candidates,
+        key=lambda row: _material_identity_rank(row, sample_id=sample_id),
+    )
+    if not any(
+        str(selected.get(key) or "").strip()
+        for key in ("material_name_raw", "designation_raw", "material_family")
+    ):
+        return first, False
+    return selected, selected != first
+
+
 def _comparison_only_property_fact(fact: AxisFact) -> bool:
     if fact.fact_type != "property":
         return False
@@ -3497,7 +3597,40 @@ def materialize_candidate(
             grouped_facts.setdefault(fact.fact_type, []).append(_fact_data(fact))
 
         identities = _group_material_identities(group)
-        material_identity = identities[0] if identities else None
+        material_identity, identity_replaced = _select_material_identity(
+            identities, sample_id=sample_id
+        )
+        if identity_replaced:
+            issues.append(
+                MaterializeIssue(
+                    code="material_identity_descriptor_replaced",
+                    sample_id_raw=sample_id,
+                    path=f"items.{sample_id}.Composition.Material_Identity",
+                    message=(
+                        "A morphology-only material name was replaced by a fuller "
+                        "source-grounded identity from the same reconciled owner."
+                    ),
+                    evidence=[
+                        evidence
+                        for fact in group["facts"]
+                        for evidence in fact.source_evidence
+                    ],
+                    expected={
+                        "material_identity": (
+                            "material family, designation, or explicit material name"
+                        )
+                    },
+                    actual={
+                        "before": deepcopy(identities[0]),
+                        "after": deepcopy(material_identity),
+                        "candidates": deepcopy(identities),
+                    },
+                    suggested_action=(
+                        "Review only if the morphology phrase is itself the source's "
+                        "formal material designation."
+                    ),
+                )
+            )
         if len(identities) > 1:
             issues.append(
                 MaterializeIssue(

@@ -1,3 +1,5 @@
+import pytest
+
 from knowmat.alpha25.contracts import (
     CompositionFact,
     InventoryAnchor,
@@ -39,6 +41,46 @@ def test_claim_quality_mode_defaults_to_safe_and_supports_three_levels(monkeypat
     for value in ("0", "false", "off", "disabled"):
         monkeypatch.setenv("KNOWMAT2_ALPHA25_CLAIM_QUALITY", value)
         assert _claim_quality_mode() == "off"
+
+
+def test_relative_quantity_reclassification_is_materialized_and_audited():
+    evidence = (
+        "| Melt Pool Length (mm) | 58.8% \\uparrow | 23.15 | "
+        "0.4% \\downarrow | delay \\uparrow instability \\downarrow |"
+    )
+    fact = PropertyFact(
+        sample_id_raw="A",
+        data={
+            "property_id_candidate": "temp",
+            "property_name_raw": "Melt Pool Length",
+            "value_raw": "0.4% \\downarrow",
+            "unit_raw": "mm",
+            "test_method_raw": None,
+            "test_standard_raw": None,
+            "test_condition_raw": None,
+            "test_specimen_raw": None,
+            "raw_note": None,
+            "data_source": "table",
+            "source_evidence": [evidence],
+            "confidence": 0.9,
+        },
+        source_evidence=[evidence],
+        confidence=0.9,
+    )
+
+    result = materialize_candidate([_anchor("A")], [fact])
+
+    prop = result.document["items"][0]["Extracted_Data"]["Properties"][0]
+    assert prop["property_name_raw"] == "Melt Pool Length relative change"
+    assert prop["value_raw"] == "0.4% \\downarrow"
+    assert prop["unit_raw"] == "%"
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "property_relative_quantity_reclassified"
+    )
+    assert issue.actual["before"]["unit_raw"] == "mm"
+    assert issue.actual["after"]["unit_raw"] == "%"
 
 
 def _tensile_property(
@@ -2385,6 +2427,63 @@ def test_identity_alias_resolution_is_independent_of_cross_chunk_fact_order():
     assert [row["Sample_ID"] for row in result.document["items"]] == ["A230"]
 
 
+def test_material_identity_prefers_full_source_name_over_morphology_descriptor():
+    anchor = InventoryAnchor(
+        sample_id_raw="WA",
+        material_name_raw="nickel-based alloy 625 WA powder",
+        state_raw="as-received",
+        role="Target",
+        data_nature="Experimental",
+        source_evidence=["SEM micrographs of nickel-based alloy 625 WA powder"],
+        confidence=0.9,
+    )
+    morphology = CompositionFact(
+        sample_id_raw="WA",
+        fact_type="material_identity",
+        data={
+            "material_family": None,
+            "material_name_raw": "irregular-shaped for WA powder",
+            "designation_raw": None,
+            "feedstock_form": "powder",
+        },
+        source_evidence=["WA powder was irregular-shaped"],
+        confidence=0.8,
+    )
+    designation = CompositionFact(
+        sample_id_raw="WA",
+        fact_type="material_identity",
+        data={
+            "material_family": "nickel-based alloy",
+            "material_name_raw": None,
+            "designation_raw": "alloy 625",
+            "feedstock_form": "WA powder",
+        },
+        source_evidence=["nickel-based alloy 625 powders: WA powder"],
+        confidence=0.9,
+    )
+
+    result = materialize_candidate(
+        [anchor],
+        [morphology, designation, _structure_fact("WA", "WA contained fine grains")],
+    )
+
+    identity = result.document["items"][0]["Extracted_Data"]["Composition"][
+        "Material_Identity"
+    ]
+    assert identity["material_name_raw"] == "nickel-based alloy 625 WA powder"
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "material_identity_descriptor_replaced"
+    )
+    assert issue.actual["before"]["material_name_raw"] == (
+        "irregular-shaped for WA powder"
+    )
+    assert issue.actual["after"]["material_name_raw"] == (
+        "nickel-based alloy 625 WA powder"
+    )
+
+
 def test_combined_sample_fact_is_attached_to_known_constituents_without_third_item():
     result = materialize_candidate(
         [_anchor("A230"), _anchor("A230AM")],
@@ -3133,6 +3232,51 @@ def test_grain_measurement_property_is_reclassified_to_structure():
     observations = item["Structure"]["Structure_Observations"]
     assert len(observations) == 1
     assert observations[0]["features"][0]["value_raw"] == "16.0"
+    assert any(issue.code == "fact_axis_reclassified" for issue in result.issues)
+
+
+@pytest.mark.parametrize(
+    ("property_name", "value", "unit"),
+    [
+        ("lattice parameter", "3.5990", "Å"),
+        ("d-spacing value for (111) plane", "2.0779", "Å"),
+        ("interplanar spacing", "0.208", "nm"),
+        ("peak_position_for_crystallographic_planes_111", "51.026", "°2θ"),
+        ("crystallographic_plane_111_2theta", "51.027", "°"),
+    ],
+)
+def test_crystallographic_property_is_reclassified_to_structure(
+    property_name: str, value: str, unit: str
+):
+    evidence = f"{property_name} was {value} {unit}"
+    fact = PropertyFact(
+        sample_id_raw="Alloy-A",
+        data={
+            "property_id_candidate": "temp",
+            "property_name_raw": property_name,
+            "value_raw": value,
+            "unit_raw": unit,
+            "test_method_raw": "XRD",
+            "test_standard_raw": None,
+            "test_condition_raw": None,
+            "test_specimen_raw": None,
+            "raw_note": None,
+            "data_source": "table",
+            "source_evidence": [evidence],
+            "confidence": 0.9,
+        },
+        source_evidence=[evidence],
+        confidence=0.9,
+    )
+
+    result = materialize_candidate([_anchor("Alloy-A")], [fact])
+
+    extracted = result.document["items"][0]["Extracted_Data"]
+    assert extracted["Properties"] == []
+    observation = extracted["Structure"]["Structure_Observations"][0]
+    assert observation["structure_kind"] == "phase_assemblage"
+    assert observation["features"][0]["feature_name_raw"] == property_name
+    assert observation["features"][0]["value_raw"] == value
     assert any(issue.code == "fact_axis_reclassified" for issue in result.issues)
 
 
