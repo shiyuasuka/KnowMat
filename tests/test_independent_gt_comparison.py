@@ -3,6 +3,7 @@ from __future__ import annotations
 from knowmat.evaluation.independent_gt_comparison import (
     compare_claim_sets,
     flatten_v11,
+    issue_candidates,
     semantic_score,
     value_score,
 )
@@ -33,6 +34,8 @@ def test_strict_rejects_wrong_sample_while_loose_matches() -> None:
     report = compare_claim_sets(system, expert)
     assert report["modes"]["loose"]["micro"]["matched"] == 1
     assert report["modes"]["strict"]["micro"]["matched"] == 0
+    issues = issue_candidates(system, expert, report)
+    assert [row["code"] for row in issues] == ["wrong_owner"]
 
 
 def test_strict_rejects_missing_condition() -> None:
@@ -67,4 +70,3 @@ def test_flatten_composition_is_atomic_and_skips_not_reported_parameter() -> Non
     processing = [row for row in claims if row["axis"] == "Processing"]
     assert len(composition) == 2
     assert len(processing) == 1  # stage identity only; absent power is not a fact
-

@@ -757,23 +757,22 @@ def issue_candidates(system: list[dict[str, Any]], expert: list[dict[str, Any]],
         code = "system_missing"
         if index in loose_expert:
             row = loose_expert[index]
-            scores = row["scores"]
-            code = "wrong_owner" if scores["owner"] < 0.48 else "condition_conflict"
+            system_claim = system[row["system_index"]]
+            code = "wrong_owner" if owner_conflict(system_claim, claim) else "condition_conflict"
         issues.append({"code": code, "expert_claim": claim, "system_claim": system[loose_expert[index]["system_index"]] if index in loose_expert else None})
     for index in strict["unmatched_system"]:
         claim = system[index]
-        code = "expert_gt_missing_or_unsupported"
         if index in loose_system:
-            row = loose_system[index]
-            scores = row["scores"]
-            code = "wrong_owner" if scores["owner"] < 0.48 else "condition_conflict"
-        else:
-            same_semantic = [row for row in expert if semantic_score(claim, row) >= 0.6]
-            if same_semantic:
-                if any(_unit(claim.get("unit_raw")) and _unit(row.get("unit_raw")) and _unit(claim.get("unit_raw")) != _unit(row.get("unit_raw")) for row in same_semantic):
-                    code = "unit_conflict"
-                elif all(value_score(claim, row) == 0 for row in same_semantic):
-                    code = "value_conflict"
+            # The paired owner/condition conflict was emitted from the expert
+            # side above. Do not double-count it as a second system extra.
+            continue
+        code = "expert_gt_missing_or_unsupported"
+        same_semantic = [row for row in expert if semantic_score(claim, row) >= 0.6]
+        if same_semantic:
+            if any(_unit(claim.get("unit_raw")) and _unit(row.get("unit_raw")) and _unit(claim.get("unit_raw")) != _unit(row.get("unit_raw")) for row in same_semantic):
+                code = "unit_conflict"
+            elif all(value_score(claim, row) == 0 for row in same_semantic):
+                code = "value_conflict"
         issues.append({"code": code, "system_claim": claim, "expert_claim": None})
     return issues
 
