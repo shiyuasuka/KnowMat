@@ -1,112 +1,118 @@
-# Alpha25 Same-Owner Complete Tensile Bundle Deduplication — Implementation Plan
+# Alpha25 Source-Block Complete Tensile Survivor Deduplication — Implementation Plan
 
 Design: `docs/superpowers/specs/2026-08-20-alpha25-same-owner-complete-tensile-bundle-dedup-design.md`
 
 ## Constraints and baseline
 
-- Modify only Alpha25 internal materialization and its focused tests.
+- Modify only Alpha25 internal materialization, focused tests, and validation
+  artifacts.
 - Do not modify prompts, schema, model/provider settings, OCR/VLM/LLM behavior,
   frozen task caches, or public `final.json` structure.
 - Require one identical uniquely routed canonical owner; state-lineage and
-  cross-owner extensions are outside B1.
-- Merge only atomic, locally coherent YS/UTS/elongation bundles. Preserve
-  thresholds, ranges, relative/qualitative facts, elongation subtypes,
-  orientation siblings, explicit conditions, and all no-candidate facts.
-- v46 baseline: 30 papers, 405 frozen caches, 301.37 seconds; GPT expert unique
-  global loose = 1,578/6,272/3,093 and core tensile loose/strict =
-  166/211/213 and 126/211/213.
+  cross-owner extensions are outside A1.
+- The survivor must be a complete YS/UTS/elongation bundle proven by one source
+  block. The loser may be one corresponding fact.
+- Preserve thresholds, ranges, relative/qualitative facts, elongation subtypes,
+  orientation siblings, explicit conditions, no-candidate facts, non-Properties
+  axes, and Composition.
+- v46 baseline: 30 papers, 405 frozen caches, 301.37 seconds; GPT expert global
+  loose = 1,578/6,272/3,093 and core tensile loose/strict = 166/211/213 and
+  126/211/213.
 
-## Task 1 — Add bundle-focused failing tests
+## Task 1 — Correct the test contract
 
-1. Add test helpers that construct locally bound three-member core-tensile
-   bundles with controlled owner, role, nature, evidence unit, values,
-   uncertainties, subtype, and condition.
-2. Prove one same-owner rounded bundle is atomically absorbed by one uniquely
-   richer bundle, with three survivor facts and one complete audit issue.
-3. Add negatives for one mismatched member, incomplete bundle, synthetic
-   cross-evidence assembly, condition conflict, state/orientation siblings,
-   role/nature conflict, elongation subtype conflict, threshold/range/relative
-   values, uncertainty conflict, crossed dominance, and multiple maxima.
-4. Add input-permutation tests for stable output and audit payloads.
+1. Replace the obsolete two-complete-bundle expectations with helpers for a
+   source-block complete survivor and a single member-level loser.
+2. Add success tests for table and prose survivor blocks whose member facts have
+   different copied evidence strings.
+3. Assert one removal and one complete audit per loser, with the whole survivor
+   bundle retained and only its matched member enriched.
+4. Add negatives for incomplete survivor, synthetic cross-block assembly,
+   multiple survivor bundles, owner/state/orientation, role/nature, condition,
+   subtype, threshold/range/relative/qualitative, and uncertainty conflicts.
+5. Preserve input-permutation determinism coverage.
 
-## Task 2 — Build isolated bundle candidates
+## Task 2 — Build source-block complete survivors
 
-1. Add small internal immutable bundle/member records near the existing tensile
-   precision helpers in `src/knowmat/alpha25/materialize.py`.
-2. Reuse current semantic, literal value-shape, canonical unit, owner routing,
-   role/nature, subtype, condition, table-binding, evidence-unit, and
-   source-assertion helpers rather than creating a second normalization system.
-3. Construct a candidate only from exactly one YS, one UTS, and one elongation
-   sharing one unique owner and one local source binding.
-4. Reject ambiguous members, mixed conditions, and synthetic bundles as a safe
-   no-op; keep ordering independent of input position.
+1. Replace the prototype evidence-string grouping with a deterministic source
+   block index computed once from `source_text`.
+2. Represent whole Markdown tables and prose paragraphs separately and keep a
+   stable source-location key.
+3. Reuse current tensile semantic, numeric-literal, canonical-unit, owner route,
+   role/nature, subtype, condition, and assertion helpers.
+4. Build a survivor only when one block contains exactly one eligible YS, UTS,
+   and elongation for one canonical owner and compatible context.
+5. Reject any ambiguous member, owner, row, condition, or synthetic cross-block
+   construction as a safe no-op.
 
-## Task 3 — Implement atomic dominance and merge
+## Task 3 — Implement member-level dominance
 
-1. Compare bundles element-wise with exact or literal-rounding compatibility,
-   separate central/uncertainty precision, interval overlap, identical units,
-   role/nature, subtype, owner, and source-proven condition compatibility.
-2. Require one survivor to be no less informative for all three members and
-   strictly richer for at least one; confidence and provider labels cannot break
-   ties.
-3. Build a deterministic per-owner dominance graph and accept only one unique
-   maximal one-to-one survivor. Reject crossed, tied, competing, or transitive
-   ambiguous candidates.
-4. Merge all three member envelopes and evidence atomically. Emit one
-   `tensile_same_owner_bundle_duplicate_merged` issue containing removed bundle,
-   survivor before/after, three relations, source bindings, and gate decisions.
-5. Invoke the new pass after cross-owner dominance and before exact same-owner
-   alias folding so existing owner resolution retains its complete bundle.
+1. Compare every eligible single fact only with the corresponding semantic
+   member of complete survivor bundles for the same owner.
+2. Require canonical-unit equality, exact/literal-rounding/complete-bundle
+   approximation compatibility, compatible uncertainty, identical role/nature,
+   explicit condition compatibility, and elongation subtype equality.
+3. Require the survivor member to be no less informative and strictly richer.
+4. Accept only one unique maximal complete-survivor/member relation per loser;
+   reject multiple bundles or competing conditions without using confidence or
+   output order as a tie-breaker.
+5. Merge only the selected survivor member, remove only the loser, and emit one
+   `tensile_same_owner_bundle_member_duplicate_merged` audit containing the full
+   removed fact and complete survivor bundle before/after.
+6. Invoke the pass after cross-owner dominance and before exact same-owner
+   alias folding.
 
-## Task 4 — Focused verification
+## Task 4 — Focused and related verification
 
-1. Run the new tests with `pytest -o addopts=''` and confirm they fail before and
-   pass after the production change.
-2. Run `tests/test_alpha25_materialize.py`, claim-quality, runtime property alias,
-   production-safety, and evaluator tests.
-3. Run Python compilation and `git diff --check` on the touched source and test
-   files.
-4. Verify no prompt/schema/ruleset files changed during B1.
+1. Run the corrected tests first and observe failure against the obsolete
+   prototype.
+2. Implement the production change and run
+   `pytest -o addopts='' tests/test_alpha25_materialize.py -q`.
+3. Run claim-quality, runtime-property-alias, production-safety, evaluator, and
+   other directly related suites.
+4. Run Python compilation and `git diff --check` for touched source/test files.
+5. Confirm prompt, schema, ruleset, and provider files were not changed by A1.
 
 ## Task 5 — Frozen-cache pilot and manual audit
 
-1. Rematerialize diagnosed duplicate candidates from the v46 frozen run with
-   `scripts/rematerialize_alpha25_tasks.py`, plus orientation, threshold, range,
-   condition, and no-candidate protection papers.
-2. Compare every changed `final.json` against v46 while excluding automatic run
+1. Rematerialize the diagnosed 15 papers from the v46 frozen workload using
+   `scripts/rematerialize_alpha25_tasks.py`.
+2. Compare all changed `final.json` output with v46 while excluding automatic
    metadata.
-3. Inspect every accepted bundle audit against copied OCR Markdown. Reject or
-   narrow any relation that lacks one unique same-owner scientific observation.
-4. Run pilot evaluation against the sealed GPT expert ledger and business GT;
-   proceed only when matched/recall and all protection gates hold.
+3. Inspect every accepted member-level merge against copied OCR Markdown,
+   including paper_006 PBF-EB and paper_028 HA1100 sentinels.
+4. Confirm orientation, condition, subtype, threshold/range, no-candidate,
+   Composition, and non-Properties protection gates.
+5. Evaluate the pilot against sealed GPT expert GT and business GT; proceed only
+   with no matched/recall regression.
 
 ## Task 6 — Full frozen-cache dual replay and evaluation
 
 1. Rematerialize all 30 papers from exactly 405 cached task responses into a new
-   output root, recording wall time and confirming zero provider calls.
-2. Run the existing GPT-expert/business comparison and capture global,
-   Composition, Properties, and unique core-tensile loose/strict metrics.
-3. Repeat the complete rematerialization into a second root and prove all 30
-   `final.json` files and summaries are byte-identical.
-4. Verify prompt, skill, schema, ruleset, and cache digests against v46; verify
-   runtime is at most 331.51 seconds on the same host/workload.
-5. Write a final v47 report with per-paper changes, audit counts, test results,
-   performance, both GT comparisons, and a requirement-by-requirement verdict.
+   output root, recording wall time and proving zero provider calls.
+2. Evaluate global, Composition, Properties, and unique core-tensile loose and
+   strict metrics against both GT sets.
+3. Repeat the complete replay into a second root and prove all 30 `final.json`
+   files are byte-identical.
+4. Verify prompt, skill, schema, ruleset, and cache digests against v46 and the
+   331.51-second runtime ceiling.
+5. Write the v47 acceptance report with per-paper changes, source evidence,
+   audits, metrics, determinism, runtime, and a gate-by-gate verdict.
 
 ## Expected tracked files
 
 - `src/knowmat/alpha25/materialize.py`
 - `tests/test_alpha25_materialize.py`
-- `docs/superpowers/plans/2026-08-20-alpha25-same-owner-complete-tensile-bundle-dedup-plan.md`
+- this implementation plan and its design document
 
 Pilot, full-run, determinism, and evaluation artifacts remain untracked under
 the existing `data/` and `reports/` conventions.
 
 ## Acceptance and rollback boundary
 
-Accept only when every gate in the design passes, including strict improvement
-of global and core-tensile loose precision/F1 without any matched/recall loss,
-unchanged Composition, unchanged non-Properties output, complete audits, byte
-determinism, and the runtime ceiling. If any gate fails, narrow or remove only
-the B1 pass and its new tests. Do not reset, clean, or overwrite unrelated user
-changes in the existing dirty worktree.
+Accept only when every design gate passes: loose precision/F1 strictly improve,
+matched/recall never decline, strict precision/F1 do not decline, Composition
+and non-Properties remain unchanged, every removal is source-audited, dual runs
+are deterministic, and runtime stays within the ceiling. If any gate fails,
+narrow or remove only A1. Do not reset, clean, or overwrite unrelated user
+changes in the dirty worktree.
