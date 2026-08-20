@@ -30,7 +30,8 @@ Design: `docs/superpowers/specs/2026-08-20-alpha25-same-owner-complete-tensile-b
 4. Add negatives for incomplete survivor, synthetic cross-block assembly,
    multiple survivor bundles, owner/state/orientation, role/nature, condition,
    subtype, threshold/range/relative/qualitative, and uncertainty conflicts.
-5. Preserve input-permutation determinism coverage.
+5. Add a protection test for multiple identical narrative assertions folded
+   into one evidence envelope, and preserve input-permutation determinism.
 
 ## Task 2 — Build source-block complete survivors
 
@@ -47,20 +48,22 @@ Design: `docs/superpowers/specs/2026-08-20-alpha25-same-owner-complete-tensile-b
 
 ## Task 3 — Implement member-level dominance
 
-1. Compare every eligible single fact only with the corresponding semantic
-   member of complete survivor bundles for the same owner.
-2. Require canonical-unit equality, exact/literal-rounding/complete-bundle
+1. Run existing exact alias folding first; protect an exact identity represented
+   by multiple input assertions or multiple distinct evidence strings.
+2. Compare every eligible single-assertion fact only with the corresponding
+   semantic member of complete survivor bundles for the same owner.
+3. Require canonical-unit equality, exact/literal-rounding/complete-bundle
    approximation compatibility, compatible uncertainty, identical role/nature,
    explicit condition compatibility, and elongation subtype equality.
-3. Require the survivor member to be no less informative and strictly richer.
-4. Accept only one unique maximal complete-survivor/member relation per loser;
+4. Require the survivor member to be no less informative and strictly richer.
+5. Accept only one unique maximal complete-survivor/member relation per loser;
    reject multiple bundles or competing conditions without using confidence or
    output order as a tie-breaker.
-5. Merge only the selected survivor member, remove only the loser, and emit one
+6. Merge only the selected survivor member, remove only the loser, and emit one
    `tensile_same_owner_bundle_member_duplicate_merged` audit containing the full
    removed fact and complete survivor bundle before/after.
-6. Invoke the pass after cross-owner dominance and before exact same-owner
-   alias folding.
+7. Invoke the pass after cross-owner dominance and exact same-owner alias
+   folding.
 
 ## Task 4 — Focused and related verification
 

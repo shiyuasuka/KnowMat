@@ -22,10 +22,13 @@ B1 prototype required both the loser and survivor to be complete bundles. A
 15-paper frozen-cache pilot produced zero output changes because real residuals
 are normally single prose or citation projections beside a complete table row.
 
-A source-block scan found six pre-exact candidates. One is already handled by
-the existing exact pass. The expected net A1 scope is therefore three facts:
-one PBF-EB UTS, one PBF-EB elongation, and one HA1100 yield-strength projection.
-These paper names and values are regression sentinels, not production selectors.
+A source-block scan found six pre-exact candidates. The first A1 pilot proved
+five member-level relations, but removing the PBF-EB UTS headline record reduced
+strict expert-ledger recall because three independently copied narrative
+assertions had already been consolidated into that one record. The accepted A1
+scope is therefore two facts: one PBF-EB elongation and one HA1100
+yield-strength projection. These paper names and values are regression
+sentinels, not production selectors.
 
 ## Considered approaches
 
@@ -50,11 +53,13 @@ cross-owner dominance and before exact same-owner alias folding:
 2. Partition the OCR Markdown into deterministic source blocks, including whole
    Markdown tables and prose paragraphs.
 3. Build complete same-owner survivor bundles from one block.
-4. Compare eligible single facts with the corresponding member of every
-   compatible survivor bundle.
-5. Merge only a loser with one unique maximal survivor member and emit one full
+4. Run existing exact same-owner alias folding, then protect any loser record
+   that represents multiple copied source assertions.
+5. Compare eligible single-assertion facts with the corresponding member of
+   every compatible survivor bundle.
+6. Merge only a loser with one unique maximal survivor member and emit one full
    audit record per removed fact.
-6. Continue through existing exact deduplication and materialization.
+7. Continue through existing materialization.
 
 The pass consumes only the current `AxisFact` sequence, identity index, and
 already available `source_text`. It performs no network calls and introduces no
@@ -87,7 +92,11 @@ is ambiguous and ineligible.
 ## Member-level loser eligibility
 
 The loser may be a single YS, UTS, or elongation fact. It need not have sibling
-YS/UTS/elongation rows. It may be removed only when:
+YS/UTS/elongation rows, but it must contain exactly one distinct copied source
+assertion. Multiple exact input rows with the same scientific identity, or one
+row already carrying multiple distinct evidence strings after exact folding,
+form a multi-assertion envelope and are outside A1. An eligible loser may be
+removed only when:
 
 - it and the bundle route to exactly the same canonical owner;
 - it has the same Target/Reference role and Experimental/Computational nature;
@@ -118,12 +127,13 @@ all qualifying relations resolve to one unique survivor member in one unique
 complete bundle. Multiple table rows, multiple compatible bundles, tied maxima,
 crossed precision, or competing conditions produce a safe no-op.
 
-Several identical loser projections may independently merge into the same
-survivor member. Existing exact deduplication may first collapse identical
-losers; this does not weaken the A1 proof. Candidate construction, relation
-selection, evidence union, audit ordering, and output ordering must be stable
-under input-order permutations. Confidence, data source labels, output order,
-paper identity, and GT membership cannot establish or break scientific ties.
+Several identical loser projections do not independently merge into the same
+survivor member. Existing exact deduplication first collapses them, after which
+their multi-assertion evidence envelope is protected. Candidate construction,
+relation selection, evidence union, audit ordering, and output ordering must be
+stable under input-order permutations. Confidence, data source labels, output
+order, paper identity, and GT membership cannot establish or break scientific
+ties.
 
 ## Merge and audit behavior
 
@@ -181,6 +191,7 @@ Focused tests must cover:
 - a complete table-row survivor absorbing one rounded prose UTS or elongation;
 - a complete prose-block survivor absorbing one single projection;
 - different evidence strings for the three survivor members;
+- an exact multi-assertion headline envelope remaining unchanged;
 - member-level exact, rounding, compatible uncertainty, and approximation cases;
 - source-block and table-row construction without synthetic cross-block joins;
 - multiple survivors, owner/state/orientation, role/nature, condition and
