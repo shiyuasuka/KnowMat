@@ -35,7 +35,7 @@ source evidence. No GT, model name, or provider branch is consulted.
 ## Verification
 
 - Focused and Alpha25/V11 regression suite: 663 passed.
-- Five cached-paper pilot: 30/30-compatible output shape on the selected
+- Five cached-paper pilot: 5/5 compatible output shapes on the selected
   papers; only the known paper-029 same-metric, missing-coordinate pair was
   quarantined (two records). The other four papers had no new quarantines or
   materialization failures.
