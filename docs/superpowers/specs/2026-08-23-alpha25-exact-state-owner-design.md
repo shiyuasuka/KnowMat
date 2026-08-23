@@ -22,6 +22,11 @@ qualifier superset. Superset matching remains a fallback only for source labels
 that omit a detail which is uniquely recoverable from a sibling state. This
 prevents a composite or broader state from stealing a narrower numbered state.
 
+When a shared processing-table evidence envelope contains structured parameter
+payloads with distinct values for the competing owners, the rows are retained
+as an explicit table coordinate. The shared-projection quarantine still applies
+to processing prose or copied rows without owner-distinct values.
+
 ## Invariants
 
 - `HIP1` and `HIP2` produce distinct canonical display labels and distinct
