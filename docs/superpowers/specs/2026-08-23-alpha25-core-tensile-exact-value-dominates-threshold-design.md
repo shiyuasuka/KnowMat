@@ -82,10 +82,12 @@ A threshold/scalar pair is eligible only when every condition below holds:
 8. Exactly one scalar survivor satisfies all gates. Multiple values, owners,
    conditions, units, or survivor candidates make the relation a safe no-op.
 
-The gate never treats a group threshold as dominated merely because one group
-member has an exact result. Domination is allowed only after both records have
-already resolved to the same formal owner and the nested source phrase proves
-that exact owner/value relation.
+A threshold that remains routed to a distinct group owner is never dominated
+merely because one group member has an exact result. If an earlier owner gate
+has already projected the threshold onto that exact member, the relation is
+eligible only when the nested source phrase proves the same member/value. This
+removes the false member-level duplicate without erasing the independently
+routed group statement.
 
 ## Output and Audit Behavior
 
@@ -131,7 +133,9 @@ Focused tests must cover:
 - a unique, complete audit payload;
 - `<`, `<=`, `>`, and `>=` relation semantics;
 - a lone threshold surviving;
-- a group threshold surviving when the exact value belongs to only one member;
+- a distinct group-owner threshold surviving when an exact value belongs to
+  only one member, while a threshold already projected onto that member remains
+  eligible under the nested-evidence rule;
 - owner, condition, unit, subtype, role/nature, and source-proposition
   mismatches surviving;
 - ranges, approximate scalars, requirements, and qualitative comparisons
