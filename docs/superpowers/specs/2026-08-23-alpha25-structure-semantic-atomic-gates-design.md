@@ -29,6 +29,11 @@ Structure gate and before owner/table reconciliation:
 4. Generic method/effect/origin/function fields are isolated when they lack a
    direct atomic structural entity or measurement. Explicit phase presence,
    negative observations, and source-local measurements remain eligible.
+5. A feature whose value payload is only a standalone measurement unit (for
+   example, a second `grain size unit = µm` projection next to the real numeric
+   grain-size fact) is quarantined as a non-observation. Numeric values with a
+   separate unit, values that embed both number and unit, ranges, inequalities,
+   and uncertainties remain eligible.
 
 Each quarantine emits a deterministic issue code and retains the complete
 candidate, evidence, reason, and before/after payload in the existing audit
