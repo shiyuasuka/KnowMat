@@ -61,6 +61,13 @@ The pass continues to receive inventory anchors and promoted facts and to
 return accepted facts plus ordinary `PromotionIssue` records. It does not read
 evaluation artifacts, mutate the owner graph, or create a Reference item.
 
+Add a materialization backstop before numeric tensile context-owner recovery.
+This backstop applies only when a comparator fact remains unresolved because
+its extracted Reference anchor fails the existing public material-identity
+contract. It prevents the unique-current-protocol fallback from turning that
+orphaned comparator value into a Target result. A fact already routed to one
+materializable Reference is not affected.
+
 Keep table/HTML evidence on the existing coordinate-aware tensile gates.
 Reference-owned values already proven against one existing Reference anchor
 continue through the established routing path.
@@ -106,9 +113,12 @@ An already misrouted current-owner candidate uses the existing
 `promotion_external_current_tensile_projection_quarantined` issue path. An
 unresolved comparator candidate uses
 `promotion_unbound_external_tensile_quarantined`, preventing a later
-unique-current-protocol fallback from assigning it to the Target. Both paths
-are preserved in `quality_audit.json` and summarized in the existing
-`issues.json`/`issues.md` artifacts.
+unique-current-protocol fallback from assigning it to the Target. When an
+extracted generic Reference is visible during promotion but subsequently fails
+the material-identity contract, the materialization backstop emits
+`numeric_tensile_external_comparator_quarantined`. All paths are preserved in
+`quality_audit.json` and summarized in the existing `issues.json`/`issues.md`
+artifacts.
 
 The audit must contain:
 
