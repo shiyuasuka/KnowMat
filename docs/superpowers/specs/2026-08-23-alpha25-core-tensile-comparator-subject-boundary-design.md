@@ -70,7 +70,9 @@ continue through the established routing path.
 A core-tensile candidate can be isolated only when all requirements below hold:
 
 1. It is a numeric UTS, yield-strength, or elongation Property whose resolved
-   owner is a current-paper `Target` with `Experimental` data nature.
+   owner is a current-paper `Target` with `Experimental` data nature, or whose
+   unresolved candidate owner is the proven comparator subject and would
+   otherwise be eligible for the existing unique-current-protocol fallback.
 2. Its evidence is prose, and the complete candidate value occurs in one
    bounded sentence or clause. Missing, repeated, or ambiguous value-local
    matches are a safe no-op.
@@ -100,9 +102,12 @@ selectors.
 
 ## Data and Audit Behavior
 
-Every removed candidate uses the existing
-`promotion_external_current_tensile_projection_quarantined` issue path and is
-therefore preserved in `quality_audit.json` and summarized in the existing
+An already misrouted current-owner candidate uses the existing
+`promotion_external_current_tensile_projection_quarantined` issue path. An
+unresolved comparator candidate uses
+`promotion_unbound_external_tensile_quarantined`, preventing a later
+unique-current-protocol fallback from assigning it to the Target. Both paths
+are preserved in `quality_audit.json` and summarized in the existing
 `issues.json`/`issues.md` artifacts.
 
 The audit must contain:
