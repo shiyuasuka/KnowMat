@@ -52,8 +52,12 @@ handling, but before the existing tensile conflict quarantine.
 
 The pass receives the inventory anchors and current `AxisFact` sequence, uses
 the existing owner graph to verify canonical owner/role/nature equality, and
-returns accepted facts plus ordinary `PromotionIssue` records. It does not
-create, modify, or infer an owner, condition, value, unit, or evidence record.
+returns accepted facts plus ordinary `PromotionIssue` records. When both facts
+have the same generic Sample_ID and the graph exposes the same non-empty set of
+state candidates for both, that identical unresolved owner envelope is an
+eligible equality witness only if every candidate has the same role and source
+nature. The pass never selects one of those states. It does not create, modify,
+or infer an owner, condition, value, unit, or evidence record.
 
 ## Eligibility Contract
 
@@ -65,7 +69,9 @@ A threshold/scalar pair is eligible only when every condition below holds:
    second threshold, relative comparison, requirement, or qualitative value.
 3. Both candidates have the same normalized owner, tensile family and subtype,
    canonical unit, Target/Reference role, and Experimental/Computational
-   nature after the existing owner gates.
+   nature after the existing owner gates. Owner equality is either one resolved
+   canonical owner ID or the identical non-empty unresolved candidate envelope
+   described above; a merely similar material name is insufficient.
 4. Their explicit test conditions are identical after current normalization.
    Missing versus explicit temperature, orientation, strain rate, standard,
    specimen state, or other condition is not compatible for this pass.
@@ -101,7 +107,8 @@ in `quality_audit.json` must contain:
 
 - the full removed threshold fact;
 - the full surviving scalar fact;
-- normalized owner, tensile family/subtype, unit, and condition;
+- normalized owner, resolved owner ID or complete identical candidate envelope,
+  role/nature, tensile family/subtype, unit, and condition;
 - parsed operator, bound, scalar, and the satisfied relation;
 - the bounded source proposition containing both presentations;
 - the literal owner/value phrase proving same-owner nesting;
@@ -136,8 +143,8 @@ Focused tests must cover:
 - a distinct group-owner threshold surviving when an exact value belongs to
   only one member, while a threshold already projected onto that member remains
   eligible under the nested-evidence rule;
-- owner, condition, unit, subtype, role/nature, and source-proposition
-  mismatches surviving;
+- owner, owner-envelope, condition, unit, subtype, role/nature, and
+  source-proposition mismatches surviving;
 - ranges, approximate scalars, requirements, and qualitative comparisons
   surviving;
 - multiple possible scalar survivors producing a no-op;
