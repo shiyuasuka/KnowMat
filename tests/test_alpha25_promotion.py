@@ -2644,6 +2644,140 @@ def test_v204_fanout_guard_switch_off_restores_v203_quarantine(monkeypatch):
     ) == 2
 
 
+def test_v205_unique_material_owner_reassigns_process_only_tensile_owner():
+    evidence = (
+        "The LPBF-fabricated Inconel 625 tensile specimen had a yield strength "
+        "of 900 MPa."
+    )
+    fact = _property(
+        sample="LPBF",
+        name="yield strength",
+        value="900",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+    anchors = [
+        _anchor("LPBF", material="Inconel 625"),
+        _anchor("Inconel 625 tensile specimen", material="Inconel 625"),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "Inconel 625 tensile specimen"
+    issue = next(
+        row for row in result.issues if row.code == "tensile_process_owner_reassigned"
+    )
+    assert issue.actual["before"] == fact.model_dump()
+    assert issue.actual["after"] == result.accepted[0].model_dump()
+    assert issue.actual["selected_owner"] == "Inconel 625 tensile specimen"
+    assert issue.actual["decision_key"].startswith("tensile-assertion-decision:")
+
+
+def test_v205_process_label_is_preserved_when_source_uses_it_as_sample_designation():
+    evidence = "LPBF samples had a yield strength of 900 MPa."
+    fact = _property(
+        sample="LPBF",
+        value="900",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("LPBF"), _anchor("Inconel 625 tensile specimen")],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert result.accepted == (fact,)
+    assert not any(
+        row.code.startswith("tensile_process_owner_") for row in result.issues
+    )
+
+
+def test_v205_process_owner_remains_unchanged_when_material_coordinate_is_ambiguous():
+    evidence = (
+        "The LPBF-fabricated A1 and A2 tensile specimens had a yield strength "
+        "of 900 MPa."
+    )
+    fact = _property(
+        sample="LPBF",
+        value="900",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("LPBF"), _anchor("A1"), _anchor("A2")],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert all(row.sample_id_raw == "LPBF" for row in result.accepted)
+    issue = next(
+        row for row in result.issues if row.code == "tensile_process_owner_ambiguous"
+    )
+    assert issue.actual["before"] == fact.model_dump()
+    assert issue.actual["reason"] in {
+        "ambiguous_material_coordinate",
+        "no_unique_material_coordinate",
+    }
+
+
+def test_v205_unique_material_owner_does_not_touch_noncore_property():
+    evidence = "The LPBF-fabricated A1 specimen had a hardness of 420 HV."
+    fact = _property(
+        sample="LPBF",
+        name="hardness",
+        value="420",
+        unit="HV",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("LPBF"), _anchor("A1")], [fact], source_text=evidence
+    )
+
+    assert result.accepted == (fact,)
+    assert not any(
+        row.code.startswith("tensile_process_owner_") for row in result.issues
+    )
+
+
+def test_v205_unique_material_owner_switch_off_restores_v204_process_owner(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_UNIQUE_MATERIAL_OWNER_CONVERGENCE_V205", "0"
+    )
+    evidence = (
+        "The LPBF-fabricated Inconel 625 tensile specimen had a yield strength "
+        "of 900 MPa."
+    )
+    fact = _property(
+        sample="LPBF",
+        value="900",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [
+            _anchor("LPBF", material="Inconel 625"),
+            _anchor("Inconel 625 tensile specimen", material="Inconel 625"),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert all(row.sample_id_raw == "LPBF" for row in result.accepted)
+    assert not any(
+        row.code.startswith("tensile_process_owner_") for row in result.issues
+    )
+
+
 def test_v204_parenthesized_owner_pairs_prevent_cross_owner_tensile_swap():
     source = (
         "Yield and ultimate tensile strengths increased from 486.0 and "

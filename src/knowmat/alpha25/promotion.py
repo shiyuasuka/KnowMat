@@ -15647,6 +15647,228 @@ def _v204_bind_assertion_condition(
     return fact.model_copy(deep=True, update={"data": data}), condition_bound
 
 
+_PROCESS_ROLE_VERBS_V205 = (
+    r"fabricat(?:ed|ion)|manufactur(?:ed|ing)|print(?:ed|ing)|"
+    r"process(?:ed|ing)|produc(?:ed|tion)|build|built|deposit(?:ed|ion)"
+)
+
+
+def _owner_label_has_process_role_v205(label: str, support: str) -> bool:
+    """Require grammar that explicitly uses an owner label as a process."""
+
+    normalized_label = _identity_text(label)
+    normalized_support = _identity_text(support)
+    if not normalized_label or not normalized_support:
+        return False
+    escaped = re.escape(normalized_label).replace(r"\ ", r"[\s-]+")
+    return bool(
+        re.search(
+            rf"(?ix)(?<!\w){escaped}(?!\w)[\s-]*(?:{_PROCESS_ROLE_VERBS_V205})\b",
+            normalized_support,
+        )
+        or re.search(
+            rf"(?ix)\b(?:{_PROCESS_ROLE_VERBS_V205})\s+"
+            rf"(?:by|using|via|with)\s+(?:the\s+)?{escaped}(?!\w)",
+            normalized_support,
+        )
+    )
+
+
+def _tensile_process_owner_decision_key_v205(
+    fact: PropertyFact,
+    candidates: Sequence[OwnerNode],
+    *,
+    reason: str,
+) -> str:
+    payload = {
+        "owner": _identity_text(fact.sample_id_raw),
+        "property": core_tensile_subtype(fact.data.get("property_name_raw")),
+        "value": _scientific_fold(fact.data.get("value_raw")),
+        "unit": _scientific_fold(fact.data.get("unit_raw")),
+        "condition": _scientific_fold(fact.data.get("test_condition_raw")),
+        "evidence": [
+            normalize_evidence_text(row) for row in _fact_evidence(fact)
+        ],
+        "candidate_owner_ids": sorted(node.owner_id for node in candidates),
+        "reason": reason,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "tensile-process-owner-v205:" + hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def _route_unique_material_owner_v205(
+    anchors: Sequence[InventoryAnchor],
+    facts: Sequence[AxisFact],
+    source_text: str,
+) -> tuple[list[AxisFact], list[PromotionIssue]]:
+    """Route a process-only tensile owner to one literal existing specimen.
+
+    A manufacturing label remains a valid sample designation unless its own
+    source assertion grammatically uses that label as a process.  Even then,
+    reassignment requires exactly one existing Target/Experimental owner named
+    in the same assertion.  No process-name registry or paper-specific alias is
+    used.
+    """
+
+    if not unique_material_owner_convergence_v205_enabled() or not source_text:
+        return list(facts), []
+    graph = build_owner_graph(anchors)
+    if not graph.nodes:
+        return list(facts), []
+    accepted: list[AxisFact] = []
+    issues: list[PromotionIssue] = []
+    for fact in facts:
+        if not isinstance(fact, PropertyFact) or not is_core_tensile_property_name(
+            fact.data.get("property_name_raw")
+        ):
+            accepted.append(fact)
+            continue
+        evidence = _fact_evidence(fact)
+        support = "\n".join(evidence)
+        if not support or _has_table_evidence(evidence):
+            accepted.append(fact)
+            continue
+        current_nodes = _candidate_nodes(build_promotion_records([fact])[0], graph)
+        current_targets = [
+            node
+            for node in current_nodes
+            if node.role == "Target" and node.data_nature == "Experimental"
+        ]
+        if len({node.owner_id for node in current_targets}) != 1:
+            accepted.append(fact)
+            continue
+        current = current_targets[0]
+        process_aliases = [
+            alias
+            for alias in current.aliases
+            if _owner_label_has_process_role_v205(alias, support)
+        ]
+        if not process_aliases:
+            accepted.append(fact)
+            continue
+
+        assertion_decision = _v204_tensile_assertion_decision(
+            fact, graph, source_text
+        )
+        coordinate_target: OwnerNode | None = None
+        if (
+            assertion_decision.status == "matched"
+            and assertion_decision.coordinate is not None
+        ):
+            candidate = graph.node(assertion_decision.coordinate.owner_key)
+            if candidate.owner_id != current.owner_id:
+                coordinate_target = candidate
+
+        literal_targets: dict[str, OwnerNode] = {}
+        for node in graph.nodes:
+            if (
+                node.owner_id == current.owner_id
+                or node.role != "Target"
+                or node.data_nature != "Experimental"
+                or not _distinctive_owner_label(node.sample_id_raw)
+                or not _literal_mention(support, node.sample_id_raw)
+                or _owner_label_has_process_role_v205(node.sample_id_raw, support)
+            ):
+                continue
+            if node.state_raw and not _literal_mention(support, node.state_raw):
+                continue
+            literal_targets[node.owner_id] = node
+        if coordinate_target is not None:
+            literal_targets = {coordinate_target.owner_id: coordinate_target}
+
+        if len(literal_targets) == 1:
+            target = next(iter(literal_targets.values()))
+            reassigned = _reassign_fact_owner(fact, target.sample_id_raw)
+            accepted.append(reassigned)
+            decision_key = (
+                assertion_decision.coordinate.decision_key
+                if assertion_decision.coordinate is not None
+                and assertion_decision.coordinate.owner_key == target.owner_id
+                else _tensile_process_owner_decision_key_v205(
+                    fact,
+                    [target],
+                    reason="unique_literal_material_owner",
+                )
+            )
+            issues.append(
+                _promotion_issue(
+                    fact,
+                    code="tensile_process_owner_reassigned",
+                    severity="info",
+                    message=(
+                        "A core-tensile candidate used a source-explicit process "
+                        "label as owner while the same assertion named exactly "
+                        "one existing material/specimen owner; it was rerouted "
+                        "without inventing an owner."
+                    ),
+                    expected={
+                        "process_role_grammar": True,
+                        "unique_existing_material_owner": True,
+                        "owner_invented": False,
+                        "value_unit_condition_changed": False,
+                        "audit_preserved": True,
+                    },
+                    actual={
+                        "before": fact.model_dump(),
+                        "after": reassigned.model_dump(),
+                        "process_aliases": process_aliases,
+                        "selected_owner": target.sample_id_raw,
+                        "selected_owner_id": target.owner_id,
+                        "decision_key": decision_key,
+                        "assertion_decision": assertion_decision.to_dict(),
+                    },
+                    evidence=evidence,
+                )
+            )
+            continue
+
+        reason = (
+            "ambiguous_material_coordinate"
+            if len(literal_targets) > 1
+            or assertion_decision.status == "ambiguous"
+            else "no_unique_material_coordinate"
+        )
+        accepted.append(fact)
+        issues.append(
+            _promotion_issue(
+                fact,
+                code="tensile_process_owner_ambiguous",
+                message=(
+                    "A process-role tensile owner had no unique literal existing "
+                    "material/specimen coordinate; the original candidate was "
+                    "preserved for review without reassignment."
+                ),
+                expected={
+                    "unique_existing_material_owner": True,
+                    "owner_invented": False,
+                    "ambiguous_reassignment": False,
+                    "audit_preserved": True,
+                },
+                actual={
+                    "before": fact.model_dump(),
+                    "reason": reason,
+                    "process_aliases": process_aliases,
+                    "candidate_owners": [
+                        node.sample_id_raw for node in literal_targets.values()
+                    ],
+                    "decision_key": _tensile_process_owner_decision_key_v205(
+                        fact,
+                        tuple(literal_targets.values()),
+                        reason=reason,
+                    ),
+                    "assertion_decision": assertion_decision.to_dict(),
+                },
+                evidence=evidence,
+            )
+        )
+    return accepted, issues
+
+
 def _quarantine_core_tensile_owner_ambiguities(
     anchors: Sequence[InventoryAnchor],
     facts: Sequence[AxisFact],
@@ -19189,6 +19411,10 @@ def promote_axis_facts(
     )
     issues.extend(stage_issues)
     fact_rows, stage_issues = _quarantine_processing_owner_ambiguities(
+        anchor_rows, fact_rows, source_text
+    )
+    issues.extend(stage_issues)
+    fact_rows, stage_issues = _route_unique_material_owner_v205(
         anchor_rows, fact_rows, source_text
     )
     issues.extend(stage_issues)
