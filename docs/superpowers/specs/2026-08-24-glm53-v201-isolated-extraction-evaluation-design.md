@@ -183,18 +183,23 @@ cue, family/owner compatibility decisions, rejected competing candidates, and
 
 ## v201 Gate 2: Same-Fact Table/Prose Duplicate Merge
 
-Merge a prose Property into one table Property survivor only when all of the
-following are true:
+Merge one of a table/prose Property pair into one uniquely richer survivor only
+when all of the following are true:
 
 1. Both are non-core-tensile numeric Properties.
 2. Owner, material lineage, state/region, role/nature, property semantic,
-   compatible canonical unit, normalized central value, and explicit condition
-   are exactly compatible.
+   compatible canonical unit, and normalized central value are exactly
+   compatible. Explicit method/condition fields must not conflict; a one-sided
+   missing field is allowed only when the richer record copies that metadata
+   from the same source assertion/table relation.
 3. The prose explicitly cites or summarizes the same table, and the table fact
    resolves to one unique row/cell coordinate.
 4. Exactly one survivor satisfies the full relation.
-5. The table survivor is at least as specific and retains a complete evidence
-   union.
+5. Exactly one record is richer by source-proven coordinate or metadata, such
+   as a unique row/cell or a prose assertion that explicitly names the same table
+   and reports the measurement method. That record survives and retains a
+   complete evidence union. If neither or both are uniquely richer, no merge
+   occurs.
 
 Nearby prose, equal values in different experiments, rounded-near values,
 range overlap, evaluator matches, different owners/states/conditions,
@@ -208,11 +213,13 @@ issue code. `final.json` receives no new field.
 
 ## v201 Placement and Determinism
 
-Both gates live in `src/knowmat/alpha25/promotion.py` after existing
-owner/source-coordinate reconciliation and before final conflict quarantine and
-packaging. Protocol recovery runs before table/prose duplicate merge. They
-consume only current source evidence and candidate inventory; they make no
-model call.
+Gate 1 extends the existing source-context boundary in
+`src/knowmat/alpha25/property_context.py` and its application/audit path in
+`src/knowmat/alpha25/materialize.py`. Gate 2 lives in
+`src/knowmat/alpha25/promotion.py` after existing owner/source-coordinate
+reconciliation and source-assertion deduplication, and before final conflict
+quarantine and packaging. Both consume only current source evidence and
+candidate inventory; they make no model call.
 
 Candidate and audit ordering must be stable under input-order permutations. A
 candidate-local exception leaves the original fact unchanged and records an
