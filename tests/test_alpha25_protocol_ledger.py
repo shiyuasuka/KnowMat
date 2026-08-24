@@ -126,6 +126,79 @@ Rate controlled tensile tests at 5 mm/min were performed using an MTS 880.
     assert uncoordinated.status == "ambiguous"
 
 
+def test_v204_unique_protocol_binds_to_source_assertion_coordinate(monkeypatch):
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_TENSILE_RESULT_PROTOCOL_BINDING_V204", "1"
+    )
+    source = """
+## Mechanical testing
+
+Rate controlled tensile tests at 5 mm/min were performed using an MTS 880.
+"""
+
+    decision = TensileProtocolLedger(source).bind(
+        _property(property_id_candidate="tensile-assertion:literal"),
+        owner_role="Target",
+        owner_labels=("L70",),
+        other_owner_labels=("L90",),
+    )
+
+    assert decision.status == "bound"
+    assert decision.scope == "target_global"
+    assert decision.condition_raw == "at 5 mm/min"
+    assert decision.contributed_dimensions == ("rate",)
+
+
+def test_v204_assertion_protocol_binding_switch_off_preserves_v203_scope(
+    monkeypatch,
+):
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_TENSILE_RESULT_PROTOCOL_BINDING_V204", "0"
+    )
+    source = """
+## Mechanical testing
+
+Rate controlled tensile tests at 5 mm/min were performed using an MTS 880.
+"""
+
+    decision = TensileProtocolLedger(source).bind(
+        _property(property_id_candidate="tensile-assertion:literal"),
+        owner_role="Target",
+        owner_labels=("L70",),
+        other_owner_labels=("L90",),
+    )
+
+    assert decision.status == "ambiguous"
+    assert decision.condition_raw is None
+
+
+def test_v204_assertion_protocol_binding_fails_closed_for_two_events(monkeypatch):
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_TENSILE_RESULT_PROTOCOL_BINDING_V204", "1"
+    )
+    source = """
+## Mechanical testing
+
+Tensile tests were performed at room temperature at 1 mm/min.
+
+Tensile tests were performed at 650 °C at 5 mm/min.
+"""
+
+    decision = TensileProtocolLedger(source).bind(
+        _property(property_id_candidate="tensile-assertion:literal"),
+        owner_role="Target",
+        owner_labels=("L70",),
+        other_owner_labels=("L90",),
+    )
+
+    assert decision.status == "ambiguous"
+    assert decision.condition_raw is None
+    assert len(decision.candidate_events) == 2
+
+
 def test_v203_protocol_ledger_keeps_reference_isolated(monkeypatch):
     monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
     source = """
@@ -273,6 +346,62 @@ image correlation and three specimens were tested.
     assert issue.actual["decision"]["selected_events"][0][
         "decision_key"
     ].startswith("tensile-protocol-event:")
+
+
+def test_v204_materialization_uses_assertion_protocol_audit_codes(monkeypatch):
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_TENSILE_RESULT_PROTOCOL_BINDING_V204", "1"
+    )
+    source = """
+## Tensile testing
+
+Rate controlled tensile tests at 5 mm/min were performed using an MTS 880.
+"""
+    anchor = InventoryAnchor(
+        sample_id_raw="L70",
+        material_name_raw="L70",
+        role="Target",
+        data_nature="Experimental",
+        source_evidence=["L70"],
+        confidence=0.95,
+    )
+    payload = _property(
+        property_id_candidate="tensile-assertion:literal",
+        source_evidence=["L70 had a UTS of 781 MPa."],
+    )
+    fact = PropertyFact(
+        sample_id_raw="L70",
+        fact_type="property",
+        data=payload,
+        source_evidence=list(payload["source_evidence"]),
+        confidence=0.95,
+    )
+    other_anchor = InventoryAnchor(
+        sample_id_raw="L90",
+        material_name_raw="L90",
+        role="Target",
+        data_nature="Experimental",
+        source_evidence=["L90"],
+        confidence=0.95,
+    )
+
+    result = materialize_candidate(
+        [anchor, other_anchor], [fact], source_text=source
+    )
+
+    prop = next(
+        item["Extracted_Data"]["Properties"][0]
+        for item in result.document["items"]
+        if item["Sample_ID"] == "L70"
+    )
+    assert prop["test_condition_raw"] == "at 5 mm/min"
+    assert any(
+        row.code == "tensile_result_protocol_bound" for row in result.issues
+    )
+    assert not any(
+        row.code == "tensile_protocol_ledger_bound" for row in result.issues
+    )
 
 
 def test_v203_materialization_switch_off_preserves_v202_condition(monkeypatch):

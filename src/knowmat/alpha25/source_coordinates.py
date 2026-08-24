@@ -286,6 +286,72 @@ class DenseTensileTableDecision:
         }
 
 
+@dataclass(frozen=True)
+class TensileAssertionCoordinate:
+    """One source-literal core-tensile owner/property/value coordinate."""
+
+    owner_key: str
+    owner_literal: str
+    property_family: str
+    property_name: str
+    value_raw: str
+    unit_raw: str
+    condition_raw: str
+    assertion_type: str
+    block_index: int
+    line_start: int
+    line_end: int
+    source_text: str
+    owner_span: tuple[int, int]
+    property_span: tuple[int, int]
+    value_span: tuple[int, int]
+    bundle_key: str
+    source_coordinate_key: str
+    decision_key: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "owner_key": self.owner_key,
+            "owner_literal": self.owner_literal,
+            "property_family": self.property_family,
+            "property_name": self.property_name,
+            "value_raw": self.value_raw,
+            "unit_raw": self.unit_raw,
+            "condition_raw": self.condition_raw,
+            "assertion_type": self.assertion_type,
+            "block_index": self.block_index,
+            "line_start": self.line_start,
+            "line_end": self.line_end,
+            "source_text": self.source_text,
+            "owner_span": list(self.owner_span),
+            "property_span": list(self.property_span),
+            "value_span": list(self.value_span),
+            "bundle_key": self.bundle_key,
+            "source_coordinate_key": self.source_coordinate_key,
+            "decision_key": self.decision_key,
+        }
+
+
+@dataclass(frozen=True)
+class TensileAssertionDecision:
+    """Fail-closed decision for one frozen tensile candidate."""
+
+    status: str
+    coordinate: TensileAssertionCoordinate | None = None
+    candidates: tuple[TensileAssertionCoordinate, ...] = ()
+    reason: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "coordinate": (
+                self.coordinate.to_dict() if self.coordinate is not None else None
+            ),
+            "candidates": [row.to_dict() for row in self.candidates],
+            "reason": self.reason,
+        }
+
+
 def _normalized_cell(value: str) -> str:
     return normalize_evidence_text(_TAG.sub(" ", unescape(str(value or ""))))
 
@@ -1527,3 +1593,704 @@ def dense_tensile_table_decisions(
             )
         )
     return tuple(decisions)
+
+
+_ASSERTION_NUMBER = re.compile(
+    r"(?<![A-Za-z0-9])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+    r"(?![A-Za-z0-9])"
+)
+_ASSERTION_VALUE_WITH_UNIT = re.compile(
+    r"(?ix)(?P<value>(?:[~≈<>≤≥]\s*)?"
+    r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+    r"(?:\s*(?:±|\+/-)\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+    r"(?:[eE][-+]?\d+)?)?)\s*(?P<unit>gpa|mpa|\\?%)"
+)
+_ASSERTION_CONTINUATION = re.compile(
+    r"(?ix)^\s*(?:its|their|this|these|the\s+(?:alloy|sample|specimen|material)|"
+    r"(?:an?|the)\s+(?:yield|ultimate|tensile|fracture|uniform|total|elongation))\b"
+)
+_ASSERTION_TABLE_OR_SIDECAR = re.compile(
+    r"(?ix)(?:^\s*\||<table\b|data_csv\s*:|vlm[- ]digitized|line[- ]chart)"
+)
+_ASSERTION_RESULT_TEMPERATURE = re.compile(
+    r"(?ix)(?:\b(?:ambient|room)[\s-]+temperature\b|"
+    r"(?<![a-z0-9])[-+]?(?:\d+(?:\.\d*)?|\.\d+)\s*°\s*c\b|"
+    r"(?<![a-z0-9])[-+]?(?:\d+(?:\.\d*)?|\.\d+)\s*k\b)"
+)
+_ASSERTION_RESULT_SCOPE = re.compile(
+    r"(?ix)\b(?:tensile|yield|ys|ultimate|uts|elongation|ductility|"
+    r"stress[\s-]*strain)\b"
+)
+_ASSERTION_PREPARATION_SCOPE = re.compile(
+    r"(?ix)\b(?:thermal|heat|solution)\s+(?:treatment|treated)|"
+    r"\b(?:anneal(?:ed|ing)?|aging|aged|sinter(?:ed|ing)?|"
+    r"homogeni[sz](?:ed|ing|ation))\b"
+)
+_ASSERTION_MATERIAL_STATE_TEMPERATURE_SUFFIX = re.compile(
+    r"(?ix)^\s*(?:[-–—,:;/]\s*)?(?:samples?|specimens?|conditions?)\b"
+)
+_ASSERTION_FIGURE_SPLIT_CONTINUATION = re.compile(
+    r"(?ix)^\s*(?:fig(?:ure)?\.?\s*)?\d+[a-z]?\b"
+)
+
+_ASSERTION_PROPERTY_PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
+    (
+        "yield_strength",
+        "Yield Strength",
+        re.compile(
+            r"(?ix)(?:\b0\.2\s*%?\s*(?:offset\s*)?yield\s+(?:strengths?|stresses?)\b|"
+            r"\byield\s+(?:strengths?|stresses?)\b|\bys\b|σ\s*[_\s]?0\.2\b|"
+            r"sigma\s*[_\s]?0\.2\b)"
+        ),
+    ),
+    (
+        "ultimate_tensile_strength",
+        "Ultimate Tensile Strength",
+        re.compile(
+            r"(?ix)(?:\bultimate\s+tensile\s+strengths?\b|\buts\b|"
+            r"\btensile\s+strengths?\b|σ\s*[_\s]?u\b|sigma\s*[_\s]?u\b)"
+        ),
+    ),
+    (
+        "elongation",
+        "Elongation",
+        re.compile(
+            r"(?ix)(?:\b(?:fracture|uniform|total|tensile)\s+elongation\b|"
+            r"\belongation(?:\s+(?:at|to)\s+(?:break|failure|fracture))?\b|"
+            r"\bductility\b|\bel\b)"
+        ),
+    ),
+)
+
+
+@dataclass(frozen=True)
+class _AssertionSegment:
+    block_index: int
+    sentence_index: int
+    line_start: int
+    line_end: int
+    text: str
+    previous_text: str = ""
+
+
+@dataclass(frozen=True)
+class _AssertionOwnerMention:
+    owner_key: str
+    literal: str
+    start: int
+    end: int
+
+
+@dataclass(frozen=True)
+class _AssertionValueMention:
+    raw: str
+    unit: str
+    start: int
+    end: int
+
+
+def _assertion_property_family(value: str) -> tuple[str, str] | None:
+    normalized = normalize_evidence_text(value)
+    matches = [
+        (family, canonical)
+        for family, canonical, pattern in _ASSERTION_PROPERTY_PATTERNS
+        if pattern.search(normalized)
+    ]
+    unique = list(dict.fromkeys(matches))
+    return unique[0] if len(unique) == 1 else None
+
+
+def _assertion_property_mentions(
+    text: str,
+) -> tuple[tuple[str, str, int, int], ...]:
+    rows: list[tuple[str, str, int, int]] = []
+    for family, canonical, pattern in _ASSERTION_PROPERTY_PATTERNS:
+        rows.extend(
+            (family, canonical, match.start(), match.end())
+            for match in pattern.finditer(text)
+        )
+    rows.sort(key=lambda row: (row[2], -(row[3] - row[2]), row[0]))
+    deduplicated: list[tuple[str, str, int, int]] = []
+    for row in rows:
+        if deduplicated and row[0] == deduplicated[-1][0] and row[2] == deduplicated[-1][2]:
+            if row[3] > deduplicated[-1][3]:
+                deduplicated[-1] = row
+            continue
+        deduplicated.append(row)
+    return tuple(deduplicated)
+
+
+def _assertion_numeric_tokens(value: str) -> tuple[str, ...]:
+    normalized = normalize_evidence_text(value)
+    return tuple(match.group(0) for match in _ASSERTION_NUMBER.finditer(normalized))
+
+
+def _assertion_unit(value: str) -> str:
+    normalized = normalize_evidence_text(value).replace(" ", "")
+    if "%" in normalized or normalized in {"pct", "percent"}:
+        return "%"
+    if "gpa" in normalized:
+        return "GPa"
+    if "mpa" in normalized:
+        return "MPa"
+    return ""
+
+
+def _assertion_value_mentions(text: str) -> tuple[_AssertionValueMention, ...]:
+    return tuple(
+        _AssertionValueMention(
+            raw=match.group("value").strip(),
+            unit=_assertion_unit(match.group("unit")),
+            start=match.start("value"),
+            end=match.end("unit"),
+        )
+        for match in _ASSERTION_VALUE_WITH_UNIT.finditer(text)
+    )
+
+
+def _assertion_result_condition(text: str) -> str:
+    """Return one literal tensile-result temperature, never a prep temperature."""
+
+    if not _ASSERTION_RESULT_SCOPE.search(text):
+        return ""
+    literals: list[str] = []
+    for match in _ASSERTION_RESULT_TEMPERATURE.finditer(text):
+        local_prefix = text[max(0, match.start() - 72) : match.start()]
+        if _ASSERTION_PREPARATION_SCOPE.search(local_prefix):
+            continue
+        # A temperature-qualified sample label names a processing state even when
+        # the preparation verb was introduced outside this bounded sentence.
+        # Only an immediately following state noun is rejected; a genuine
+        # result such as ``tested at 800 °C`` remains eligible.
+        local_suffix = text[match.end() : match.end() + 40]
+        if _ASSERTION_MATERIAL_STATE_TEMPERATURE_SUFFIX.search(local_suffix):
+            continue
+        literal = re.sub(r"\s+", " ", match.group(0)).strip()
+        if literal and literal not in literals:
+            literals.append(literal)
+    return literals[0] if len(literals) == 1 else ""
+
+
+def _assertion_value_matches(
+    mention: _AssertionValueMention,
+    *,
+    value_tokens: Sequence[str],
+    unit: str,
+) -> bool:
+    if not value_tokens or mention.unit != unit:
+        return False
+    return _assertion_numeric_tokens(mention.raw) == tuple(value_tokens)
+
+
+def _assertion_segments(source_text: str) -> tuple[_AssertionSegment, ...]:
+    raw_lines = str(source_text or "").splitlines()
+    blocks: list[tuple[int, int, str]] = []
+    current: list[str] = []
+    start_line = 1
+    for line_number, raw_line in enumerate(raw_lines, start=1):
+        if raw_line.strip():
+            if not current:
+                start_line = line_number
+            current.append(raw_line.strip())
+            continue
+        if current:
+            blocks.append((start_line, line_number - 1, " ".join(current)))
+            current = []
+    if current:
+        blocks.append((start_line, len(raw_lines) or start_line, " ".join(current)))
+    if not blocks and str(source_text or "").strip():
+        blocks.append((1, 1, str(source_text).strip()))
+
+    result: list[_AssertionSegment] = []
+    for block_index, (line_start, line_end, raw_block) in enumerate(blocks):
+        normalized = normalize_evidence_text(raw_block).replace(r"\%", "%")
+        if not normalized or _ASSERTION_TABLE_OR_SIDECAR.search(normalized):
+            continue
+        sentences = tuple(
+            row.strip()
+            for row in re.split(r"(?<=[.!?])\s+(?=[a-z0-9])", normalized)
+            if row.strip()
+        )
+        for sentence_index, sentence in enumerate(sentences):
+            result.append(
+                _AssertionSegment(
+                    block_index=block_index,
+                    sentence_index=sentence_index,
+                    line_start=line_start,
+                    line_end=line_end,
+                    text=sentence,
+                    previous_text=(
+                        sentences[sentence_index - 1] if sentence_index else ""
+                    ),
+                )
+            )
+    return tuple(result)
+
+
+def _assertion_alias_pattern(alias: str) -> re.Pattern[str] | None:
+    normalized = normalize_evidence_text(alias)
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    if len(compact) < 2 or normalized in {
+        "alloy",
+        "material",
+        "sample",
+        "samples",
+        "specimen",
+        "specimens",
+        "target",
+        "reference",
+    }:
+        return None
+    escaped = re.escape(normalized).replace(r"\ ", r"\s+")
+    return re.compile(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])")
+
+
+def _assertion_owner_mentions(
+    text: str,
+    owner_aliases: Mapping[str, Sequence[str]],
+) -> tuple[_AssertionOwnerMention, ...]:
+    mentions: list[_AssertionOwnerMention] = []
+    for owner_key in sorted(str(key) for key in owner_aliases):
+        aliases = owner_aliases.get(owner_key) or ()
+        normalized_aliases = sorted(
+            {
+                normalize_evidence_text(alias)
+                for alias in aliases
+                if normalize_evidence_text(alias)
+            },
+            key=lambda alias: (-len(alias), alias),
+        )
+        for alias in normalized_aliases:
+            pattern = _assertion_alias_pattern(alias)
+            if pattern is None:
+                continue
+            mentions.extend(
+                _AssertionOwnerMention(
+                    owner_key=owner_key,
+                    literal=match.group(0),
+                    start=match.start(),
+                    end=match.end(),
+                )
+                for match in pattern.finditer(text)
+            )
+    # Keep the longest alias for the same owner/start while retaining alias
+    # collisions across owners as an explicit ambiguity signal.
+    by_slot: dict[tuple[str, int], _AssertionOwnerMention] = {}
+    for mention in mentions:
+        key = (mention.owner_key, mention.start)
+        prior = by_slot.get(key)
+        if prior is None or mention.end > prior.end:
+            by_slot[key] = mention
+    contained = {
+        (mention.owner_key, mention.start, mention.end, mention.literal)
+        for mention in by_slot.values()
+        if any(
+            other.start <= mention.start
+            and other.end >= mention.end
+            and (other.start, other.end) != (mention.start, mention.end)
+            for other in by_slot.values()
+        )
+    }
+    return tuple(
+        sorted(
+            (
+                mention
+                for mention in by_slot.values()
+                if (
+                    mention.owner_key,
+                    mention.start,
+                    mention.end,
+                    mention.literal,
+                )
+                not in contained
+            ),
+            key=lambda row: (row.start, row.end, row.owner_key, row.literal),
+        )
+    )
+
+
+def _assertion_connected_owner_list(
+    text: str,
+    mentions: Sequence[_AssertionOwnerMention],
+) -> bool:
+    unique: list[_AssertionOwnerMention] = []
+    for mention in mentions:
+        if unique and mention.owner_key == unique[-1].owner_key:
+            continue
+        unique.append(mention)
+    if len({row.owner_key for row in unique}) < 2:
+        return False
+    for left, right in zip(unique, unique[1:]):
+        connector = text[left.end : right.start]
+        if re.fullmatch(r"\s*(?:,|and|&|/|or|both|either|as\s+well\s+as)\s*", connector):
+            return True
+    return False
+
+
+def _assertion_owner_for_value(
+    text: str,
+    value: _AssertionValueMention,
+    owner_mentions: Sequence[_AssertionOwnerMention],
+    all_values: Sequence[_AssertionValueMention],
+) -> tuple[_AssertionOwnerMention | None, bool, str]:
+    owners_in_order: list[_AssertionOwnerMention] = []
+    seen_owner_keys: set[str] = set()
+    for mention in owner_mentions:
+        if mention.owner_key in seen_owner_keys:
+            continue
+        seen_owner_keys.add(mention.owner_key)
+        owners_in_order.append(mention)
+
+    if "respectiv" in text and len(owners_in_order) > 1:
+        if len(owners_in_order) != len(all_values):
+            return None, True, "ordered_owner_value_cardinality_mismatch"
+        value_index = next(
+            (
+                index
+                for index, candidate in enumerate(all_values)
+                if candidate.start == value.start and candidate.end == value.end
+            ),
+            -1,
+        )
+        if value_index < 0:
+            return None, True, "ordered_value_not_indexed"
+        return owners_in_order[value_index], False, "ordered_owner_value"
+
+    following = [
+        mention
+        for mention in owner_mentions
+        if 0 <= mention.start - value.end <= 72
+        and re.fullmatch(
+            r"(?ix)\s*(?:(?:\(|\[)\s*|(?:for|of|in)\s+(?:the\s+)?)",
+            text[value.end : mention.start],
+        )
+    ]
+    if following:
+        nearest_start = min(row.start for row in following)
+        nearest = [row for row in following if row.start == nearest_start]
+        keys = {row.owner_key for row in nearest}
+        if len(keys) == 1:
+            return max(nearest, key=lambda row: row.end), False, "following_owner"
+        return None, True, "following_owner_alias_collision"
+
+    preceding = [row for row in owner_mentions if row.end <= value.start]
+    if not preceding:
+        return None, False, "owner_absent"
+    latest_start = max(row.start for row in preceding)
+    latest = [row for row in preceding if row.start == latest_start]
+    latest_keys = {row.owner_key for row in latest}
+    if len(latest_keys) != 1:
+        return None, True, "preceding_owner_alias_collision"
+    if _assertion_connected_owner_list(text, preceding):
+        # A later clause subject (``whereas A2 ...``) is a valid local owner;
+        # a bare ``A1 and A2 ... value`` is a collective unresolved owner.
+        selected = latest[0]
+        prefix = text[max(0, selected.start - 24) : selected.start]
+        if not re.search(r"(?ix)\b(?:whereas|while|but|however)\s*$", prefix):
+            return None, True, "collective_owner_without_ordered_values"
+    return max(latest, key=lambda row: row.end), False, "preceding_owner"
+
+
+def _assertion_property_for_value(
+    text: str,
+    value: _AssertionValueMention,
+    family: str,
+    property_mentions: Sequence[tuple[str, str, int, int]],
+    all_values: Sequence[_AssertionValueMention],
+) -> tuple[tuple[str, str, int, int] | None, bool, str]:
+    ordered_families: list[tuple[str, str, int, int]] = []
+    for mention in property_mentions:
+        if not ordered_families or mention[0] != ordered_families[-1][0]:
+            ordered_families.append(mention)
+    if "respectiv" in text and len(ordered_families) > 1:
+        if len(ordered_families) != len(all_values):
+            return None, True, "ordered_property_value_cardinality_mismatch"
+        value_index = next(
+            (
+                index
+                for index, candidate in enumerate(all_values)
+                if candidate.start == value.start and candidate.end == value.end
+            ),
+            -1,
+        )
+        if value_index < 0:
+            return None, True, "ordered_property_value_not_indexed"
+        selected = ordered_families[value_index]
+        return (
+            (selected, False, "ordered_property_value")
+            if selected[0] == family
+            else (None, False, "ordered_property_belongs_to_other_family")
+        )
+
+    preceding = [
+        row
+        for row in property_mentions
+        if row[3] <= value.start and value.start - row[3] <= 180
+    ]
+    if preceding:
+        nearest = max(preceding, key=lambda row: (row[3], row[2]))
+        if nearest[0] == family:
+            return nearest, False, "direct_property_value"
+        return None, False, "nearest_property_belongs_to_other_family"
+    following = [
+        row
+        for row in property_mentions
+        if row[2] >= value.end and row[2] - value.end <= 72
+    ]
+    if following:
+        nearest = min(following, key=lambda row: (row[2], -row[3]))
+        if nearest[0] == family:
+            return nearest, False, "following_property_value"
+    return None, False, "property_not_local"
+
+
+def _assertion_key(prefix: str, payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"{prefix}:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _assertion_coordinate(
+    *,
+    owner: _AssertionOwnerMention,
+    property_row: tuple[str, str, int, int],
+    value: _AssertionValueMention,
+    value_raw: str,
+    unit_raw: str,
+    assertion_type: str,
+    condition_raw: str,
+    segment: _AssertionSegment,
+    source_text: str,
+) -> TensileAssertionCoordinate:
+    bundle_payload = {
+        "block_index": segment.block_index,
+        "line_start": segment.line_start,
+        "line_end": segment.line_end,
+        "source_text": source_text,
+    }
+    bundle_key = _assertion_key("tensile-bundle", bundle_payload)
+    coordinate_payload = {
+        **bundle_payload,
+        "owner_key": owner.owner_key,
+        "property_family": property_row[0],
+        "value_tokens": _assertion_numeric_tokens(value_raw),
+        "unit": _assertion_unit(unit_raw),
+        "condition": normalize_evidence_text(condition_raw),
+        "owner_span": (owner.start, owner.end),
+        "property_span": (property_row[2], property_row[3]),
+        "value_span": (value.start, value.end),
+    }
+    source_coordinate_key = _assertion_key(
+        "tensile-assertion", coordinate_payload
+    )
+    return TensileAssertionCoordinate(
+        owner_key=owner.owner_key,
+        owner_literal=owner.literal,
+        property_family=property_row[0],
+        property_name=property_row[1],
+        value_raw=str(value_raw).strip(),
+        unit_raw=_assertion_unit(unit_raw),
+        condition_raw=str(condition_raw or "").strip(),
+        assertion_type=assertion_type,
+        block_index=segment.block_index,
+        line_start=segment.line_start,
+        line_end=segment.line_end,
+        source_text=source_text,
+        owner_span=(owner.start, owner.end),
+        property_span=(property_row[2], property_row[3]),
+        value_span=(value.start, value.end),
+        bundle_key=bundle_key,
+        source_coordinate_key=source_coordinate_key,
+        decision_key=_assertion_key(
+            "tensile-assertion-decision", coordinate_payload
+        ),
+    )
+
+
+def resolve_tensile_assertion_coordinate(
+    *,
+    property_name: str,
+    value_raw: str,
+    unit_raw: str,
+    evidence: Sequence[str],
+    source_text: str,
+    owner_aliases: Mapping[str, Sequence[str]],
+) -> TensileAssertionDecision:
+    """Resolve an existing core-tensile candidate to one literal prose owner.
+
+    This is deliberately a validator over an already extracted candidate.  It
+    does not enumerate arbitrary prose numbers or create a scientific fact.
+    """
+
+    property_contract = _assertion_property_family(property_name)
+    value_tokens = _assertion_numeric_tokens(value_raw)
+    unit = _assertion_unit(unit_raw)
+    if property_contract is None or not value_tokens or not unit:
+        return TensileAssertionDecision(
+            status="not_found",
+            reason="candidate_requires_core_property_numeric_value_and_unit",
+        )
+    family, _ = property_contract
+    evidence_needles = tuple(
+        normalize_evidence_text(row).replace(r"\%", "%")
+        for row in evidence
+        if normalize_evidence_text(row).replace(r"\%", "%")
+    )
+    if not evidence_needles or not source_text or not owner_aliases:
+        return TensileAssertionDecision(
+            status="not_found", reason="missing_source_evidence_or_owner_ledger"
+        )
+
+    coordinates: list[TensileAssertionCoordinate] = []
+    ambiguity_reasons: set[str] = set()
+    for segment in _assertion_segments(source_text):
+        if not any(needle in segment.text for needle in evidence_needles):
+            continue
+        values = _assertion_value_mentions(segment.text)
+        matching_values = tuple(
+            row
+            for row in values
+            if _assertion_value_matches(
+                row, value_tokens=value_tokens, unit=unit
+            )
+        )
+        if not matching_values:
+            continue
+        property_mentions = _assertion_property_mentions(segment.text)
+        owner_mentions = _assertion_owner_mentions(
+            segment.text, owner_aliases
+        )
+        for value in matching_values:
+            property_row, property_ambiguous, property_reason = (
+                _assertion_property_for_value(
+                    segment.text,
+                    value,
+                    family,
+                    property_mentions,
+                    values,
+                )
+            )
+            if property_ambiguous:
+                ambiguity_reasons.add(property_reason)
+                continue
+            if property_row is None:
+                continue
+            owner, owner_ambiguous, owner_reason = _assertion_owner_for_value(
+                segment.text, value, owner_mentions, values
+            )
+            assertion_type = (
+                "ordered"
+                if property_reason.startswith("ordered")
+                or owner_reason.startswith("ordered")
+                else "direct"
+            )
+            coordinate_source = segment.text
+            coordinate_segment = segment
+            if owner_ambiguous:
+                ambiguity_reasons.add(owner_reason)
+                continue
+            if owner is None and segment.previous_text and _ASSERTION_CONTINUATION.search(
+                segment.text
+            ):
+                previous_owners = _assertion_owner_mentions(
+                    segment.previous_text, owner_aliases
+                )
+                previous_keys = {row.owner_key for row in previous_owners}
+                if len(previous_keys) == 1:
+                    owner = max(
+                        previous_owners, key=lambda row: (row.start, row.end)
+                    )
+                    assertion_type = "continuation"
+                    coordinate_source = (
+                        segment.previous_text + " " + segment.text
+                    )
+                    # Spans remain relative to their literal local sentence;
+                    # the audit also preserves the joined source envelope.
+                    coordinate_segment = segment
+                elif previous_keys:
+                    ambiguity_reasons.add("continuation_owner_ambiguous")
+            elif owner is None and segment.previous_text:
+                previous_owners = _assertion_owner_mentions(
+                    segment.previous_text, owner_aliases
+                )
+                if len({row.owner_key for row in previous_owners}) > 1:
+                    ambiguity_reasons.add("preceding_owner_scope_ambiguous")
+            if owner is None:
+                continue
+            condition_raw = _assertion_result_condition(segment.text)
+            if (
+                not condition_raw
+                and segment.previous_text
+                and (
+                    assertion_type == "continuation"
+                    or _ASSERTION_FIGURE_SPLIT_CONTINUATION.search(segment.text)
+                )
+            ):
+                condition_raw = _assertion_result_condition(
+                    segment.previous_text
+                )
+                if condition_raw and not coordinate_source.startswith(
+                    segment.previous_text
+                ):
+                    coordinate_source = (
+                        segment.previous_text + " " + coordinate_source
+                    )
+            coordinates.append(
+                _assertion_coordinate(
+                    owner=owner,
+                    property_row=property_row,
+                    value=value,
+                    value_raw=value_raw,
+                    unit_raw=unit_raw,
+                    assertion_type=assertion_type,
+                    condition_raw=condition_raw,
+                    segment=coordinate_segment,
+                    source_text=coordinate_source,
+                )
+            )
+
+    coordinates.sort(
+        key=lambda row: (
+            row.block_index,
+            row.line_start,
+            row.owner_key,
+            row.property_family,
+            row.source_coordinate_key,
+        )
+    )
+    unique_coordinates = {
+        row.source_coordinate_key: row for row in coordinates
+    }
+    candidates = tuple(unique_coordinates[key] for key in sorted(unique_coordinates))
+    scientific_owners = {row.owner_key for row in candidates}
+    if len(scientific_owners) == 1 and candidates:
+        selected = min(
+            candidates,
+            key=lambda row: (
+                row.block_index,
+                row.line_start,
+                row.source_coordinate_key,
+            ),
+        )
+        return TensileAssertionDecision(
+            status="matched",
+            coordinate=selected,
+            candidates=candidates,
+            reason="one_source_literal_owner_property_value_unit_coordinate",
+        )
+    if len(scientific_owners) > 1 or ambiguity_reasons:
+        return TensileAssertionDecision(
+            status="ambiguous",
+            candidates=candidates,
+            reason=";".join(sorted(ambiguity_reasons))
+            or "multiple_source_owner_coordinates",
+        )
+    return TensileAssertionDecision(
+        status="not_found",
+        candidates=candidates,
+        reason="no_source_literal_owner_property_value_unit_coordinate",
+    )

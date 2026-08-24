@@ -4,6 +4,7 @@ from knowmat.alpha25.source_coordinates import (
     discrete_tensile_sidecars,
     logical_tables,
     resolve_structured_table_record,
+    resolve_tensile_assertion_coordinate,
 )
 
 
@@ -439,3 +440,400 @@ def test_v203_dense_table_decisions_are_stable_under_owner_mapping_order():
     )
 
     assert [row.to_dict() for row in first] == [row.to_dict() for row in second]
+
+
+def test_v204_tensile_assertion_resolves_single_owner_multi_property_bundle():
+    source = (
+        "The AP-HEA exhibits a YS of ~548 MPa, an ultimate tensile strength "
+        "of ~835 MPa, and a fracture elongation of ~30 %."
+    )
+    owners = {
+        "owner-ap": ("AP-HEA",),
+        "owner-ht": ("HT-HEA",),
+    }
+
+    yield_decision = resolve_tensile_assertion_coordinate(
+        property_name="YS",
+        value_raw="~548",
+        unit_raw="MPa",
+        evidence=("a YS of ~548 MPa",),
+        source_text=source,
+        owner_aliases=owners,
+    )
+    elongation_decision = resolve_tensile_assertion_coordinate(
+        property_name="fracture elongation",
+        value_raw="~30",
+        unit_raw="%",
+        evidence=("fracture elongation of ~30 %",),
+        source_text=source,
+        owner_aliases=owners,
+    )
+
+    assert yield_decision.status == "matched"
+    assert yield_decision.coordinate is not None
+    assert yield_decision.coordinate.owner_key == "owner-ap"
+    assert yield_decision.coordinate.property_name == "Yield Strength"
+    assert yield_decision.coordinate.value_raw == "~548"
+    assert yield_decision.coordinate.unit_raw == "MPa"
+    assert yield_decision.coordinate.assertion_type == "direct"
+    assert yield_decision.coordinate.source_coordinate_key.startswith(
+        "tensile-assertion:"
+    )
+    assert elongation_decision.status == "matched"
+    assert elongation_decision.coordinate is not None
+    assert elongation_decision.coordinate.owner_key == "owner-ap"
+
+
+def test_v204_tensile_assertion_maps_two_owner_value_bundles_without_fanout():
+    source = (
+        "L70 had YS: 404 ± 5 MPa and UTS: 556 ± 11 MPa, whereas L90 had "
+        "YS: 394 ± 15 MPa and UTS: 456 ± 4 MPa."
+    )
+    owners = {"owner-l70": ("L70",), "owner-l90": ("L90",)}
+
+    l70 = resolve_tensile_assertion_coordinate(
+        property_name="UTS",
+        value_raw="556 ± 11",
+        unit_raw="MPa",
+        evidence=("UTS: 556 ± 11 MPa",),
+        source_text=source,
+        owner_aliases=owners,
+    )
+    l90 = resolve_tensile_assertion_coordinate(
+        property_name="UTS",
+        value_raw="456 ± 4",
+        unit_raw="MPa",
+        evidence=("UTS: 456 ± 4 MPa",),
+        source_text=source,
+        owner_aliases=owners,
+    )
+
+    assert l70.status == "matched"
+    assert l70.coordinate is not None
+    assert l70.coordinate.owner_key == "owner-l70"
+    assert l90.status == "matched"
+    assert l90.coordinate is not None
+    assert l90.coordinate.owner_key == "owner-l90"
+    assert l70.coordinate.bundle_key == l90.coordinate.bundle_key
+    assert l70.coordinate.source_coordinate_key != l90.coordinate.source_coordinate_key
+
+
+def test_v204_tensile_assertion_maps_property_value_respectively_sequence():
+    source = (
+        "For HT-HEA, the YS and UTS respectively increased to ~748 MPa and "
+        "~1148 MPa."
+    )
+    owners = {"owner-ht": ("HT-HEA",)}
+
+    yield_decision = resolve_tensile_assertion_coordinate(
+        property_name="YS",
+        value_raw="~748",
+        unit_raw="MPa",
+        evidence=("YS and UTS respectively increased to ~748 MPa and ~1148 MPa",),
+        source_text=source,
+        owner_aliases=owners,
+    )
+    uts_decision = resolve_tensile_assertion_coordinate(
+        property_name="UTS",
+        value_raw="~1148",
+        unit_raw="MPa",
+        evidence=("YS and UTS respectively increased to ~748 MPa and ~1148 MPa",),
+        source_text=source,
+        owner_aliases=owners,
+    )
+
+    assert yield_decision.status == "matched"
+    assert uts_decision.status == "matched"
+    assert yield_decision.coordinate is not None
+    assert uts_decision.coordinate is not None
+    assert yield_decision.coordinate.assertion_type == "ordered"
+    assert uts_decision.coordinate.assertion_type == "ordered"
+    assert yield_decision.coordinate.owner_key == "owner-ht"
+    assert uts_decision.coordinate.owner_key == "owner-ht"
+
+
+def test_v204_tensile_assertion_allows_only_adjacent_unique_continuation():
+    source = (
+        "The LPBF alloy had a yield strength of 482 ± 1 MPa. "
+        "Its ultimate tensile strength was 539 ± 1 MPa and elongation was "
+        "8.8 ± 0.7 %."
+    )
+    owners = {"owner-lpbf": ("LPBF alloy",)}
+
+    decision = resolve_tensile_assertion_coordinate(
+        property_name="ultimate tensile strength",
+        value_raw="539 ± 1",
+        unit_raw="MPa",
+        evidence=("ultimate tensile strength was 539 ± 1 MPa",),
+        source_text=source,
+        owner_aliases=owners,
+    )
+
+    assert decision.status == "matched"
+    assert decision.coordinate is not None
+    assert decision.coordinate.owner_key == "owner-lpbf"
+    assert decision.coordinate.assertion_type == "continuation"
+    assert decision.coordinate.source_text.startswith("the lpbf alloy")
+
+
+def test_v204_tensile_assertion_fails_closed_for_ambiguous_owner_or_value_scope():
+    ambiguous_owner = (
+        "A1 and A2 were tested. The reported yield strength was 900 MPa."
+    )
+    mismatched_order = (
+        "For A1 and A2, the yield strengths were 900 MPa, respectively."
+    )
+    owners = {"owner-a1": ("A1",), "owner-a2": ("A2",)}
+
+    first = resolve_tensile_assertion_coordinate(
+        property_name="yield strength",
+        value_raw="900",
+        unit_raw="MPa",
+        evidence=("yield strength was 900 MPa",),
+        source_text=ambiguous_owner,
+        owner_aliases=owners,
+    )
+    second = resolve_tensile_assertion_coordinate(
+        property_name="yield strength",
+        value_raw="900",
+        unit_raw="MPa",
+        evidence=("yield strengths were 900 MPa",),
+        source_text=mismatched_order,
+        owner_aliases=owners,
+    )
+
+    assert first.status == "ambiguous"
+    assert first.coordinate is None
+    assert second.status == "ambiguous"
+    assert second.coordinate is None
+
+
+def test_v204_tensile_assertion_requires_literal_numeric_value_and_unit():
+    source = "A1 had higher strength and similar ductility than A2."
+    owners = {"owner-a1": ("A1",), "owner-a2": ("A2",)}
+
+    decision = resolve_tensile_assertion_coordinate(
+        property_name="yield strength",
+        value_raw="higher",
+        unit_raw="MPa",
+        evidence=(source,),
+        source_text=source,
+        owner_aliases=owners,
+    )
+
+    assert decision.status == "not_found"
+    assert decision.coordinate is None
+
+
+def test_v204_tensile_assertion_decision_is_owner_mapping_order_stable():
+    source = "A1 had an ultimate tensile strength of 900 ± 5 MPa."
+    kwargs = {
+        "property_name": "UTS",
+        "value_raw": "900 ± 5",
+        "unit_raw": "MPa",
+        "evidence": ("ultimate tensile strength of 900 ± 5 MPa",),
+        "source_text": source,
+    }
+
+    first = resolve_tensile_assertion_coordinate(
+        **kwargs,
+        owner_aliases={"owner-a2": ("A2",), "owner-a1": ("A1",)},
+    )
+    second = resolve_tensile_assertion_coordinate(
+        **kwargs,
+        owner_aliases={"owner-a1": ("A1",), "owner-a2": ("A2",)},
+    )
+
+    assert first.to_dict() == second.to_dict()
+
+
+def test_v204_tensile_assertion_prefers_complete_owner_alias_over_suffix_alias():
+    source = "The AP-HEA had a yield strength of 548 MPa."
+
+    decision = resolve_tensile_assertion_coordinate(
+        property_name="yield strength",
+        value_raw="548",
+        unit_raw="MPa",
+        evidence=("yield strength of 548 MPa",),
+        source_text=source,
+        owner_aliases={"owner-generic": ("HEA",), "owner-ap": ("AP-HEA",)},
+    )
+
+    assert decision.status == "matched"
+    assert decision.coordinate is not None
+    assert decision.coordinate.owner_key == "owner-ap"
+
+
+def test_v204_tensile_assertion_preserves_escaped_percent_value():
+    source = (
+        "The newly developed alloy LPBF sample showed a high yield strength of "
+        "482 ± 1 MPa and good elongation of 8.8 ± 0.7\\%."
+    )
+
+    decision = resolve_tensile_assertion_coordinate(
+        property_name="elongation",
+        value_raw="8.8 ± 0.7",
+        unit_raw="%",
+        evidence=("elongation of 8.8 ± 0.7%",),
+        source_text=source,
+        owner_aliases={"owner-lpbf": ("LPBF sample",)},
+    )
+
+    assert decision.status == "matched"
+    assert decision.coordinate is not None
+    assert decision.coordinate.owner_key == "owner-lpbf"
+    assert decision.coordinate.value_raw == "8.8 ± 0.7"
+    assert decision.coordinate.unit_raw == "%"
+
+
+def test_v204_tensile_assertion_binds_literal_result_temperature_across_fig_split():
+    source = (
+        "Tensile properties at 800 °C of the multi-spot sample L70 "
+        "(YS: 404 ± 5 MPa, UTS: 556 ± 11 MPa, EL: 17.0 ± 3.1 %, Fig. "
+        "7d to f) are generally better than the L90 counterpart "
+        "(YS: 394 ± 15 MPa, UTS: 456 ± 4 MPa, EL: 18.4 ± 4.6 %)."
+    )
+    owners = {"owner-l70": ("L70",), "owner-l90": ("L90",)}
+
+    l70 = resolve_tensile_assertion_coordinate(
+        property_name="YS",
+        value_raw="404 ± 5",
+        unit_raw="MPa",
+        evidence=("YS: 404 ± 5 MPa",),
+        source_text=source,
+        owner_aliases=owners,
+    )
+    l90 = resolve_tensile_assertion_coordinate(
+        property_name="YS",
+        value_raw="394 ± 15",
+        unit_raw="MPa",
+        evidence=("YS: 394 ± 15 MPa",),
+        source_text=source,
+        owner_aliases=owners,
+    )
+
+    assert l70.status == "matched"
+    assert l90.status == "matched"
+    assert l70.coordinate is not None
+    assert l90.coordinate is not None
+    assert l70.coordinate.condition_raw == "800 °c"
+    assert l90.coordinate.condition_raw == "800 °c"
+
+
+def test_v204_tensile_assertion_never_binds_preparation_temperature_as_test_temperature():
+    source = (
+        "A1 was heat treated at 800 °C for 4 h and then exhibited a yield "
+        "strength of 900 MPa."
+    )
+
+    decision = resolve_tensile_assertion_coordinate(
+        property_name="yield strength",
+        value_raw="900",
+        unit_raw="MPa",
+        evidence=("yield strength of 900 MPa",),
+        source_text=source,
+        owner_aliases={"owner-a1": ("A1",)},
+    )
+
+    assert decision.status == "matched"
+    assert decision.coordinate is not None
+    assert decision.coordinate.condition_raw == ""
+
+
+def test_v204_tensile_assertion_does_not_choose_between_two_result_temperatures():
+    source = (
+        "A1 had a yield strength of 900 MPa in tests at 25 °C and 800 °C."
+    )
+
+    decision = resolve_tensile_assertion_coordinate(
+        property_name="yield strength",
+        value_raw="900",
+        unit_raw="MPa",
+        evidence=("yield strength of 900 MPa",),
+        source_text=source,
+        owner_aliases={"owner-a1": ("A1",)},
+    )
+
+    assert decision.status == "matched"
+    assert decision.coordinate is not None
+    assert decision.coordinate.condition_raw == ""
+
+
+def test_v204_tensile_assertion_does_not_bind_sample_state_temperature():
+    source = "The 1280 °C sample showed a UTS of 612 MPa."
+
+    decision = resolve_tensile_assertion_coordinate(
+        property_name="ultimate tensile strength",
+        value_raw="612",
+        unit_raw="MPa",
+        evidence=("UTS of 612 MPa",),
+        source_text=source,
+        owner_aliases={"owner-1280": ("1280 °C sample",)},
+    )
+
+    assert decision.status == "matched"
+    assert decision.coordinate is not None
+    assert decision.coordinate.owner_key == "owner-1280"
+    assert decision.coordinate.condition_raw == ""
+
+
+def test_v204_tensile_assertion_does_not_jump_over_an_intervening_comparison_clause():
+    source = (
+        "The CoCrNi alloy demonstrates an ultimate tensile strength of 781 MPa "
+        "and an elongation at failure of 42.2%, while the "
+        "CoCrNi(Al0.6TiFe)0.5 alloy demonstrates an ultimate tensile strength "
+        "of 1165.2 MPa."
+    )
+    owners = {
+        "owner-base": ("CoCrNi",),
+        "owner-alloyed": ("CoCrNi(Al0.6TiFe)0.5",),
+    }
+
+    decision = resolve_tensile_assertion_coordinate(
+        property_name="ultimate tensile strength",
+        value_raw="781",
+        unit_raw="MPa",
+        evidence=("ultimate tensile strength of 781 MPa",),
+        source_text=source,
+        owner_aliases=owners,
+    )
+
+    assert decision.status == "matched"
+    assert decision.coordinate is not None
+    assert decision.coordinate.owner_key == "owner-base"
+
+
+def test_v204_tensile_assertion_accepts_only_direct_parenthesized_following_owner():
+    source = (
+        "Yield and ultimate tensile strengths increased from 486.0 and "
+        "781.2 MPa (CoCrNi) to 887.2 and 1165.2 MPa "
+        "(CoCrNi(Al0.6TiFe)0.5)."
+    )
+    owners = {
+        "owner-base": ("CoCrNi",),
+        "owner-alloyed": ("CoCrNi(Al0.6TiFe)0.5",),
+    }
+
+    base = resolve_tensile_assertion_coordinate(
+        property_name="ultimate tensile strength",
+        value_raw="781.2",
+        unit_raw="MPa",
+        evidence=("781.2 MPa (CoCrNi)",),
+        source_text=source,
+        owner_aliases=owners,
+    )
+    alloyed = resolve_tensile_assertion_coordinate(
+        property_name="ultimate tensile strength",
+        value_raw="1165.2",
+        unit_raw="MPa",
+        evidence=("1165.2 MPa (CoCrNi(Al0.6TiFe)0.5)",),
+        source_text=source,
+        owner_aliases=owners,
+    )
+
+    assert base.status == "matched"
+    assert alloyed.status == "matched"
+    assert base.coordinate is not None
+    assert alloyed.coordinate is not None
+    assert base.coordinate.owner_key == "owner-base"
+    assert alloyed.coordinate.owner_key == "owner-alloyed"

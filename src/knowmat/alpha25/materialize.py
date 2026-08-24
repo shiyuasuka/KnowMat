@@ -37,6 +37,7 @@ from knowmat.alpha25.property_context import (
     PropertyContextIndex,
     TensileProtocolLedger,
     has_explicit_global_tensile_scope,
+    tensile_result_protocol_binding_v204_enabled,
 )
 from knowmat.alpha25.source_coordinates import (
     DenseTensileCell,
@@ -16527,13 +16528,23 @@ def materialize_candidate(
                 owner_labels=selected_context_labels,
                 other_owner_labels=other_context_labels,
             )
+            assertion_protocol_coordinate = (
+                tensile_result_protocol_binding_v204_enabled()
+                and str(prop.get("property_id_candidate") or "").startswith(
+                    "tensile-assertion:"
+                )
+            )
             if ledger_decision.status == "bound":
                 ledger_before = deepcopy(prop)
                 prop = deepcopy(prop)
                 prop["test_condition_raw"] = ledger_decision.condition_raw
                 issues.append(
                     MaterializeIssue(
-                        code="tensile_protocol_ledger_bound",
+                        code=(
+                            "tensile_result_protocol_bound"
+                            if assertion_protocol_coordinate
+                            else "tensile_protocol_ledger_bound"
+                        ),
                         severity="info",
                         sample_id_raw=sample_id,
                         path=f"items.{sample_id}.Properties",
@@ -16573,7 +16584,11 @@ def materialize_candidate(
             ):
                 issues.append(
                     MaterializeIssue(
-                        code="tensile_protocol_ledger_ambiguous",
+                        code=(
+                            "tensile_result_protocol_ambiguous"
+                            if assertion_protocol_coordinate
+                            else "tensile_protocol_ledger_ambiguous"
+                        ),
                         sample_id_raw=sample_id,
                         path=f"items.{sample_id}.Properties",
                         message=(

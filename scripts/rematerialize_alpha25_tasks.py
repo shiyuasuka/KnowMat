@@ -37,6 +37,9 @@ from knowmat.alpha25.property_context import (  # noqa: E402
 from knowmat.alpha25.promotion import (  # noqa: E402
     promote_axis_facts,
     same_table_property_merge_v201_enabled,
+    tensile_assertion_coordinates_v204_enabled,
+    tensile_coordinate_fanout_guard_v204_enabled,
+    tensile_result_protocol_binding_v204_enabled,
 )
 from knowmat.alpha25.planner import build_evidence_units  # noqa: E402
 from knowmat.evaluation.alpha25_gt import (  # noqa: E402
@@ -232,6 +235,17 @@ def rebuild_paper(paper_root: Path, output_root: Path) -> dict[str, Any]:
             property_coordinate_quarantine_v203_enabled()
         ),
     }
+    v204_gates = {
+        "tensile_assertion_coordinates": (
+            tensile_assertion_coordinates_v204_enabled()
+        ),
+        "tensile_coordinate_fanout_guard": (
+            tensile_coordinate_fanout_guard_v204_enabled()
+        ),
+        "tensile_result_protocol_binding": (
+            tensile_result_protocol_binding_v204_enabled()
+        ),
+    }
     normalized = normalize_v11(
         {
             "final_data": materialized.document,
@@ -275,6 +289,7 @@ def rebuild_paper(paper_root: Path, output_root: Path) -> dict[str, Any]:
                     ),
                 },
                 **({"v203_gates": v203_gates} if any(v203_gates.values()) else {}),
+                **({"v204_gates": v204_gates} if any(v204_gates.values()) else {}),
                 "promotion_input_fact_count": len(accepted_facts),
                 "promotion_accepted_fact_count": len(promoted_facts),
                 "promotion_issue_count": len(promotion_issues),
@@ -322,6 +337,21 @@ def rebuild_paper(paper_root: Path, output_root: Path) -> dict[str, Any]:
                 ],
             }
             if any(v203_gates.values())
+            else {}
+        ),
+        **(
+            {
+                "v204_tensile_assertion_coordinates": v204_gates[
+                    "tensile_assertion_coordinates"
+                ],
+                "v204_tensile_coordinate_fanout_guard": v204_gates[
+                    "tensile_coordinate_fanout_guard"
+                ],
+                "v204_tensile_result_protocol_binding": v204_gates[
+                    "tensile_result_protocol_binding"
+                ],
+            }
+            if any(v204_gates.values())
             else {}
         ),
         "rejected_rows": rejected,

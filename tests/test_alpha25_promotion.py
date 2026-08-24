@@ -17,6 +17,7 @@ from knowmat.alpha25.promotion import (
     promote_axis_facts,
     resolve_record_owner,
 )
+from knowmat.alpha25.claim_quality import filter_composition_precision_facts
 
 
 def _property(
@@ -202,6 +203,1085 @@ def _composition(
         data=data,
         source_evidence=[evidence],
         confidence=0.9,
+    )
+
+
+def test_composition_precision_gate_isolates_qualitative_and_placeholder_components():
+    fact = _composition(
+        evidence=(
+            "A1 contained 47.86 ± 0.5 at.% Al; Mo was present and Ti was not reported."
+        )
+    )
+    fact.data["components"] = [
+        fact.data["components"][0],
+        {
+            "name_raw": "Mo",
+            "value_kind": "categorical",
+            "value_raw": "present",
+            "unit_raw": "",
+            "data_nature": "reported",
+        },
+        {
+            "name_raw": "Ti",
+            "value_kind": "categorical",
+            "value_raw": "not reported",
+            "unit_raw": "",
+            "data_nature": "reported",
+        },
+    ]
+
+    result = filter_composition_precision_facts([fact])
+
+    assert len(result.accepted) == 1
+    assert [row["name_raw"] for row in result.accepted[0].data["components"]] == [
+        "Al"
+    ]
+    assert [issue.actual["reason"] for issue in result.issues] == [
+        "qualitative_or_comparative_component",
+        "placeholder_or_unknown_kind",
+    ]
+
+
+def test_generic_structure_carrier_entity_is_quarantined_but_atomic_feature_survives():
+    evidence = (
+        "No defects were found in any sample, confirming the material is fully dense."
+    )
+    fact = _structure(
+        sample="WAAM Ti64",
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "material",
+                "entity_type": "other",
+                "role": "reported",
+                "features": [],
+                "raw_expression": "material",
+            }
+        ],
+        features=[
+            {
+                "feature_name_raw": "porosity",
+                "value_kind": "categorical",
+                "value_raw": "No defects",
+                "data_nature": "reported",
+                "source_evidence": [evidence],
+            }
+        ],
+    )
+
+    result = promote_axis_facts(
+        [_anchor("WAAM Ti64")], [fact], source_text=evidence
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["entities"] == []
+    assert result.accepted[0].data["features"][0]["feature_name_raw"] == "porosity"
+    assert any(
+        issue.code == "promotion_structure_generic_entity_quarantined"
+        and issue.actual["reason"] == "generic_entity_only_projection"
+        for issue in result.issues
+    )
+
+
+def test_specific_structure_entity_containing_generic_word_is_preserved():
+    evidence = "A matrix material layer was observed at the interface."
+    fact = _structure(
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "matrix material layer",
+                "entity_type": "layer",
+                "role": "reported",
+                "features": [],
+                "raw_expression": "matrix material layer",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["entities"][0]["name_raw"] == (
+        "matrix material layer"
+    )
+    assert not any(
+        issue.code == "promotion_structure_generic_entity_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_table_yes_entity_is_normalized_to_presence_feature():
+    evidence = "| 617B | No | Yes |"
+    fact = _structure(
+        sample="617B",
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "Carbide",
+                "raw_expression": "Yes",
+                "features": [],
+            }
+        ],
+        features=[
+            {
+                "feature_name_raw": "Boride presence",
+                "value_kind": "categorical",
+                "value_raw": "No",
+                "data_nature": "reported",
+                "source_evidence": [evidence],
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("617B")], [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["entities"] == []
+    assert {
+        (feature["feature_name_raw"], feature["value_raw"])
+        for feature in result.accepted[0].data["features"]
+    } == {("Boride presence", "No"), ("Carbide presence", "Yes")}
+    assert any(
+        issue.code == "promotion_structure_table_binary_entity_normalized"
+        for issue in result.issues
+    )
+
+
+def test_cited_reference_table_structure_fact_routes_by_row_citation():
+    evidence = "| Tytko [21] | 2012 | 617B | No | Yes |"
+    fact = _structure(
+        sample="617B",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "Boride presence",
+                "value_kind": "categorical",
+                "value_raw": "No",
+                "data_nature": "reported",
+                "source_evidence": [evidence],
+            }
+        ],
+    )
+    anchors = [
+        _anchor("617B"),
+        _anchor(
+            "617B [21] [reference]",
+            material="617B",
+            state="literature-reported",
+            role="Reference",
+            evidence=evidence,
+        ),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "617B [21] [reference]"
+    assert any(
+        issue.code == "promotion_cited_table_reference_owner_reassigned"
+        for issue in result.issues
+    )
+
+
+def test_cited_reference_table_routes_unique_sibling_when_base_label_repeats():
+    evidence = "| Blavette [32] | 1996 | Astroloy | Yes | Yes |"
+    fact = _structure(
+        sample="Astroloy",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "Carbide presence",
+                "value_kind": "categorical",
+                "value_raw": "Yes",
+                "data_nature": "reported",
+                "source_evidence": [evidence],
+            }
+        ],
+    )
+    anchors = [
+        _anchor("Astroloy"),
+        _anchor("Astroloy", state="boron-containing superalloy"),
+        _anchor(
+            "Astroloy [32] [reference]",
+            material="Astroloy",
+            state="literature-reported",
+            role="Reference",
+            evidence=evidence,
+        ),
+        _anchor(
+            "Astroloy [33] [reference]",
+            material="Astroloy",
+            state="literature-reported",
+            role="Reference",
+            evidence="| Letellier [33] | 1994 | Astroloy | No | No |",
+        ),
+    ]
+    fact.data["material_state"] = "boron-containing superalloy"
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "Astroloy [32] [reference]"
+
+
+def test_citation_cropped_reference_row_routes_by_exact_unique_cell_projection():
+    evidence = "| Astroloy | Yes | Yes |"
+    fact = _structure(
+        sample="Astroloy",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "Carbide presence",
+                "value_kind": "categorical",
+                "value_raw": "Yes",
+                "data_nature": "reported",
+                "source_evidence": [evidence],
+            }
+        ],
+    )
+    anchors = [
+        _anchor("Astroloy"),
+        _anchor("Astroloy", state="boron-containing superalloy"),
+        _anchor(
+            "Astroloy [32] [reference]",
+            material="Astroloy",
+            state="literature-reported",
+            role="Reference",
+            evidence="Blavette [32] | 1996 | Astroloy | 0.11 | Yes | Yes | Yes",
+        ),
+        _anchor(
+            "Astroloy [33] [reference]",
+            material="Astroloy",
+            state="literature-reported",
+            role="Reference",
+            evidence="Letellier [33] | 1994 | Astroloy | 0.11 | Yes | No | No",
+        ),
+    ]
+    fact.data["material_state"] = "boron-containing superalloy"
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "Astroloy [32] [reference]"
+    assert result.accepted[0].data["material_state"] == "literature-reported"
+    assert any(
+        issue.code == "promotion_cited_table_reference_owner_reassigned"
+        for issue in result.issues
+    )
+
+
+def test_citation_cropped_row_prefers_exact_suffix_over_loose_subsequence():
+    evidence = "| N18 | No | No |"
+    fact = _structure(
+        sample="N18",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "Boride presence",
+                "value_kind": "categorical",
+                "value_raw": "No",
+                "data_nature": "reported",
+                "source_evidence": [evidence],
+            },
+            {
+                "feature_name_raw": "Carbide presence",
+                "value_kind": "categorical",
+                "value_raw": "No",
+                "data_nature": "reported",
+                "source_evidence": [evidence],
+            },
+        ],
+    )
+    fact.data["material_state"] = "boron-containing superalloy"
+    anchors = [
+        _anchor("N18"),
+        _anchor("N18", state="boron-containing superalloy"),
+        _anchor(
+            "N18 [28] [reference]",
+            material="N18",
+            state="literature-reported",
+            role="Reference",
+            evidence="Lemarchand [28] | 2002 | N18 | 0.083 | Yes | No | No",
+        ),
+        _anchor(
+            "N18 [29] [reference]",
+            material="N18",
+            state="literature-reported",
+            role="Reference",
+            evidence="Cadel [29] | 2002 | N18 | 0.083 | No | Yes | No",
+        ),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "N18 [28] [reference]"
+    assert result.accepted[0].data["material_state"] == "literature-reported"
+
+
+def test_citation_cropped_reference_row_never_guesses_between_identical_rows():
+    evidence = "| Astroloy | Yes | No | No |"
+    fact = _structure(
+        sample="Astroloy",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "Carbide presence",
+                "value_kind": "categorical",
+                "value_raw": "No",
+                "data_nature": "reported",
+                "source_evidence": [evidence],
+            }
+        ],
+    )
+    anchors = [
+        _anchor("Astroloy"),
+        _anchor(
+            "Astroloy [33] [reference]",
+            material="Astroloy",
+            state="literature-reported",
+            role="Reference",
+            evidence="Letellier [33] | 1994 | Astroloy | 0.11 | Yes | No | No",
+        ),
+        _anchor(
+            "Astroloy [34] [reference]",
+            material="Astroloy",
+            state="literature-reported",
+            role="Reference",
+            evidence="Letellier [34] | 1993 | Astroloy | 0.11 | Yes | No | No",
+        ),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert not any(
+        issue.code == "promotion_cited_table_reference_owner_reassigned"
+        for issue in result.issues
+    )
+    assert all(
+        accepted.sample_id_raw not in {
+            "Astroloy [33] [reference]",
+            "Astroloy [34] [reference]",
+        }
+        for accepted in result.accepted
+    )
+
+
+def test_composition_precision_gate_keeps_balance_and_explicit_formula():
+    fact = _composition(evidence="A1 nominal composition was Ti6Al4V with balance Fe.")
+    fact.data["components"] = [
+        {
+            "name_raw": "Fe",
+            "value_kind": "categorical",
+            "value_raw": "Balance",
+            "unit_raw": "",
+            "data_nature": "reported",
+        },
+        {
+            "name_raw": "nominal formula",
+            "value_kind": "categorical",
+            "value_raw": "Ti6Al4V",
+            "unit_raw": "",
+            "data_nature": "reported",
+        },
+    ]
+
+    result = filter_composition_precision_facts([fact])
+
+    assert not result.issues
+    assert [row["value_kind"] for row in result.accepted[0].data["components"]] == [
+        "balance",
+        "categorical",
+    ]
+
+
+def test_composition_precision_gate_rejects_sentence_and_derived_descriptor():
+    fact = _composition(
+        evidence=(
+            "CrB2 particles with diameters of ~10 μm were used as starting "
+            "reinforcing particles; the aluminium equivalent was 9.31."
+        )
+    )
+    fact.data["components"] = [
+        {
+            "name_raw": "CrB₂",
+            "value_kind": "scalar",
+            "value_raw": "Micron-sized CrB₂ with diameters of ~10 μm were used",
+            "unit_raw": "unknown",
+        },
+        {
+            "name_raw": "aluminium equivalent",
+            "value_kind": "scalar",
+            "value_raw": "9.31",
+            "unit_raw": "unknown",
+        },
+    ]
+
+    result = filter_composition_precision_facts([fact])
+
+    assert not result.accepted
+    assert [issue.actual["reason"] for issue in result.issues] == [
+        "numeric_value_not_literal_amount",
+        "non_atomic_descriptor_without_composition_unit",
+    ]
+
+
+def test_composition_precision_gate_blocks_unbound_numeric_projection():
+    fact = _composition(evidence="A1 contained 47.86 ± 0.5 at.% Al.")
+    fact.data["components"] = [
+        fact.data["components"][0],
+        {
+            "name_raw": "Mo",
+            "value_kind": "scalar",
+            "value_raw": "2.5",
+            "unit_raw": "at.%",
+            "data_nature": "reported",
+        },
+    ]
+
+    result = filter_composition_precision_facts([fact])
+
+    assert len(result.accepted) == 1
+    assert [row["name_raw"] for row in result.accepted[0].data["components"]] == [
+        "Al"
+    ]
+    assert result.issues[0].actual["reason"] == "numeric_literal_not_in_component_evidence"
+
+
+def test_composition_precision_gate_does_not_retype_trend_with_delay_number():
+    """A number inside qualitative trend prose is not a composition amount."""
+
+    evidence = (
+        "Al wt% declines with increasing heat accumulation with wall height "
+        "in the case of a 0 s delay."
+    )
+    fact = _composition(evidence=evidence)
+    fact.data["components"] = [
+        {
+            "name_raw": "aluminum",
+            "value_kind": "categorical",
+            "value_raw": (
+                "declines with increasing heat accumulation with wall height "
+                "in the case of a 0 s delay"
+            ),
+            "unit_raw": "wt%",
+            "data_nature": "reported",
+        }
+    ]
+
+    result = filter_composition_precision_facts([fact])
+
+    assert result.accepted == []
+    assert [issue.actual["reason"] for issue in result.issues] == [
+        "qualitative_or_comparative_component"
+    ]
+
+
+def test_composition_precision_gate_keeps_categorical_numeric_literal_with_unit():
+    fact = _composition(
+        value="48",
+        unit="wt%",
+        evidence="A1 contained 48 wt% Al.",
+    )
+    fact.data["components"][0]["value_kind"] = "categorical"
+
+    result = filter_composition_precision_facts([fact])
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["components"][0]["value_kind"] == "scalar"
+    assert result.issues == []
+
+
+def test_composition_precision_gate_isolates_named_qualitative_trend():
+    fact = _composition(
+        value="higher",
+        unit=None,
+        evidence=(
+            "CMSX-4 displays the strongest hardening effect due to the higher "
+            "Ta and Ti concentrations in gamma prime."
+        ),
+    )
+    fact.data["components"][0].update(
+        {
+            "name_raw": "Ta concentration in gamma prime",
+            "value_kind": "categorical",
+            "value_raw": "higher",
+            "unit_raw": "",
+        }
+    )
+
+    result = filter_composition_precision_facts([fact])
+
+    assert result.accepted == []
+    assert result.issues[0].actual["reason"] == (
+        "qualitative_or_comparative_component"
+    )
+
+
+def test_composition_precision_gate_isolates_comparative_scalar_text():
+    fact = _composition(
+        value="about 64% lower than EBAM",
+        unit="relative",
+        evidence="The iron content was about 64% lower than EBAM.",
+    )
+    fact.data["components"][0]["value_kind"] = "scalar"
+
+    result = filter_composition_precision_facts([fact])
+
+    assert result.accepted == []
+    assert result.issues[0].actual["reason"] == (
+        "qualitative_or_comparative_component"
+    )
+
+
+def test_prose_owner_mismatch_is_quarantined_for_composition_and_processing():
+    composition = _composition(
+        sample="A2",
+        evidence="A1 contained 47.86 ± 0.5 at.% Al.",
+    )
+    processing = _processing(
+        sample="A2",
+        evidence="A1 was fabricated by laser powder bed fusion.",
+    )
+
+    composition_result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")],
+        [composition],
+        source_text="A1 contained 47.86 ± 0.5 at.% Al.",
+    )
+    processing_result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")],
+        [processing],
+        source_text="A1 was fabricated by laser powder bed fusion.",
+    )
+
+    assert not composition_result.accepted
+    assert any(
+        issue.code == "promotion_evidence_explicit_owner_mismatch_quarantined"
+        for issue in composition_result.issues
+    )
+    assert not processing_result.accepted
+    assert any(
+        issue.code == "promotion_evidence_explicit_owner_mismatch_quarantined"
+        for issue in processing_result.issues
+    )
+
+
+def test_cited_comparison_table_value_moves_to_existing_reference_sibling():
+    evidence = (
+        "| Properties | Wrought | WAAM |\n"
+        "| Vickers Hardness (HV) | 322 [ASTM F_{136}] | 332 [39] |"
+    )
+    fact = _property(
+        sample="Wrought",
+        name="Vickers Hardness",
+        value="322",
+        unit="HV",
+        condition="",
+        evidence=evidence,
+    )
+    fact.data["data_source"] = "table"
+    fact.data["raw_note"] = "[ASTM F_{136}]"
+    result = promote_axis_facts(
+        [
+            _anchor("Wrought", role="Target"),
+            _anchor(
+                "Wrought [37] [reference]",
+                role="Reference",
+            ),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "Wrought [37] [reference]"
+    assert any(
+        issue.code == "promotion_cited_table_reference_owner_reassigned"
+        for issue in result.issues
+    )
+
+
+def test_treatment_prefixed_processing_owner_without_literal_evidence_is_isolated():
+    evidence = (
+        "We annealed the as-built copper nanocomposites at 1173 K for 6 h."
+    )
+    fact = _processing(
+        sample="annealed Cu-B4C composite",
+        process="annealing",
+        evidence=evidence,
+        parameters=[
+            {
+                "parameter_name_raw": "temperature",
+                "value_raw": "1173",
+                "unit_raw": "K",
+                "source_evidence": [evidence],
+            },
+            {
+                "parameter_name_raw": "duration",
+                "value_raw": "6",
+                "unit_raw": "h",
+                "source_evidence": [evidence],
+            },
+        ],
+    )
+    result = promote_axis_facts(
+        [_anchor("annealed Cu-B4C composite")],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_processing_state_label_unbound_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_generic_treatment_stage_label_is_not_treated_as_a_new_material_owner():
+    evidence = "with an optimum sintering temperature of 1280 °C and time of 4 h"
+    fact = _processing(
+        sample="sintered sample",
+        process="sintering",
+        evidence=evidence,
+        parameters=[
+            {
+                "parameter_name_raw": "sintering temperature",
+                "value_raw": "1280",
+                "unit_raw": "°C",
+                "source_evidence": [evidence],
+            },
+            {
+                "parameter_name_raw": "time",
+                "value_raw": "4",
+                "unit_raw": "h",
+                "source_evidence": [evidence],
+            },
+        ],
+    )
+    result = promote_axis_facts(
+        [_anchor("sintered sample")], [fact], source_text=evidence
+    )
+
+    assert len(result.accepted) == 1
+    assert not any(
+        issue.code == "promotion_processing_state_label_unbound_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_processing_parameter_coordinate_routes_generic_owner_to_existing_state():
+    evidence = (
+        "with an optimum sintering temperature of 1280 °C and time of 4 h"
+    )
+    fact = _processing(
+        sample="sintered sample",
+        process="sintering",
+        evidence=evidence,
+        parameters=[
+            {
+                "parameter_name_raw": "sintering temperature",
+                "value_raw": "1280",
+                "unit_raw": "°C",
+                "source_evidence": [evidence],
+            },
+            {
+                "parameter_name_raw": "time",
+                "value_raw": "4",
+                "unit_raw": "h",
+                "source_evidence": [evidence],
+            },
+        ],
+    )
+    state = _anchor(
+        "sintered sample [sintered at 1280 °C]", state="sintered at 1280 °C"
+    )
+    result = promote_axis_facts(
+        [_anchor("sintered sample"), state], [fact], source_text=evidence
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == state.sample_id_raw
+    assert any(
+        issue.code == "promotion_processing_parameter_state_owner_reassigned"
+        for issue in result.issues
+    )
+
+
+def test_source_numeric_unit_conflict_is_quarantined_without_conversion():
+    fact = _processing(
+        sample="A1",
+        evidence="A1 was fabricated with a layer thickness of 50 μm.",
+        parameters=[
+            {
+                "parameter_name_raw": "layer thickness",
+                "value_raw": "50",
+                "unit_raw": "mm",
+                "source_evidence": [
+                    "A1 was fabricated with a layer thickness of 50 μm."
+                ],
+            }
+        ],
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1")],
+        [fact],
+        source_text="A1 was fabricated with a layer thickness of 50 μm.",
+    )
+
+    assert not result.accepted
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_source_unit_conflict_quarantined"
+    )
+    assert issue.actual["declared_unit"] == "mm"
+    assert issue.actual["source_units"] == ["um"]
+
+
+def test_non_tensile_property_source_unit_conflict_is_quarantined():
+    evidence = "The fine rosette regions reached a microscopic compressive strength of 0.33 GPa."
+    fact = _property(
+        sample="Al9Ti2Fe2Co2Ni2 alloy",
+        name="microscopic compressive strength",
+        value="0.33",
+        unit="MPa",
+        condition="fine rosette regions",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("Al9Ti2Fe2Co2Ni2 alloy")], [fact], source_text=evidence
+    )
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_source_unit_conflict_quarantined"
+    )
+    assert issue.actual["declared_unit"] == "mpa"
+    assert issue.actual["source_units"] == ["gpa"]
+
+
+def test_numeric_comparative_structure_projection_is_isolated():
+    fact = _structure(
+        sample="A1",
+        entities=[],
+        evidence=(
+            "A1 showed a percent increase relative to 300 s delay (topmost "
+            "layer) of 32.9%."
+        ),
+        features=[
+            {
+                "feature_name_raw": "percent increase relative to 300 s delay (topmost layer)",
+                "value_kind": "scalar",
+                "value_raw": "32.9",
+                "unit_raw": "%",
+                "source_evidence": [
+                    "A1 showed a percent increase relative to 300 s delay (topmost layer) of 32.9%."
+                ],
+            }
+        ],
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1")],
+        [fact],
+        source_text=fact.source_evidence[0],
+    )
+
+    assert not result.accepted
+    assert any(
+        issue.code == "promotion_structure_comparative_numeric_projection_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_qualitative_comparison_marked_as_inequality_is_isolated():
+    evidence = (
+        "WAAM had lower amounts of continuous alpha because of the lower cooling rate."
+    )
+    fact = _structure(
+        sample="WAAM",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "amount",
+                "value_kind": "inequality",
+                "value_raw": "lower amounts of continuous alpha",
+                "data_nature": "reported",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("WAAM")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code
+        == "promotion_structure_comparative_text_without_magnitude_quarantined"
+    )
+    assert issue.actual["removed"] == fact.data["features"][0]
+
+
+def test_unresolved_structure_formula_variable_is_isolated():
+    evidence = (
+        "The relation h = l_Gbar = x d gives a coefficient x for the HA1065 specimen."
+    )
+    fact = _structure(
+        sample="HA1065",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "area-weighted grain diameter",
+                "value_kind": "scalar",
+                "value_raw": "d",
+                "data_nature": "calculated",
+            }
+        ],
+    )
+
+    result = promote_axis_facts(
+        [_anchor("HA1065")], [fact], source_text=evidence
+    )
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_structure_unresolved_variable_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_formula_coefficient_structure_projection_is_isolated():
+    evidence = "Using h = l_Gbar = x d, the coefficient x was 0.30 for HA1065."
+    fact = _structure(
+        sample="HA1065",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "coefficient x",
+                "value_kind": "scalar",
+                "value_raw": "0.30",
+                "data_nature": "calculated",
+            }
+        ],
+    )
+
+    result = promote_axis_facts(
+        [_anchor("HA1065")], [fact], source_text=evidence
+    )
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_structure_derived_feature_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_feedstock_particle_size_is_not_promoted_as_structure():
+    evidence = (
+        "The particle size of the pre-alloyed powder was determined by a "
+        "Mastersizer analyzer and ranged from 24.2 to 58.2 micrometers."
+    )
+    fact = _structure(
+        sample="CCIMA powder",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "particle size range size",
+                "value_kind": "range",
+                "value_raw": "24.2 to 58.2",
+                "unit_raw": "micrometers",
+                "data_nature": "reported",
+            }
+        ],
+    )
+
+    result = promote_axis_facts(
+        [_anchor("CCIMA powder")], [fact], source_text=evidence
+    )
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_structure_feedstock_particle_projection_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_literal_lattice_parameter_and_schmid_factor_are_preserved():
+    lattice_evidence = "A1 Al3Ti has a lattice parameter a = 0.384 nm."
+    lattice = _structure(
+        sample="A1",
+        evidence=lattice_evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "a lattice parameter",
+                "value_kind": "scalar",
+                "value_raw": "0.384",
+                "unit_raw": "nm",
+                "data_nature": "reported",
+            }
+        ],
+    )
+    schmid_evidence = "A1 had a mean Schmid factor of 0.3449 for Z samples."
+    schmid = _structure(
+        sample="A1",
+        evidence=schmid_evidence,
+        structure_kind="texture",
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "mean Schmid factor Z samples",
+                "value_kind": "scalar",
+                "value_raw": "0.3449",
+                "data_nature": "calculated",
+            }
+        ],
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1")], [lattice, schmid],
+        source_text=f"{lattice_evidence} {schmid_evidence}",
+    )
+
+    assert result.accepted == (lattice, schmid)
+    assert not any(
+        issue.code in {
+            "promotion_structure_unresolved_variable_quarantined",
+            "promotion_structure_derived_feature_quarantined",
+        }
+        for issue in result.issues
+    )
+
+
+def test_crystallographic_orientation_relationship_is_preserved():
+    evidence = "A1 showed a cube-cube orientation relationship between gamma and gamma-prime."
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "orientation relationship",
+                "value_kind": "categorical",
+                "value_raw": "cube-cube",
+                "data_nature": "reported",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_structure_derived_feature_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_structure_numeric_local_region_without_coordinate_is_isolated():
+    evidence = "At the fracture surface, the fine-grain diameter was 120 nm."
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "fine-grain diameter",
+                "value_kind": "scalar",
+                "value_raw": "120",
+                "unit_raw": "nm",
+                "data_nature": "reported",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_structure_region_coordinate_missing_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_structure_numeric_local_region_coordinate_is_preserved():
+    evidence = "At the fracture surface, the fine-grain diameter was 120 nm."
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "fine-grain diameter",
+                "value_kind": "scalar",
+                "value_raw": "120",
+                "unit_raw": "nm",
+                "region": "fracture surface",
+                "data_nature": "reported",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_structure_region_coordinate_missing_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_qualitative_structure_effect_and_threshold_projections_are_isolated():
+    evidence = (
+        "Thermal stress influences variant selection, and a 10 degree "
+        "misorientation threshold was used as the selection criterion."
+    )
+    fact = _structure(
+        sample="A1",
+        entities=[],
+        evidence=evidence,
+        features=[
+            {
+                "feature_name_raw": "thermal stress effect",
+                "value_kind": "text",
+                "value_raw": "thermal stress influences variant selection",
+                "source_evidence": [evidence],
+            },
+            {
+                "feature_name_raw": "misorientation threshold criterion",
+                "value_kind": "text",
+                "value_raw": "threshold criterion",
+                "source_evidence": [evidence],
+            },
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert sum(
+        issue.code == "promotion_structure_comparative_projection_quarantined"
+        for issue in result.issues
+    ) == 1
+    assert any(
+        issue.code == "promotion_structure_feature_unsupported"
+        and issue.actual["removed"] == fact.data["features"][1]
+        for issue in result.issues
     )
 
 
@@ -553,6 +1633,55 @@ def test_owner_graph_resolves_explicit_state_without_broadcasting_base():
     assert aged_resolution.risk_codes == ()
 
 
+def test_owner_graph_recovers_bracketed_sample_state_and_lineage():
+    graph = build_owner_graph(
+        [
+            _anchor("EBAM Ti-6Al-4V", material="Ti-6Al-4V"),
+            _anchor("EBAM [as-built]", material="Ti-6Al-4V"),
+        ]
+    )
+
+    state_child = next(node for node in graph.nodes if node.state_raw == "as-built")
+    base = next(node for node in graph.nodes if not node.state_raw)
+
+    assert state_child.sample_id_raw == "EBAM [as-built]"
+    # The compact state-child label and expanded base label are joined only
+    # because their material name and role/data nature agree.
+    assert state_child.material_name_raw == base.material_name_raw
+
+
+def test_processing_parameter_routes_to_bracketed_as_built_owner():
+    evidence = "EBAM specimens were built on the machine with a layer thickness of 100 um."
+    fact = _processing(
+        sample="EBAM Ti-6Al-4V",
+        evidence=evidence,
+        parameters=[
+            {
+                "parameter_name_raw": "layer thickness",
+                "value_raw": "100",
+                "unit_raw": "um",
+                "source_evidence": [evidence],
+            }
+        ],
+    )
+
+    result = promote_axis_facts(
+        [
+            _anchor("EBAM Ti-6Al-4V", material="Ti-6Al-4V"),
+            _anchor("EBAM [as-built]", material="Ti-6Al-4V"),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "EBAM [as-built]"
+    assert any(
+        issue.code == "promotion_processing_implicit_state_owner_reassigned"
+        for issue in result.issues
+    )
+
+
 def test_generic_owner_without_base_anchor_is_ambiguous_not_broadcast():
     graph = build_owner_graph(
         [
@@ -601,6 +1730,236 @@ def test_state_named_in_evidence_selects_one_existing_child_owner():
     assert resolution.risk_codes == ()
 
 
+def test_structure_material_state_routes_to_unique_existing_state_owner():
+    anchors = [
+        _anchor("A1", material="alloy A"),
+        _anchor("A1-aged", material="alloy A", state="aged"),
+    ]
+    evidence = "The aged alloy A contained fine gamma-prime precipitates."
+    fact = _structure(sample="alloy A", evidence=evidence)
+    fact.data["material_state"] = "aged"
+    fact.data["sample_id"] = "alloy A"
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    routed = result.accepted[0]
+    assert isinstance(routed, StructureFact)
+    assert routed.sample_id_raw == "A1-aged"
+    assert routed.data["sample_id"] == "A1-aged"
+    assert [issue.code for issue in result.issues] == [
+        "promotion_structure_state_owner_reassigned"
+    ]
+    issue = result.issues[0]
+    assert issue.actual["before"] == fact.model_dump()
+    assert issue.actual["after"] == routed.model_dump()
+    assert issue.expected["coordinate_kind"] == "material_state"
+
+
+def test_structure_source_state_routes_when_extractor_lost_material_state():
+    """A prose state coordinate must not remain on the generic base owner."""
+
+    evidence = "In the as-built condition, Alloy A contained fine gamma-prime precipitates."
+    fact = _structure(sample="Alloy A", evidence=evidence)
+    anchors = [
+        _anchor("Alloy A", material="alloy A"),
+        _anchor("Alloy A [as-built]", material="alloy A", state="as-built"),
+        _anchor("Alloy A [aged]", material="alloy A", state="aged"),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    routed = result.accepted[0]
+    assert isinstance(routed, StructureFact)
+    assert routed.sample_id_raw == "Alloy A [as-built]"
+    assert routed.data["sample_id"] == "Alloy A [as-built]"
+    assert routed.data["material_state"] == "as-built"
+    assert [issue.code for issue in result.issues] == [
+        "promotion_structure_source_state_owner_reassigned"
+    ]
+
+
+def test_structure_source_state_ambiguity_is_quarantined_without_collective_grammar():
+    evidence = "The as-built and aged conditions contained fine gamma-prime precipitates."
+    fact = _structure(sample="Alloy A", evidence=evidence)
+    anchors = [
+        _anchor("Alloy A", material="alloy A"),
+        _anchor("Alloy A [as-built]", material="alloy A", state="as-built"),
+        _anchor("Alloy A [aged]", material="alloy A", state="aged"),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_structure_source_state_ambiguous_quarantined"
+    )
+    assert set(issue.actual["matched_states"]) == {
+        "Alloy A [as-built]",
+        "Alloy A [aged]",
+    }
+    assert issue.actual["removed"] == fact.model_dump()
+
+
+def test_structure_source_state_collective_assertion_is_not_broadcast_filtered():
+    evidence = "Both as-built and aged conditions contained fine gamma-prime precipitates."
+    fact = _structure(sample="Alloy A", evidence=evidence)
+    anchors = [
+        _anchor("Alloy A", material="alloy A"),
+        _anchor("Alloy A [as-built]", material="alloy A", state="as-built"),
+        _anchor("Alloy A [aged]", material="alloy A", state="aged"),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    # The explicit shared assertion remains eligible for the existing shared
+    # owner handling; this new gate must not erase a legitimate collective
+    # statement merely because it names two states.
+    assert len(result.accepted) == 1
+    assert not any(
+        issue.code == "promotion_structure_source_state_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_composition_material_state_routes_to_unique_existing_state_owner():
+    evidence = "A1 fracture surface contained 47.86 ± 0.5 at.% Al."
+    fact = _composition(sample="A1", evidence=evidence)
+    fact.data["material_state"] = "fracture surface"
+    anchors = [
+        _anchor("A1", material="alloy A"),
+        _anchor(
+            "A1",
+            material="alloy A",
+            state="HIPed and tensile-fractured",
+            evidence="A1 fracture surface",
+        ),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    routed = result.accepted[0]
+    assert isinstance(routed, CompositionFact)
+    assert routed.sample_id_raw == "A1"
+    assert routed.data["sample_id"] == "A1"
+    assert routed.data["material_state"] == "HIPed and tensile-fractured"
+    assert [issue.code for issue in result.issues].count(
+        "promotion_composition_state_owner_reassigned"
+    ) == 1
+
+
+def test_composition_material_state_does_not_jump_when_two_states_share_a_cue():
+    evidence = "A1 fracture surface contained 47.86 ± 0.5 at.% Al."
+    fact = _composition(sample="A1", evidence=evidence)
+    fact.data["material_state"] = "fracture surface"
+    anchors = [
+        _anchor("A1", material="alloy A"),
+        _anchor("A1", material="alloy A", state="fracture surface"),
+        _anchor(
+            "A1",
+            material="alloy A",
+            state="HIPed and tensile-fractured",
+        ),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert result.accepted[0].sample_id_raw == "A1"
+    assert not any(
+        issue.code == "promotion_composition_state_owner_reassigned"
+        for issue in result.issues
+    )
+
+
+def test_structure_material_state_route_requires_source_grounding():
+    anchors = [_anchor("A1", state="aged")]
+    evidence = "A1 contained fine gamma-prime precipitates."
+    fact = _structure(sample="A1", evidence=evidence)
+    fact.data["material_state"] = "aged"
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "A1"
+    assert not any(
+        issue.code == "promotion_structure_state_owner_reassigned"
+        for issue in result.issues
+    )
+
+
+def test_structure_material_state_normalizes_to_existing_state_label():
+    anchors = [
+        _anchor(
+            "A1",
+            state="interrupted at 1% strain at 1030 °C and 230 MPa",
+        )
+    ]
+    evidence = (
+        "| A1 | 1% creep strain | 0.327 |\n"
+        "Fine gamma-prime precipitates were observed in A1."
+    )
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "gamma-prime precipitates",
+                "entity_type": "precipitate",
+                "role": "reported",
+                "features": [],
+                "raw_expression": "gamma-prime precipitates",
+                "source_evidence": [
+                    "Fine gamma-prime precipitates were observed in A1."
+                ],
+            }
+        ],
+    )
+    fact.data["material_state"] = "1% creep strain"
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    routed = result.accepted[0]
+    assert isinstance(routed, StructureFact)
+    assert routed.sample_id_raw == "A1"
+    assert routed.data["material_state"] == (
+        "interrupted at 1% strain at 1030 °C and 230 MPa"
+    )
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_structure_state_owner_reassigned"
+    )
+    assert issue.expected["state_normalized_to_existing_owner"] is True
+
+
+def test_structure_state_does_not_jump_to_unrelated_global_owner():
+    anchors = [
+        _anchor("A1", state="aged"),
+        _anchor("B1", state="fracture surface"),
+    ]
+    evidence = "The fracture surface showed fine gamma-prime precipitates."
+    fact = _structure(sample="unresolved structure", evidence=evidence)
+    fact.data["material_state"] = "fracture surface"
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert not any(
+        issue.code == "promotion_structure_state_owner_reassigned"
+        for issue in result.issues
+    )
+    assert all(
+        issue.actual.get("after", {}).get("sample_id_raw")
+        != "B1"
+        for issue in result.issues
+        if isinstance(issue.actual, dict)
+    )
+
+
 def test_explicit_shared_owner_grammar_is_recorded_without_combined_item():
     graph = build_owner_graph([_anchor("A1"), _anchor("A2")])
     sentence = "A1 and A2 both had a yield strength of 900 MPa."
@@ -617,6 +1976,680 @@ def test_explicit_shared_owner_grammar_is_recorded_without_combined_item():
         for owner_id in resolution.explicit_shared_owner_ids
     } == {"A1", "A2"}
     assert resolution.risk_codes == ()
+
+
+def test_noncore_table_value_mismatch_is_quarantined_by_owner_column():
+    source = "\n".join(
+        [
+            "| Density [g/cm^3] | #1 | #2 | Average |",
+            "|---|---:|---:|---:|",
+            "| As-sintered | 8.401 | 8.394 | 8.398 |",
+            "| Std. | 0.013 | 0.024 | 0.011 |",
+        ]
+    )
+    evidence = source.splitlines()
+    facts = []
+    for sample in ("#1", "#2"):
+        fact = _property(
+            sample=sample,
+            name="Density",
+            value="8.401 ± 0.013",
+            unit="g/cm^3",
+            condition="",
+            evidence=evidence[0],
+        )
+        fact.source_evidence = evidence
+        fact.data["source_evidence"] = evidence
+        fact.data["data_source"] = "table"
+        facts.append(fact)
+
+    result = promote_axis_facts(
+        [_anchor("#1"), _anchor("#2")], facts, source_text=source
+    )
+
+    assert [fact.sample_id_raw for fact in result.accepted] == ["#1"]
+    assert [
+        issue.code
+        for issue in result.issues
+        if issue.code == "promotion_table_owner_value_ambiguous_quarantined"
+    ] == ["promotion_table_owner_value_ambiguous_quarantined"]
+
+
+def test_numeric_structure_table_value_mismatch_is_quarantined_by_owner_column():
+    source = "\n".join(
+        [
+            "| Grain size (µm) | A1 | A2 |",
+            "|---|---:|---:|",
+            "| Average | 55 | 70 |",
+        ]
+    )
+    evidence = source.splitlines()
+    facts = []
+    for sample in ("A1", "A2"):
+        fact = _structure(
+            sample=sample,
+            evidence="\n".join(evidence),
+            entities=[],
+            features=[
+                {
+                    "feature_name_raw": "grain size",
+                    "value_kind": "scalar",
+                    "value_raw": "55",
+                    "unit_raw": "µm",
+                    "source_evidence": evidence,
+                }
+            ],
+        )
+        fact.data["source_evidence"] = evidence
+        fact.source_evidence = evidence
+        facts.append(fact)
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], facts, source_text=source
+    )
+
+    assert [fact.sample_id_raw for fact in result.accepted] == ["A1"]
+    assert any(
+        issue.code == "promotion_table_owner_value_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_structure_table_value_must_match_metric_row_not_only_owner_column():
+    source = "\n".join(
+        [
+            "| Parameter | A1 | A2 |",
+            "|---|---:|---:|",
+            "| Area fraction (%) | 42.3 | 57.7 |",
+            "| Average grain diameter (µm) | 7.34 | 42.3 |",
+        ]
+    )
+    evidence = source.splitlines()
+    fact = _structure(
+        sample="A2",
+        evidence="\n".join(evidence),
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "area fraction of O phase",
+                "value_kind": "scalar",
+                "value_raw": "42.3",
+                "unit_raw": "%",
+                "data_nature": "reported",
+                "source_evidence": evidence,
+            }
+        ],
+    )
+    fact.data["source_evidence"] = evidence
+    fact.source_evidence = evidence
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], [fact], source_text=source
+    )
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_table_owner_value_ambiguous_quarantined"
+    )
+    assert issue.actual["reason"] == "structure_feature_value_row_label_mismatch"
+    assert issue.actual["structure_feature_coordinate"]["value_rows"] == [1, 2]
+
+
+def test_structure_table_grain_size_alias_matches_average_grain_diameter_row():
+    source = "\n".join(
+        [
+            "| Parameter | A1 | A2 |",
+            "|---|---:|---:|",
+            "| Average grain diameter (µm) | 7.34 | 42.3 |",
+        ]
+    )
+    evidence = source.splitlines()
+    fact = _structure(
+        sample="A2",
+        evidence="\n".join(evidence),
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "grain size",
+                "value_kind": "scalar",
+                "value_raw": "42.3",
+                "unit_raw": "µm",
+                "data_nature": "reported",
+                "source_evidence": evidence,
+            }
+        ],
+    )
+    fact.data["source_evidence"] = evidence
+    fact.source_evidence = evidence
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], [fact], source_text=source
+    )
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_table_owner_value_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_respectively_without_literal_owner_coordinate_is_quarantined_even_when_values_repeat():
+    evidence = (
+        "Both alloys were aged at 1030 °C for 0.5 h and 2 h, respectively."
+    )
+    parameter = {
+        "parameter_name_raw": "duration",
+        "value_raw": "0.5",
+        "unit_raw": "h",
+        "source_evidence": [evidence],
+    }
+    facts = [
+        _processing(sample="T0", evidence=evidence, parameters=[parameter]),
+        _processing(sample="T5", evidence=evidence, parameters=[parameter]),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("T0"), _anchor("T5")], facts, source_text=evidence
+    )
+
+    assert result.accepted == ()
+    assert sum(
+        issue.code == "promotion_respectively_mapping_ambiguous_quarantined"
+        for issue in result.issues
+    ) == 2
+
+
+def test_core_tensile_source_literal_owner_is_reassigned():
+    evidence = "A1 had an ultimate tensile strength of 900 MPa."
+    fact = _property(
+        sample="A2",
+        name="ultimate tensile strength",
+        value="900",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], [fact], source_text=evidence
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "A1"
+    assert any(
+        issue.code == "promotion_tensile_source_owner_reassigned"
+        for issue in result.issues
+    )
+
+
+def test_v204_complete_source_assertion_recovers_short_quote_owner_coordinates():
+    source = (
+        "L70 had YS: 404 ± 5 MPa and UTS: 556 ± 11 MPa, whereas L90 had "
+        "YS: 394 ± 15 MPa and UTS: 456 ± 4 MPa."
+    )
+    facts = [
+        _property(
+            sample="L70",
+            name="YS",
+            value="404 ± 5",
+            condition="",
+            evidence="YS: 404 ± 5 MPa",
+        ),
+        _property(
+            sample="L70",
+            name="UTS",
+            value="556 ± 11",
+            condition="",
+            evidence="UTS: 556 ± 11 MPa",
+        ),
+        _property(
+            sample="L90",
+            name="YS",
+            value="394 ± 15",
+            condition="",
+            evidence="YS: 394 ± 15 MPa",
+        ),
+        _property(
+            sample="L90",
+            name="UTS",
+            value="456 ± 4",
+            condition="",
+            evidence="UTS: 456 ± 4 MPa",
+        ),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("L70"), _anchor("L90")], facts, source_text=source
+    )
+
+    assert {
+        (row.sample_id_raw, row.data["property_name_raw"], row.data["value_raw"])
+        for row in result.accepted
+    } == {
+        ("L70", "YS", "404 ± 5"),
+        ("L70", "UTS", "556 ± 11"),
+        ("L90", "YS", "394 ± 15"),
+        ("L90", "UTS", "456 ± 4"),
+    }
+    assert sum(
+        issue.code == "tensile_assertion_coordinate_recovered"
+        for issue in result.issues
+    ) == 4
+    assert not any(
+        issue.code == "promotion_core_tensile_owner_ambiguous_quarantined"
+        for issue in result.issues
+    )
+    assert all(
+        str(row.data["property_id_candidate"]).startswith("tensile-assertion:")
+        for row in result.accepted
+    )
+
+
+def test_v204_complete_source_assertion_reassigns_wrong_short_quote_owner():
+    source = "A1 had a YS of 900 MPa, whereas A2 had a YS of 700 MPa."
+    fact = _property(
+        sample="A2",
+        name="yield strength",
+        value="900",
+        condition="",
+        evidence="YS of 900 MPa",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], [fact], source_text=source
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "A1"
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "tensile_coordinate_owner_reassigned"
+    )
+    assert issue.actual["before"]["sample_id_raw"] == "A2"
+    assert issue.actual["after"]["sample_id_raw"] == "A1"
+
+
+def test_v204_ambiguous_complete_source_assertion_remains_quarantined():
+    source = "A1 and A2 were tested. The reported yield strength was 900 MPa."
+    fact = _property(
+        sample="A1",
+        name="yield strength",
+        value="900",
+        condition="",
+        evidence="yield strength was 900 MPa",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], [fact], source_text=source
+    )
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "tensile_assertion_coordinate_ambiguous"
+        for issue in result.issues
+    )
+    assert any(
+        issue.code == "promotion_core_tensile_owner_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_v204_source_assertion_switch_off_restores_v203_owner_quarantine(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_TENSILE_ASSERTION_COORDINATES_V204", "0"
+    )
+    source = (
+        "L70 had YS: 404 ± 5 MPa, whereas L90 had YS: 394 ± 15 MPa."
+    )
+    fact = _property(
+        sample="L70",
+        name="YS",
+        value="404 ± 5",
+        condition="",
+        evidence="YS: 404 ± 5 MPa",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("L70"), _anchor("L90")], [fact], source_text=source
+    )
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_core_tensile_owner_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_v204_result_protocol_switch_off_does_not_publish_assertion_coordinate(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_TENSILE_RESULT_PROTOCOL_BINDING_V204", "0"
+    )
+    source = (
+        "L70 had YS: 404 ± 5 MPa, whereas L90 had YS: 394 ± 15 MPa."
+    )
+    fact = _property(
+        sample="L70",
+        name="YS",
+        value="404 ± 5",
+        condition="",
+        evidence="YS: 404 ± 5 MPa",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("L70"), _anchor("L90")], [fact], source_text=source
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["property_id_candidate"] == (
+        fact.data["property_id_candidate"]
+    )
+
+
+def test_v204_direct_owner_assertion_publishes_protocol_coordinate():
+    source = (
+        "A1 had an ultimate tensile strength of 900 MPa.\n\n"
+        "Rate controlled tensile tests at 5 mm/min were performed."
+    )
+    fact = _property(
+        sample="A1",
+        name="ultimate tensile strength",
+        value="900",
+        condition="",
+        evidence="A1 had an ultimate tensile strength of 900 MPa.",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], [fact], source_text=source
+    )
+
+    assert len(result.accepted) == 1
+    assert str(result.accepted[0].data["property_id_candidate"]).startswith(
+        "tensile-assertion:"
+    )
+    assert any(
+        issue.code == "tensile_assertion_coordinate_recovered"
+        for issue in result.issues
+    )
+
+
+def test_v204_source_assertion_binds_only_literal_result_temperature():
+    source = (
+        "Tensile properties at 800 °C of L70 (YS: 404 ± 5 MPa, Fig. "
+        "7d) are better than L90 (YS: 394 ± 15 MPa)."
+    )
+    fact = _property(
+        sample="Alloy",
+        name="YS",
+        value="394 ± 15",
+        condition="",
+        evidence="YS: 394 ± 15 MPa",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("Alloy"), _anchor("L70"), _anchor("L90")],
+        [fact],
+        source_text=source,
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "L90"
+    assert result.accepted[0].data["test_condition_raw"] == "800 °c"
+    assert any(
+        issue.code == "tensile_result_protocol_bound"
+        for issue in result.issues
+    )
+
+
+def test_v204_result_protocol_switch_off_keeps_recovered_value_unconditioned(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_TENSILE_RESULT_PROTOCOL_BINDING_V204", "0"
+    )
+    source = (
+        "Tensile properties at 800 °C of L70 (YS: 404 ± 5 MPa, Fig. "
+        "7d) are better than L90 (YS: 394 ± 15 MPa)."
+    )
+    fact = _property(
+        sample="Alloy",
+        name="YS",
+        value="394 ± 15",
+        condition="",
+        evidence="YS: 394 ± 15 MPa",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("Alloy"), _anchor("L70"), _anchor("L90")],
+        [fact],
+        source_text=source,
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "L90"
+    assert not result.accepted[0].data.get("test_condition_raw")
+    assert not any(
+        issue.code == "tensile_result_protocol_bound"
+        for issue in result.issues
+    )
+
+
+def test_v204_fanout_guard_switch_off_restores_v203_quarantine(monkeypatch):
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_TENSILE_COORDINATE_FANOUT_GUARD_V204", "0"
+    )
+    source = (
+        "L70 had YS: 404 ± 5 MPa, whereas L90 had YS: 394 ± 15 MPa."
+    )
+    facts = [
+        _property(
+            sample="L70",
+            name="YS",
+            value="404 ± 5",
+            condition="",
+            evidence="YS: 404 ± 5 MPa",
+        ),
+        _property(
+            sample="L90",
+            name="YS",
+            value="394 ± 15",
+            condition="",
+            evidence="YS: 394 ± 15 MPa",
+        ),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("L70"), _anchor("L90")], facts, source_text=source
+    )
+
+    assert result.accepted == ()
+    assert sum(
+        issue.code == "promotion_source_block_property_fanout_quarantined"
+        for issue in result.issues
+    ) == 2
+
+
+def test_v204_parenthesized_owner_pairs_prevent_cross_owner_tensile_swap():
+    source = (
+        "Yield and ultimate tensile strengths increased from 486.0 and "
+        "781.2 MPa (CoCrNi) to 887.2 and 1165.2 MPa "
+        "(CoCrNi(Al0.6TiFe)0.5)."
+    )
+    facts = [
+        _property(
+            sample="CoCrNi",
+            name="ultimate tensile strength",
+            value="781.2",
+            condition="",
+            evidence="781.2 MPa (CoCrNi)",
+        ),
+        _property(
+            sample="CoCrNi(Al0.6TiFe)0.5",
+            name="ultimate tensile strength",
+            value="1165.2",
+            condition="",
+            evidence="1165.2 MPa (CoCrNi(Al0.6TiFe)0.5)",
+        ),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("CoCrNi"), _anchor("CoCrNi(Al0.6TiFe)0.5")],
+        facts,
+        source_text=source,
+    )
+
+    assert {
+        (row.sample_id_raw, row.data["value_raw"]) for row in result.accepted
+    } == {
+        ("CoCrNi", "781.2"),
+        ("CoCrNi(Al0.6TiFe)0.5", "1165.2"),
+    }
+    assert not any(
+        issue.code == "promotion_source_block_property_fanout_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_processed_tensile_result_is_not_promoted_to_powder_owner():
+    evidence = "The sintered sample had an ultimate tensile strength of 612 MPa."
+    fact = _property(
+        sample="alloy 625 powder",
+        name="ultimate tensile strength",
+        value="612",
+        condition="",
+        evidence=evidence,
+    )
+    anchors = [
+        _anchor(
+            "alloy 625 powder",
+            material="alloy 625",
+            state="as-received powder",
+        ),
+        _anchor(
+            "sintered sample",
+            material="alloy 625",
+            state="sintered",
+        ),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "sintered sample"
+    assert any(
+        issue.code == "promotion_tensile_source_owner_reassigned"
+        for issue in result.issues
+    )
+
+
+def test_tensile_source_unit_conflict_is_quarantined_without_relabeling():
+    evidence = "The reference reported a UTS of 0.33 GPa for the EPBF specimen."
+    fact = _property(
+        sample="EPBF specimen",
+        name="ultimate tensile strength",
+        value="0.33",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("EPBF specimen")], [fact], source_text=evidence
+    )
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_tensile_source_unit_conflict_quarantined"
+    )
+    assert issue.actual["declared_unit"] == "mpa"
+    assert issue.actual["source_units"] == ["gpa"]
+    assert issue.actual["removed"]["data"]["value_raw"] == "0.33"
+
+
+def test_tensile_embedded_source_unit_matching_unit_raw_is_preserved():
+    evidence = "The reference reported a UTS of 0.33 GPa for the EPBF specimen."
+    fact = _property(
+        sample="EPBF specimen",
+        name="ultimate tensile strength",
+        value="0.33 GPa",
+        unit="GPa",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("EPBF specimen")], [fact], source_text=evidence
+    )
+
+    # A current experimental owner cannot be validated by a citation cue plus
+    # an embedded value unit.  The complete candidate remains in the audit.
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_external_current_tensile_projection_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_unresolved_composite_tensile_state_bundle_is_quarantined_as_a_group():
+    evidence = (
+        "The average yield strength, ultimate tensile strength, and elongation "
+        "after HIP2 + HT2 were 1000 MPa, 1105 MPa, and 3.1%, respectively."
+    )
+    facts = [
+        _property(
+            sample="MAR M247",
+            name="yield strength",
+            value="1000",
+            unit="MPa",
+            condition="room temperature",
+            evidence=evidence,
+        ),
+        _property(
+            sample="MAR M247",
+            name="ultimate tensile strength",
+            value="1105",
+            unit="MPa",
+            condition="room temperature",
+            evidence=evidence,
+        ),
+        _property(
+            sample="MAR M247",
+            name="elongation",
+            value="3.1",
+            unit="%",
+            condition="room temperature",
+            evidence=evidence,
+        ),
+    ]
+    for fact in facts:
+        fact.data["material_state"] = "HIP2 + HT2"
+
+    result = promote_axis_facts(
+        [
+            _anchor("MAR M247"),
+            _anchor("HT2"),
+            _anchor("MAR M247 [as-sintered]", state="as-sintered"),
+            _anchor("MAR M247 [HIP conditions]", state="HIP conditions"),
+        ],
+        facts,
+        source_text=evidence,
+    )
+
+    assert result.accepted == ()
+    bundle_issues = [
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_tensile_state_bundle_ambiguous_quarantined"
+    ]
+    assert len(bundle_issues) == 3
+    assert all(issue.actual["state_coordinate"] == "HIP2 + HT2" for issue in bundle_issues)
 
 
 def test_reference_and_target_with_same_material_name_remain_distinct():
@@ -825,13 +2858,16 @@ def test_absent_table_entity_is_quarantined_without_removing_positive_sibling():
     result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
 
     assert len(result.accepted) == 1
-    assert [row["name_raw"] for row in result.accepted[0].data["entities"]] == [
-        "Boride"
-    ]
+    assert result.accepted[0].data["entities"] == []
+    assert [
+        (row["feature_name_raw"], row["value_raw"])
+        for row in result.accepted[0].data["features"]
+    ] == [("Boride presence", "Yes")]
     assert [issue.code for issue in result.issues] == [
-        "promotion_structure_negated_entity_quarantined"
+        "promotion_structure_table_binary_entity_normalized",
+        "promotion_structure_negated_entity_quarantined",
     ]
-    assert result.issues[0].actual["removed"] == fact.data["entities"][1]
+    assert result.issues[1].actual["removed"] == fact.data["entities"][1]
 
 
 def test_negated_entity_only_observation_is_fully_audited_when_quarantined():
@@ -1309,6 +3345,38 @@ def test_characterization_method_row_in_markdown_table_is_preserved():
     assert result.issues == ()
 
 
+def test_characterization_instrument_and_condition_subfields_are_quarantined():
+    evidence = (
+        "XRD was performed on a PANalytical Empyrean diffractometer at 40 kV."
+    )
+    facts = [
+        _characterization(
+            method="XRD instrument",
+            method_class="XRD",
+            evidence=evidence,
+        ),
+        _characterization(
+            method="XRD condition",
+            method_class="XRD",
+            evidence=evidence,
+        ),
+    ]
+
+    result = promote_axis_facts([_anchor("A1")], facts, source_text=evidence)
+
+    assert result.accepted == ()
+    assert sum(
+        issue.code == "promotion_characterization_non_method_quarantined"
+        for issue in result.issues
+    ) == 2
+    removed = [
+        issue.actual["removed"]
+        for issue in result.issues
+        if issue.code == "promotion_characterization_non_method_quarantined"
+    ]
+    assert all(any(row == fact.model_dump() for fact in facts) for row in removed)
+
+
 def test_characterization_result_with_observation_state_is_not_absorbed():
     method_evidence = "A1 was characterized by TEM using a Talos F200X."
     state_evidence = "TEM images of A1 after heat treatment reveal twins."
@@ -1596,6 +3664,36 @@ def test_numeric_comparative_structure_feature_is_not_quarantined():
     )
 
 
+def test_textual_structure_variation_projection_is_quarantined():
+    evidence = (
+        "A prolonged delay of 300 s decreased the variations in the melt pool "
+        "length from 100.5% to 0.4%."
+    )
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "melt pool length variation",
+                "value_kind": "text",
+                "value_raw": "100.5% to 0.4%",
+                "data_nature": "reported",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_structure_comparative_projection_quarantined"
+    )
+    assert issue.actual["removed"] == fact.data["features"][0]
+
+
 def test_structure_method_only_value_is_quarantined_with_full_audit():
     evidence = (
         "The volume fraction and sizes were measured using polishing and imaging "
@@ -1626,6 +3724,46 @@ def test_structure_method_only_value_is_quarantined_with_full_audit():
     assert issue.evidence == [evidence]
 
 
+def test_structure_unit_only_value_is_quarantined_without_losing_measurement():
+    evidence = (
+        "The average grain size using the line intercept method for this "
+        "material was 27 µm."
+    )
+    numeric = {
+        "feature_name_raw": "average grain size",
+        "value_kind": "scalar",
+        "value_raw": "27",
+        "unit_raw": "µm",
+        "data_nature": "reported",
+    }
+    unit_only = {
+        "feature_name_raw": "grain size unit",
+        "value_kind": "categorical",
+        "value_raw": "µm",
+        "data_nature": "reported",
+    }
+    fact = _structure(
+        evidence=evidence,
+        entities=[],
+        features=[numeric, unit_only],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["features"] == [numeric]
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_structure_unit_only_value_quarantined"
+    )
+    assert issue.actual == {
+        "removed": unit_only,
+        "reason": "standalone_measurement_unit_is_not_an_observation",
+    }
+    assert issue.evidence == [evidence]
+
+
 def test_feedstock_table_metric_cannot_be_projected_as_precipitate_structure():
     evidence = (
         "| Technology | Mass (g) | Flow rate (s/50g) | Particle size distribution (µm) |\n"
@@ -1651,6 +3789,33 @@ def test_feedstock_table_metric_cannot_be_projected_as_precipitate_structure():
     assert any(
         issue.code == "promotion_structure_table_axis_mismatch_quarantined"
         and issue.actual["reason"] == "feedstock_table_projected_as_structure"
+        for issue in result.issues
+    )
+
+
+def test_comparative_composition_field_is_not_promoted_as_structure():
+    evidence = "The iron content was about 64% higher for the EBAM material."
+    fact = _structure(
+        sample="EBAM",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "iron content",
+                "value_kind": "inequality",
+                "value_raw": "about 64% higher for the EBAM material",
+                "data_nature": "reported",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("EBAM")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_structure_composition_projection_quarantined"
+        and issue.actual["reason"]
+        == "comparative_composition_field_projected_as_structure"
         for issue in result.issues
     )
 
@@ -1690,6 +3855,218 @@ def test_inferential_structure_entity_is_quarantined_without_direct_assertion():
         and issue.evidence == [evidence]
         for issue in result.issues
         if issue.code == "promotion_structure_inferential_projection_quarantined"
+    )
+
+
+def test_inferential_had_clause_does_not_authorize_following_transformation_entity():
+    evidence = (
+        "Both EBAM and WAAM materials had very low beta contents suggesting "
+        "a martensitic transformation took place."
+    )
+    fact = _structure(
+        sample="EBAM",
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "martensitic transformation",
+                "entity_type": "transformation",
+                "role": "reported",
+                "features": [],
+                "raw_expression": "martensitic transformation",
+                "source_evidence": [evidence],
+            }
+        ],
+        features=[],
+        structure_kind="transformation",
+    )
+
+    result = promote_axis_facts([_anchor("EBAM")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_structure_inferential_projection_quarantined"
+        and issue.actual["reason"] == "inferential_entity_without_direct_assertion"
+        for issue in result.issues
+    )
+
+
+def test_structure_noun_forms_do_not_count_as_direct_entity_assertions():
+    evidence = (
+        "In the initial microstructure shown in Fig. 1, the sharper corners "
+        "of cubical gamma-prime precipitates were measured in alloy T5."
+    )
+    fact = _structure(
+        sample="T5",
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "gamma-prime",
+                "entity_type": "precipitate",
+                "role": "reported",
+                "features": [],
+                "raw_expression": "gamma-prime",
+                "source_evidence": [evidence],
+            }
+        ],
+        features=[],
+        structure_kind="phase_assemblage",
+    )
+
+    result = promote_axis_facts([_anchor("T5")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_structure_unasserted_entity_quarantined"
+        and issue.actual["reason"] == "entity_without_direct_assertion"
+        for issue in result.issues
+    )
+
+
+def test_structure_had_clause_with_short_object_span_is_direct():
+    evidence = "The as-built sample had fine acicular martensitic grains."
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "acicular martensitic grains",
+                "entity_type": "grain",
+                "role": "reported",
+                "features": [],
+                "raw_expression": "acicular martensitic grains",
+                "source_evidence": [evidence],
+            }
+        ],
+        features=[],
+        structure_kind="morphology",
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+
+
+def test_bare_element_structure_entity_is_isolated_as_composition_projection():
+    evidence = (
+        "The alloying elements were partitioned between the gamma matrix and "
+        "gamma-prime precipitates; W showed no evident preference for either phase."
+    )
+    fact = _structure(
+        sample="T5",
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "W",
+                "entity_type": "phase",
+                "role": "reported",
+                "features": [],
+                "raw_expression": "W",
+                "source_evidence": [evidence],
+            }
+        ],
+        features=[],
+    )
+
+    result = promote_axis_facts([_anchor("T5")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_structure_element_projection_quarantined"
+        and issue.actual["reason"] == "bare_element_token_in_structure"
+        for issue in result.issues
+    )
+
+
+def test_hypothetical_structure_feature_isolated_without_direct_observation():
+    evidence = "Densely populated amorphous nanoparticles can be deployed inside grains."
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "distribution",
+                "value_kind": "categorical",
+                "value_raw": "densely populated",
+                "data_nature": "reported",
+                "source_evidence": [evidence],
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_structure_inferential_projection_quarantined"
+        and issue.actual["reason"] == "inferential_feature_without_direct_assertion"
+        for issue in result.issues
+    )
+
+
+def test_structure_method_and_figure_artifact_values_are_isolated():
+    cases = [
+        (
+            "The internal defects were observed using optical microscopy.",
+            "internal defects",
+            "observed using optical microscopy",
+            "promotion_structure_method_only_value_quarantined",
+        ),
+        (
+            "SEM images of fatigue fracture surfaces of sample A1.",
+            "fatigue fracture surface",
+            "SEM images of fatigue fracture surfaces",
+            "promotion_structure_figure_artifact_quarantined",
+        ),
+    ]
+    for evidence, name, value, code in cases:
+        fact = _structure(
+            sample="A1",
+            evidence=evidence,
+            entities=[],
+            features=[
+                {
+                    "feature_name_raw": name,
+                    "value_kind": "categorical",
+                    "value_raw": value,
+                    "data_nature": "reported",
+                    "source_evidence": [evidence],
+                }
+            ],
+        )
+        result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+        assert result.accepted == ()
+        assert any(issue.code == code for issue in result.issues)
+
+
+def test_unrelated_direct_clause_does_not_authorize_comparator_phase_entity():
+    evidence = (
+        "The gamma phase and the coarse lamellar region are primarily responsible "
+        "for deformation, while the beta phase and ultrafine lamellar grain are "
+        "barely deformed at 1023 K."
+    )
+    fact = _structure(
+        sample="R1",
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "beta phase",
+                "entity_type": "phase",
+                "role": "reported",
+                "features": [],
+                "raw_expression": "beta phase",
+                "source_evidence": [evidence],
+            }
+        ],
+        features=[],
+    )
+
+    result = promote_axis_facts([_anchor("R1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_structure_unasserted_entity_quarantined"
+        for issue in result.issues
     )
 
 
@@ -1813,6 +4190,38 @@ def test_direct_structure_change_entity_survives_without_observation_verb():
     assert result.accepted[0].data["entities"][0]["name_raw"] == "α/α₂ phase"
     assert not any(
         issue.code == "promotion_structure_unasserted_entity_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_comparative_adjective_does_not_assert_bare_structure_entity():
+    evidence = (
+        "Anisotropy was an effect of texture and the different orientation "
+        "distribution of the transformed alpha phase between the X, Y, and Z directions."
+    )
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "transformed alpha phase",
+                "entity_type": "phase",
+                "role": "phase_constituent",
+                "features": [],
+                "raw_expression": "transformed alpha phase",
+                "source_evidence": [evidence],
+            }
+        ],
+        features=[],
+        structure_kind="phase_assemblage",
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_structure_unasserted_entity_quarantined"
+        and issue.actual["reason"] == "entity_without_direct_assertion"
         for issue in result.issues
     )
 
@@ -1955,6 +4364,23 @@ def test_cross_owner_projection_keeps_named_pair_but_quarantines_third_copy():
     assert result.issues[0].expected["explicit_owners"] == ["a1", "a2"]
 
 
+def test_ambiguous_shared_structure_without_owner_isolated_for_review():
+    evidence = "Fine gamma-prime precipitates were observed."
+    facts = [
+        _structure(sample="A1", evidence=evidence),
+        _structure(sample="A2", evidence=evidence),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], facts, source_text=evidence
+    )
+
+    assert result.accepted == ()
+    assert [issue.code for issue in result.issues].count(
+        "promotion_ambiguous_shared_assertion_quarantined"
+    ) >= 2
+
+
 def test_collective_owner_grammar_preserves_shared_processing_assertion():
     evidence = "The same heat treatment was applied to all three alloys."
     facts = [
@@ -2076,6 +4502,133 @@ def test_composition_table_owner_columns_with_equal_values_are_preserved():
         == "promotion_composition_cross_owner_projection_quarantined"
         for issue in result.issues
     )
+
+
+def test_composition_table_owner_row_value_mismatch_is_quarantined():
+    source = "\n".join(
+        [
+            "| Alloy | Al (wt.%) | Ti (wt.%) |",
+            "|---|---:|---:|",
+            "| A1 | 6 | Balance |",
+            "| A2 | 8 | Balance |",
+        ]
+    )
+    fact = _composition(
+        sample="A1",
+        component="Al",
+        value="8",
+        unit="wt.%",
+        evidence="\n".join([source.splitlines()[0], source.splitlines()[2]]),
+    )
+    fact.data["components"] = [
+        {
+            "name_raw": "Al",
+            "value_kind": "scalar",
+            "value_raw": "8",
+            "unit_raw": "wt.%",
+            "data_nature": "reported",
+        }
+    ]
+    fact.data["data_source"] = "table"
+    fact.source_evidence = source.splitlines()
+    fact.data["source_evidence"] = source.splitlines()
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], [fact], source_text=source
+    )
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_composition_table_owner_value_ambiguous_quarantined"
+    )
+    assert issue.actual["reason"] == "component_value_bound_to_other_owner_row"
+    assert issue.actual["removed"] == fact.model_dump()
+
+
+def test_composition_table_owner_row_value_coordinate_is_preserved():
+    source = "\n".join(
+        [
+            "| Alloy | Al (wt.%) | Ti (wt.%) |",
+            "|---|---:|---:|",
+            "| A1 | 6 | Balance |",
+            "| A2 | 8 | Balance |",
+        ]
+    )
+    fact = _composition(
+        sample="A1",
+        component="Al",
+        value="6",
+        unit="wt.%",
+        evidence="\n".join([source.splitlines()[0], source.splitlines()[2]]),
+    )
+    fact.data["components"] = [
+        {
+            "name_raw": "Al",
+            "value_kind": "scalar",
+            "value_raw": "6",
+            "unit_raw": "wt.%",
+            "data_nature": "reported",
+        }
+    ]
+    fact.data["data_source"] = "table"
+    fact.source_evidence = source.splitlines()
+    fact.data["source_evidence"] = source.splitlines()
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], [fact], source_text=source
+    )
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_composition_table_owner_value_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_composition_table_header_only_evidence_still_checks_owner_value_row():
+    source = "\n".join(
+        [
+            "| Alloy | Al (wt.%) | Ti (wt.%) |",
+            "|---|---:|---:|",
+            "| A1 | 6 | Balance |",
+            "| A2 | 8 | Balance |",
+        ]
+    )
+    # The chunk response retained only the table header, but the structured
+    # value is still source-grounded.  It must not bypass the row coordinate
+    # check and attach A2's value to A1.
+    header = source.splitlines()[0]
+    fact = _composition(
+        sample="A1",
+        component="Al",
+        value="8",
+        unit="wt.%",
+        evidence=header,
+    )
+    fact.data["components"] = [
+        {
+            "name_raw": "Al",
+            "value_kind": "scalar",
+            "value_raw": "8",
+            "unit_raw": "wt.%",
+            "data_nature": "reported",
+        }
+    ]
+    fact.data["data_source"] = "table"
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], [fact], source_text=source
+    )
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_composition_table_owner_value_ambiguous_quarantined"
+    )
+    assert issue.actual["reason"] == "component_value_bound_to_other_owner_row"
 
 
 def test_prose_explicit_owner_mismatch_is_quarantined_even_with_different_payload():
@@ -2302,7 +4855,16 @@ def test_composition_different_evidence_or_values_are_not_cross_owner_deduped():
         source_text=source,
     )
 
-    assert result.accepted == tuple(facts)
+    # The fourth candidate reuses the shared ``A1 ... 3 wt.%`` evidence while
+    # claiming ``A2 ... 4 wt.%``.  Composition precision promotion now treats
+    # that unbound number as a projection and preserves it only in the audit.
+    assert result.accepted == tuple(facts[:3])
+    assert any(
+        issue.code == "composition_component_precision_quarantined"
+        and issue.sample_id_raw == "A2"
+        and issue.actual["reason"] == "numeric_literal_not_in_component_evidence"
+        for issue in result.issues
+    )
     assert not any(
         issue.code
         == "promotion_composition_cross_owner_projection_quarantined"
@@ -2620,6 +5182,107 @@ def test_multi_owner_processing_table_preserves_one_fact_per_named_column():
 
     assert result.accepted == tuple(facts)
     assert result.issues == ()
+
+
+def test_processing_table_filters_sibling_owner_parameter_projection():
+    source = "\n".join(
+        [
+            "| Process Variables | Wall 1 | Wall 2 | Wall 3 |",
+            "|---|---:|---:|---:|",
+            "| Laser Power (W) | 5000 | 5000 | 5000 |",
+            "| Interlayer Delay (s) | 0 | 120 | 300 |",
+        ]
+    )
+    evidence = source.splitlines()
+    parameters = [
+        {
+            "parameter_name_raw": "Laser Power",
+            "value_raw": "5000",
+            "unit_raw": "W",
+            "source_evidence": "Laser Power (W) | 5000",
+        },
+        {
+            "parameter_name_raw": "Interlayer Delay",
+            "value_raw": "0",
+            "unit_raw": "s",
+            "source_evidence": "Interlayer Delay (s) | 0",
+        },
+    ]
+    fact = _processing(
+        sample="Wall 2",
+        evidence="The process variables used for the deposition of the walls; Wall 2",
+        parameters=parameters,
+    )
+    fact.source_evidence = [evidence[0], "Wall 2"]
+    fact.data["source_evidence"] = [evidence[0], "Wall 2"]
+
+    result = promote_axis_facts(
+        [_anchor("Wall 1"), _anchor("Wall 2"), _anchor("Wall 3")],
+        [fact],
+        source_text=source,
+    )
+
+    assert len(result.accepted) == 1
+    kept = result.accepted[0].data["parameters_raw"]
+    assert [(row["parameter_name_raw"], row["value_raw"]) for row in kept] == [
+        ("Laser Power", "5000")
+    ]
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_processing_table_parameter_projection_filtered"
+    )
+    assert issue.actual["removed_parameters"][0]["parameter_name_raw"] == (
+        "Interlayer Delay"
+    )
+    assert issue.actual["parameter_coordinates"][0]["target_cell"] == "120"
+
+
+def test_processing_row_table_filters_value_from_other_owner_row():
+    source = "\n".join(
+        [
+            "| Sample | Laser Power (W) | Scan Speed (mm/s) |",
+            "|---|---:|---:|",
+            "| A1 | 300 | 1000 |",
+            "| A2 | 400 | 1200 |",
+        ]
+    )
+    evidence = source.splitlines()
+    parameters = [
+        {
+            "parameter_name_raw": "Laser Power",
+            "value_raw": "400",
+            "unit_raw": "W",
+            "source_evidence": [evidence[3]],
+        },
+        {
+            "parameter_name_raw": "Scan Speed",
+            "value_raw": "1000",
+            "unit_raw": "mm/s",
+            "source_evidence": [evidence[3]],
+        },
+    ]
+    fact = _processing(
+        sample="A1",
+        evidence="\n".join(evidence),
+        parameters=parameters,
+    )
+    fact.source_evidence = evidence
+    fact.data["source_evidence"] = evidence
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], [fact], source_text=source
+    )
+
+    assert len(result.accepted) == 1
+    kept = result.accepted[0].data["parameters_raw"]
+    assert [(row["parameter_name_raw"], row["value_raw"]) for row in kept] == [
+        ("Scan Speed", "1000")
+    ]
+    assert any(
+        issue.code == "promotion_processing_table_parameter_projection_filtered"
+        for issue in result.issues
+    )
 
 
 def test_coordinated_owner_ellipsis_preserves_each_shared_projection():
@@ -3058,6 +5721,319 @@ def test_quantified_comparative_tensile_is_quarantined_from_properties():
     assert result.issues[0].actual["removed"] == fact.model_dump()
 
 
+def test_numeric_tensile_difference_is_not_promoted_as_absolute_strength():
+    evidence = (
+        "The YS of the CL sample exceeds that of the PL sample by 57.3 MPa."
+    )
+    fact = _property(
+        sample="CL",
+        name="yield strength",
+        value="57.3",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("CL")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert "promotion_comparative_tensile_quarantined" in {
+        issue.code for issue in result.issues
+    }
+    assert any(
+        issue.actual.get("removed", {}).get("data", {}).get("value_raw") == "57.3"
+        for issue in result.issues
+        if isinstance(issue.actual, dict)
+    )
+
+
+def test_numeric_tensile_result_after_decreased_to_is_kept():
+    evidence = "The YS decreased to 587 MPa after heat treatment of CL."
+    fact = _property(
+        sample="CL",
+        name="yield strength",
+        value="587",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("CL")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert result.issues == ()
+
+
+def test_numeric_tensile_attached_to_comparison_target_is_quarantined():
+    evidence = (
+        "The as-annealed sample achieved 1090 MPa and 3.0 ± 0.14% elongation "
+        "compared to the as-built samples."
+    )
+    fact = _property(
+        sample="as-built",
+        name="elongation",
+        value="3.0 ± 0.14",
+        unit="%",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [
+            _anchor("as-built", material="AlCoCrFeNi2.1", state="as-built"),
+            _anchor("as-annealed", material="AlCoCrFeNi2.1", state="600 °C for 8 h"),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert result.accepted == ()
+    assert [issue.code for issue in result.issues] == [
+        "promotion_comparative_owner_projection_quarantined"
+    ]
+    assert result.issues[0].actual["reason"] == (
+        "declared_owner_occurs_after_comparison_cue"
+    )
+    assert result.issues[0].actual["removed"] == fact.model_dump()
+
+
+def test_numeric_tensile_subject_before_comparator_is_retained():
+    evidence = (
+        "The as-built sample had 1388 MPa yield strength compared to the "
+        "as-annealed sample."
+    )
+    fact = _property(
+        sample="as-built",
+        name="yield strength",
+        value="1388",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [
+            _anchor("as-built", material="AlCoCrFeNi2.1", state="as-built"),
+            _anchor("as-annealed", material="AlCoCrFeNi2.1", state="600 °C for 8 h"),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert len(result.accepted) == 1
+    assert not any(
+        issue.code == "promotion_comparative_owner_projection_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_generic_comparative_property_is_quarantined_from_properties():
+    evidence = (
+        "The creep lifetime improvement of H230AM was 672% compared with H230."
+    )
+    fact = _property(
+        sample="H230AM",
+        name="creep lifetime improvement",
+        value="672%",
+        unit="%",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("H230AM")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert [issue.code for issue in result.issues] == [
+        "promotion_property_comparative_projection_quarantined"
+    ]
+    assert result.issues[0].actual["reason"] == "comparative_property_name"
+    assert result.issues[0].actual["removed"] == fact.model_dump()
+
+
+def test_strengthening_index_comparison_is_quarantined_from_properties():
+    evidence = (
+        "Alloy T0 displays stronger solid solution strengthening effect than "
+        "CMSX-4 but weaker effect than T5."
+    )
+    fact = _property(
+        sample="T0",
+        name="solid solution strengthening index I_SSS",
+        value="stronger than CMSX-4 but weaker than T5",
+        unit="",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("T0")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_property_comparative_projection_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_qualitative_comparative_value_is_quarantined_even_for_generic_strength():
+    """Do not materialize adjective-only strength comparisons as Properties."""
+
+    evidence = (
+        "The EBAM material had superior strength and comparable ductility "
+        "to the wrought material."
+    )
+    fact = _property(
+        sample="EBAM",
+        name="strength",
+        value="superior",
+        unit="",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("EBAM")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert [issue.code for issue in result.issues] == [
+        "promotion_property_comparative_projection_quarantined"
+    ]
+    assert result.issues[0].actual["reason"] == "comparative_value_literal"
+    assert result.issues[0].actual["removed"] == fact.model_dump()
+
+
+def test_process_rate_table_projection_is_quarantined_from_properties():
+    header = "| Process | Rate (nm/s) |"
+    row = "| Cr diffusion during phase transformation | 0.6 |"
+    evidence = [header, row]
+    fact = _property(
+        sample="A1",
+        name="Cr diffusion during phase transformation",
+        value="0.6",
+        unit="nm/s",
+        condition="",
+        evidence=header,
+    )
+    fact.source_evidence = evidence
+    fact.data["source_evidence"] = evidence
+
+    result = promote_axis_facts(
+        [_anchor("A1")], [fact], source_text="\n".join(evidence)
+    )
+
+    assert result.accepted == ()
+    assert [issue.code for issue in result.issues] == [
+        "promotion_property_comparative_projection_quarantined"
+    ]
+    assert result.issues[0].actual["reason"] == "non_result_parameter_table"
+
+
+def test_porosity_count_requires_and_retains_complete_specimen_relation():
+    evidence = "Specimens with porosity = 2 of 164; total samples inspected = 164."
+    numerator = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "specimens with porosity",
+                "value_kind": "scalar",
+                "value_raw": "2",
+                "data_nature": "reported",
+            }
+        ],
+        structure_kind="porosity",
+    )
+    denominator = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "total samples inspected",
+                "value_kind": "scalar",
+                "value_raw": "164",
+                "data_nature": "reported",
+            }
+        ],
+        structure_kind="porosity",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1")], [numerator, denominator], source_text=evidence
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["features"][0]["value_raw"] == "2 of 164"
+    codes = [issue.code for issue in result.issues]
+    assert "promotion_structure_count_relation_completed" in codes
+    assert "promotion_structure_count_metadata_quarantined" in codes
+
+
+def test_fit_parameter_table_and_model_label_do_not_become_properties():
+    header = "| Fit parameter | Horizontal sample | Vertical sample |"
+    row = "| E (GPa) | 113.8 | 113.5 |"
+    fit_fact = _property(
+        sample="A1",
+        name="E",
+        value="113.8",
+        unit="GPa",
+        condition="",
+        evidence=header,
+    )
+    fit_fact.source_evidence = [header, row]
+    fit_fact.data["source_evidence"] = [header, row]
+    model_fact = _property(
+        sample="A1",
+        name="Young/Voigt model",
+        value="113.8",
+        unit="GPa",
+        condition="",
+        evidence="Young/Voigt model was used to calculate an elastic modulus.",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1")], [fit_fact, model_fact], source_text="\n".join([header, row])
+    )
+
+    assert result.accepted == ()
+    assert [issue.code for issue in result.issues] == [
+        "promotion_property_metadata_quarantined",
+        "promotion_property_metadata_quarantined",
+    ]
+
+
+def test_relative_density_remains_an_absolute_dimensionless_material_result():
+    evidence = "The relative density of A1 reached 99.2%."
+    fact = _property(
+        sample="A1",
+        name="relative density",
+        value="99.2",
+        unit="%",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert result.issues == ()
+
+
+def test_absolute_inequality_property_is_not_mistaken_for_a_comparison_projection():
+    evidence = "A1 achieved a tensile strength of more than one gigapascal."
+    fact = _property(
+        sample="A1",
+        name="tensile strength",
+        value="more than one gigapascal",
+        unit="GPa",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert result.issues == ()
+
+
 def test_unitless_property_is_quarantined_but_dimensionless_ontology_survives():
     unsupported = _property(
         name="strengthening response",
@@ -3144,7 +6120,7 @@ def test_promotion_preserves_original_fact_order_for_materialization_stability()
     ]
 
 
-def test_core_tensile_ambiguity_is_deferred_to_existing_table_owner_logic():
+def test_core_tensile_explicit_base_owner_is_retained_without_state_coordinate():
     anchors = [
         _anchor("Alloy A", material="Alloy A", state="as-built"),
         _anchor("Alloy A", material="Alloy A", state="aged"),
@@ -3156,7 +6132,7 @@ def test_core_tensile_ambiguity_is_deferred_to_existing_table_owner_logic():
 
     assert result.accepted == (fact,)
     assert not any(
-        issue.code == "promotion_ambiguous_owner_quarantined"
+        issue.code == "promotion_core_tensile_owner_ambiguous_quarantined"
         for issue in result.issues
     )
 
@@ -3195,7 +6171,7 @@ def test_prose_composition_ambiguity_is_quarantined_without_base_owner():
     result = promote_axis_facts(anchors, [fact], source_text=evidence)
 
     assert result.accepted == ()
-    assert [issue.code for issue in result.issues if issue.code == "promotion_ambiguous_owner_quarantined"] == [
+    assert [issue.code for issue in result.issues] == [
         "promotion_ambiguous_owner_quarantined"
     ]
 
@@ -3211,9 +6187,14 @@ def test_prose_processing_ambiguity_is_quarantined_without_base_owner():
     result = promote_axis_facts(anchors, [fact], source_text=evidence)
 
     assert result.accepted == ()
-    assert [issue.code for issue in result.issues if issue.code == "promotion_ambiguous_owner_quarantined"] == [
-        "promotion_ambiguous_owner_quarantined"
-    ]
+    # Route/event assertions without numeric parameters remain under the
+    # existing generic owner gate; the new processing gate only polices
+    # state-sensitive parameter projections.
+    assert [
+        issue.code
+        for issue in result.issues
+        if issue.code == "promotion_ambiguous_owner_quarantined"
+    ] == ["promotion_ambiguous_owner_quarantined"]
 
 
 def test_quantitative_structure_feature_dominates_redundant_entity_presence():
@@ -3826,7 +6807,7 @@ def test_prose_owner_value_gate_quarantines_swapped_structure_value():
     }
 
 
-def test_prose_owner_value_gate_preserves_correct_ordered_pairs():
+def test_prose_owner_value_gate_isolates_unqualified_ordered_pairs():
     evidence = (
         "The average grain sizes of H230 and H230AM after heat treatment "
         "were 13.2 µm and 10.9 µm."
@@ -3866,11 +6847,15 @@ def test_prose_owner_value_gate_preserves_correct_ordered_pairs():
     result = promote_axis_facts(
         [_anchor("H230"), _anchor("H230AM")], facts, source_text=evidence
     )
-    assert result.accepted == tuple(facts)
-    assert not any(
-        issue.code == "promotion_prose_owner_value_mismatch_quarantined"
+    # The sentence lists two owners and two values, but does not provide a
+    # source-local pair or an explicit ``respectively`` mapping.  Order alone
+    # is not a safe coordinate for the materializer, so both projections are
+    # isolated for audit/review.
+    assert result.accepted == ()
+    assert sum(
+        issue.code == "promotion_source_block_structure_fanout_quarantined"
         for issue in result.issues
-    )
+    ) == 2
 
 
 def test_prose_owner_value_gate_does_not_touch_markdown_table_bindings():
@@ -3922,6 +6907,450 @@ def test_prose_owner_value_gate_does_not_touch_markdown_table_bindings():
     assert not any(
         issue.code == "promotion_prose_owner_value_mismatch_quarantined"
         for issue in result.issues
+    )
+
+
+def _porosity_property(
+    *,
+    sample: str,
+    value: str,
+    evidence: str,
+    method: str = "",
+    condition: str = "",
+) -> PropertyFact:
+    fact = _property(
+        sample=sample,
+        name="porosity",
+        value=value,
+        unit="%",
+        condition=condition,
+        evidence=evidence,
+    )
+    fact.data["test_method_raw"] = method
+    fact.data["data_source"] = "table" if evidence.lstrip().startswith("|") else "text"
+    return fact
+
+
+def test_same_numbered_table_prose_property_duplicate_keeps_richer_prose():
+    prose = "Table 2 indicates that the porosity is 0.27% for CL."
+    table_row = "| CL | 17,411 | 0.27% | 352,904 |"
+    source = f"""
+{prose}
+
+Table 2. Porosity size and distribution in the alloys.
+
+| Sample | Quantity | Porosity | Maximum size (µm3) |
+| --- | --- | --- | --- |
+{table_row}
+| PL | 4068 | 0.21% | 405,469 |
+"""
+    table_fact = _porosity_property(
+        sample="CL", value="0.27%", evidence=table_row
+    )
+    prose_fact = _porosity_property(
+        sample="CL", value="0.27%", evidence=prose, method="CT"
+    )
+
+    result = promote_axis_facts(
+        [_anchor("CL"), _anchor("PL")],
+        [table_fact, prose_fact],
+        source_text=source,
+    )
+
+    properties = [
+        fact
+        for fact in result.accepted
+        if isinstance(fact, PropertyFact)
+        and fact.data.get("property_name_raw") == "porosity"
+    ]
+    assert len(properties) == 1
+    assert properties[0].data["test_method_raw"] == "CT"
+    assert properties[0].source_evidence == [prose, table_row]
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "promotion_same_table_property_duplicate_merged"
+    )
+    assert issue.actual["removed"] == table_fact.model_dump()
+    assert issue.actual["survivor_before"] == prose_fact.model_dump()
+    assert issue.actual["survivor_after"] == properties[0].model_dump()
+    relation = issue.actual["source_relation"]
+    assert relation["table_number"] == "2"
+    assert relation["unique_table_coordinate"]["cell"] == "0.27%"
+    assert issue.actual["comparison"]["owner_invented"] is False
+
+
+def test_same_table_property_merge_v201_can_be_disabled_for_shadow_ab(monkeypatch):
+    prose = "Table 2 indicates that the porosity is 0.27% for CL."
+    table_row = "| CL | 17,411 | 0.27% | 352,904 |"
+    source = f"""
+{prose}
+
+Table 2. Porosity size and distribution in the alloys.
+
+| Sample | Quantity | Porosity | Maximum size (µm3) |
+| --- | --- | --- | --- |
+{table_row}
+"""
+    table_fact = _porosity_property(
+        sample="CL", value="0.27%", evidence=table_row
+    )
+    prose_fact = _porosity_property(
+        sample="CL", value="0.27%", evidence=prose, method="CT"
+    )
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_SAME_TABLE_PROPERTY_MERGE_V201", "0"
+    )
+
+    result = promote_axis_facts(
+        [_anchor("CL")], [table_fact, prose_fact], source_text=source
+    )
+
+    properties = [
+        fact for fact in result.accepted if isinstance(fact, PropertyFact)
+    ]
+    assert len(properties) == 2
+    assert not any(
+        row.code == "promotion_same_table_property_duplicate_merged"
+        for row in result.issues
+    )
+
+
+def test_same_table_wrong_axis_property_copy_keeps_structure_table_carrier():
+    prose = "Table 2 indicates that the porosity is 0.27% for CL."
+    table_row = "| CL | 17,411 | 0.27% | 352,904 |"
+    source = f"""
+{prose}
+
+Table 2. Porosity size and distribution in the alloys.
+
+| Sample | Quantity | Porosity | Maximum size (µm3) |
+| --- | --- | --- | --- |
+{table_row}
+"""
+    property_fact = _porosity_property(
+        sample="CL", value="0.27%", evidence=prose, method="CT"
+    )
+    structure_fact = _structure(
+        sample="CL",
+        evidence=table_row,
+        entities=[],
+        structure_kind="porosity",
+        features=[
+            {
+                "feature_name_raw": "Porosity",
+                "value_kind": "scalar",
+                "value_raw": "0.27%",
+                "data_nature": "reported",
+                "source_evidence": [table_row],
+            }
+        ],
+    )
+
+    result = promote_axis_facts(
+        [_anchor("CL")],
+        [property_fact, structure_fact],
+        source_text=source,
+    )
+
+    assert not any(isinstance(fact, PropertyFact) for fact in result.accepted)
+    survivor = next(
+        fact for fact in result.accepted if isinstance(fact, StructureFact)
+    )
+    assert survivor.source_evidence == [prose, table_row]
+    issue = next(
+        row
+        for row in result.issues
+        if row.code
+        == "promotion_same_table_wrong_axis_property_duplicate_quarantined"
+    )
+    assert issue.actual["removed"] == property_fact.model_dump()
+    assert issue.actual["survivor_before"] == structure_fact.model_dump()
+    assert issue.actual["survivor_after"] == survivor.model_dump()
+    assert issue.actual["source_relation"]["table_number"] == "2"
+    assert (
+        issue.actual["source_relation"]["unique_table_coordinate"]["cell"]
+        == "0.27%"
+    )
+    assert issue.actual["comparison"]["owner_invented"] is False
+
+
+def test_same_table_wrong_axis_property_copy_requires_unique_explicit_relation(
+    monkeypatch,
+):
+    table_row = "| CL | 0.27% | 0.27% |"
+    prose = "The measured porosity was 0.27% for CL."
+    source = f"""
+{prose}
+
+Table 2. Replicate porosity values.
+
+| Sample | First porosity | Second porosity |
+| --- | --- | --- |
+{table_row}
+"""
+    property_fact = _porosity_property(
+        sample="CL", value="0.27%", evidence=prose, method="CT"
+    )
+    structure_fact = _structure(
+        sample="CL",
+        evidence=table_row,
+        entities=[],
+        structure_kind="porosity",
+        features=[
+            {
+                "feature_name_raw": "Porosity",
+                "value_kind": "scalar",
+                "value_raw": "0.27%",
+                "data_nature": "reported",
+                "source_evidence": [table_row],
+            }
+        ],
+    )
+
+    implicit = promote_axis_facts(
+        [_anchor("CL")],
+        [property_fact, structure_fact],
+        source_text=source,
+    )
+    assert property_fact in implicit.accepted
+    assert not any(
+        row.code
+        == "promotion_same_table_wrong_axis_property_duplicate_quarantined"
+        for row in implicit.issues
+    )
+
+    cited = property_fact.model_copy(
+        deep=True,
+        update={
+            "source_evidence": ["Table 2 reports porosity of 0.27% for CL."],
+            "data": {
+                **property_fact.data,
+                "source_evidence": [
+                    "Table 2 reports porosity of 0.27% for CL."
+                ],
+            },
+        },
+    )
+    cited_source = source.replace(prose, cited.source_evidence[0])
+    multiple_cells = promote_axis_facts(
+        [_anchor("CL")],
+        [cited, structure_fact],
+        source_text=cited_source,
+    )
+    assert cited in multiple_cells.accepted
+    assert not any(
+        row.code
+        == "promotion_same_table_wrong_axis_property_duplicate_quarantined"
+        for row in multiple_cells.issues
+    )
+
+    unique_source = cited_source.replace(table_row, "| CL | 0.27% | 1.4% |")
+    unique_structure = structure_fact.model_copy(
+        deep=True,
+        update={
+            "source_evidence": ["| CL | 0.27% | 1.4% |"],
+            "data": {
+                **structure_fact.data,
+                "source_evidence": ["| CL | 0.27% | 1.4% |"],
+            },
+        },
+    )
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_SAME_TABLE_PROPERTY_MERGE_V201", "0"
+    )
+    disabled = promote_axis_facts(
+        [_anchor("CL")],
+        [cited, unique_structure],
+        source_text=unique_source,
+    )
+    assert cited in disabled.accepted
+    assert not any(
+        row.code
+        == "promotion_same_table_wrong_axis_property_duplicate_quarantined"
+        for row in disabled.issues
+    )
+
+
+def test_same_table_property_merge_requires_exact_value_and_explicit_citation():
+    table_row = "| CL | 17,411 | 0.27% | 352,904 |"
+    source = f"""
+The measured porosity was 0.28% for CL.
+
+Table 2. Porosity size and distribution in the alloys.
+
+| Sample | Quantity | Porosity | Maximum size (µm3) |
+| --- | --- | --- | --- |
+{table_row}
+"""
+    table_fact = _porosity_property(
+        sample="CL", value="0.27%", evidence=table_row
+    )
+    prose_fact = _porosity_property(
+        sample="CL",
+        value="0.28%",
+        evidence="The measured porosity was 0.28% for CL.",
+        method="CT",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("CL")], [table_fact, prose_fact], source_text=source
+    )
+
+    assert table_fact in result.accepted
+    assert prose_fact in result.accepted
+    assert not any(
+        row.code == "promotion_same_table_property_duplicate_merged"
+        for row in result.issues
+    )
+
+
+def test_same_table_property_merge_noops_on_condition_conflict_or_equal_richness():
+    prose = "Table 2 indicates that the porosity is 0.27% for CL."
+    table_row = "| CL | 17,411 | 0.27% | 352,904 |"
+    source = f"""
+{prose}
+
+Table 2. Porosity size and distribution in the alloys.
+
+| Sample | Quantity | Porosity | Maximum size (µm3) |
+| --- | --- | --- | --- |
+{table_row}
+"""
+    table_fact = _porosity_property(
+        sample="CL",
+        value="0.27%",
+        evidence=table_row,
+        method="CT",
+        condition="as-built",
+    )
+    prose_fact = _porosity_property(
+        sample="CL",
+        value="0.27%",
+        evidence=prose,
+        method="CT",
+        condition="after HIP",
+    )
+
+    conflicted = promote_axis_facts(
+        [_anchor("CL")], [table_fact, prose_fact], source_text=source
+    )
+    assert not any(
+        row.code == "promotion_same_table_property_duplicate_merged"
+        for row in conflicted.issues
+    )
+
+    table_fact.data["test_condition_raw"] = ""
+    prose_fact.data["test_condition_raw"] = ""
+    equal = promote_axis_facts(
+        [_anchor("CL")], [table_fact, prose_fact], source_text=source
+    )
+    assert not any(
+        row.code == "promotion_same_table_property_duplicate_merged"
+        for row in equal.issues
+    )
+
+
+def test_same_table_property_merge_never_touches_core_tensile():
+    prose = "Table 2 reports a yield strength of 900 MPa for A1."
+    table_row = "| A1 | 900 MPa |"
+    source = f"""
+{prose}
+
+Table 2. Tensile properties.
+
+| Sample | Yield strength |
+| --- | --- |
+{table_row}
+"""
+    table_fact = _property(
+        sample="A1", value="900", evidence=table_row, condition=""
+    )
+    prose_fact = _property(
+        sample="A1", value="900", evidence=prose, condition=""
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1")], [table_fact, prose_fact], source_text=source
+    )
+
+    assert not any(
+        row.code == "promotion_same_table_property_duplicate_merged"
+        for row in result.issues
+    )
+
+
+def test_same_table_property_merge_is_permutation_invariant():
+    prose = "Table 2 indicates that the porosity is 0.27% for CL."
+    table_row = "| CL | 17,411 | 0.27% | 352,904 |"
+    source = f"""
+{prose}
+
+Table 2. Porosity size and distribution in the alloys.
+
+| Sample | Quantity | Porosity | Maximum size (µm3) |
+| --- | --- | --- | --- |
+{table_row}
+"""
+    table_fact = _porosity_property(
+        sample="CL", value="0.27%", evidence=table_row
+    )
+    prose_fact = _porosity_property(
+        sample="CL", value="0.27%", evidence=prose, method="CT"
+    )
+
+    forward = promote_axis_facts(
+        [_anchor("CL")], [table_fact, prose_fact], source_text=source
+    )
+    reverse = promote_axis_facts(
+        [_anchor("CL")], [prose_fact, table_fact], source_text=source
+    )
+
+    assert [fact.model_dump() for fact in forward.accepted] == [
+        fact.model_dump() for fact in reverse.accepted
+    ]
+    forward_issue = next(
+        row
+        for row in forward.issues
+        if row.code == "promotion_same_table_property_duplicate_merged"
+    )
+    reverse_issue = next(
+        row
+        for row in reverse.issues
+        if row.code == "promotion_same_table_property_duplicate_merged"
+    )
+    assert forward_issue.to_dict() == reverse_issue.to_dict()
+
+
+def test_same_table_property_merge_noops_for_multiple_value_cells_or_independent_measurement():
+    table_row = "| CL | 0.27% | 0.27% |"
+    prose = (
+        "Table 2 is cited, but an independently measured porosity of 0.27% "
+        "was obtained for CL."
+    )
+    source = f"""
+{prose}
+
+Table 2. Replicate porosity values.
+
+| Sample | First porosity | Second porosity |
+| --- | --- | --- |
+{table_row}
+"""
+    table_fact = _porosity_property(
+        sample="CL", value="0.27%", evidence=table_row
+    )
+    prose_fact = _porosity_property(
+        sample="CL", value="0.27%", evidence=prose, method="CT"
+    )
+
+    result = promote_axis_facts(
+        [_anchor("CL")], [table_fact, prose_fact], source_text=source
+    )
+
+    assert not any(
+        row.code == "promotion_same_table_property_duplicate_merged"
+        for row in result.issues
     )
 
 
@@ -4056,6 +7485,150 @@ def test_condition_label_routes_generic_fact_to_existing_state_owner():
     ) == 2
 
 
+def test_condition_route_does_not_use_same_material_as_lineage_when_owner_is_explicit():
+    evidence = "A1 had a hardness of 334 HV after HIPed treatment."
+    fact = _property(
+        sample="A1",
+        name="Vickers microhardness",
+        value="334",
+        unit="HV",
+        condition="HIPed",
+        evidence=evidence,
+    )
+    result = promote_axis_facts(
+        [
+            _anchor("A1", material="Ti-6Al-4V"),
+            _anchor("A2", material="Ti-6Al-4V", state="HIPed"),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "A1"
+    assert not any(
+        issue.code == "promotion_condition_owner_reassigned"
+        for issue in result.issues
+    )
+
+
+def test_bare_condition_cannot_jump_between_same_material_sample_ids():
+    evidence = "The hardness under HIPed treatment was 334 HV."
+    fact = _property(
+        sample="A1",
+        name="Vickers microhardness",
+        value="334",
+        unit="HV",
+        condition="HIPed",
+        evidence=evidence,
+    )
+    result = promote_axis_facts(
+        [
+            _anchor("A1", material="Ti-6Al-4V"),
+            _anchor("A2", material="Ti-6Al-4V", state="HIPed"),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "A1"
+    assert not any(
+        issue.code == "promotion_condition_owner_reassigned"
+        for issue in result.issues
+    )
+
+
+def test_condition_route_keeps_explicit_sample_lineage_for_bracketed_state():
+    evidence = "A [HIPed] had a hardness of 334 HV at 800 °C."
+    fact = _property(
+        sample="A",
+        name="Vickers microhardness",
+        value="334",
+        unit="HV",
+        condition="HIPed",
+        evidence=evidence,
+    )
+    result = promote_axis_facts(
+        [
+            _anchor("A", material="Alloy A"),
+            _anchor("A [HIPed]", material="Alloy A", state="HIPed"),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "A [HIPed]"
+
+
+def test_long_method_condition_is_reduced_to_source_literal_coordinates():
+    evidence = (
+        "A1 had a yield strength of 900 MPa at 800 °C. "
+        "Dog-bone specimens with a 5 mm gauge length were tested on an Instron "
+        "machine at a strain rate of 5 × 10^-3 s^-1; tests were repeated three times."
+    )
+    fact = _property(
+        sample="A1",
+        name="yield strength",
+        value="900",
+        unit="MPa",
+        condition=(
+            "A1 had a yield strength of 900 MPa at 800 °C. Dog-bone specimens "
+            "with a 5 mm gauge length were tested on an Instron "
+            "machine at a strain rate of 5 × 10^-3 s^-1; tests were repeated three times."
+        ),
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    condition = result.accepted[0].data["test_condition_raw"]
+    assert "800" in condition
+    assert "°C" in condition
+    assert "strain rate" not in condition.lower()
+    assert "Instron" not in condition
+    assert "gauge length" not in condition
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_condition_method_context_trimmed"
+    )
+    assert issue.actual["before"] == fact.model_dump()
+    assert issue.actual["after"] == result.accepted[0].model_dump()
+
+
+def test_long_method_condition_without_coordinate_is_cleared_but_value_survives():
+    evidence = (
+        "A1 had a yield strength of 900 MPa. Dog-bone specimens were polished, "
+        "mounted, and tested on an Instron machine; measurements were repeated "
+        "three times for reproducibility."
+    )
+    fact = _property(
+        sample="A1",
+        name="yield strength",
+        value="900",
+        unit="MPa",
+        condition=(
+            "Dog-bone specimens were polished, mounted, and tested on an Instron "
+            "machine; measurements were repeated three times for reproducibility."
+        ),
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["value_raw"] == "900"
+    assert result.accepted[0].data["test_condition_raw"] == ""
+    assert any(
+        issue.code == "promotion_condition_method_context_trimmed"
+        and issue.actual["reason"] == "no_source_literal_coordinate_survived"
+        for issue in result.issues
+    )
+
+
 def test_ambiguous_respectively_values_with_one_metric_are_quarantined():
     evidence = "The fracture-location ranges were 1.10 and 0.96 mm, respectively."
     facts = [
@@ -4084,6 +7657,1063 @@ def test_ambiguous_respectively_values_with_one_metric_are_quarantined():
         issue.code == "promotion_respectively_mapping_ambiguous_quarantined"
         for issue in result.issues
     ) == 2
+
+
+def test_same_metric_prose_value_fanout_without_coordinate_is_quarantined():
+    evidence = (
+        "The introduction of a 300 s delay led to an approximately 4% increase "
+        "in hardness, with values rising from 334 HV to 346 HV."
+    )
+    facts = [
+        _property(
+            sample="Ti64",
+            name="Vickers microhardness",
+            value="334",
+            unit="HV",
+            condition="",
+            evidence=evidence,
+        ),
+        _property(
+            sample="Ti64",
+            name="Vickers microhardness",
+            value="346",
+            unit="HV",
+            condition="",
+            evidence=evidence,
+        ),
+    ]
+
+    result = promote_axis_facts([_anchor("Ti64")], facts, source_text=evidence)
+
+    assert result.accepted == ()
+    issues = [
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_property_value_fanout_ambiguous_quarantined"
+    ]
+    assert len(issues) == 2
+    assert all(issue.actual["removed"] for issue in issues)
+
+
+def test_cross_chunk_same_metric_fanout_is_quarantined_by_shared_prose_block():
+    source = (
+        "A1 showed hardness of 334 HV in one condition, while another condition "
+        "showed hardness of 346 HV after testing."
+    )
+    facts = [
+        _property(
+            sample="A1",
+            name="Vickers microhardness",
+            value="334",
+            unit="HV",
+            condition="",
+            evidence="A1 showed hardness of 334 HV in one condition",
+        ),
+        _property(
+            sample="A1",
+            name="Vickers microhardness",
+            value="346",
+            unit="HV",
+            condition="",
+            evidence="hardness of 346 HV after testing",
+        ),
+    ]
+
+    result = promote_axis_facts([_anchor("A1")], facts, source_text=source)
+
+    assert result.accepted == ()
+    issues = [
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_source_block_property_fanout_quarantined"
+    ]
+    assert len(issues) == 2
+    assert all(issue.actual["source_block"]["start_line"] == 1 for issue in issues)
+
+
+def test_cross_chunk_same_value_non_core_property_fanout_is_quarantined():
+    """A same-valued copy across owners is still an unbound projection."""
+
+    source = (
+        "A1 and A2 were evaluated under different conditions; the reported "
+        "Vickers microhardness was 334 HV."
+    )
+    facts = [
+        _property(
+            sample="A1",
+            name="Vickers microhardness",
+            value="334",
+            unit="HV",
+            condition="",
+            evidence="the reported Vickers microhardness was 334 HV",
+            evidence_unit_id="prose-L000001-L000001-a1",
+        ),
+        _property(
+            sample="A2",
+            name="Vickers microhardness",
+            value="334",
+            unit="HV",
+            condition="",
+            evidence="Vickers microhardness was 334 HV",
+            evidence_unit_id="prose-L000001-L000001-a2",
+        ),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], facts, source_text=source
+    )
+
+    assert result.accepted == ()
+    issues = [
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_source_block_property_same_value_fanout_quarantined"
+    ]
+    assert len(issues) == 2
+    assert all(issue.actual["same_value"] is True for issue in issues)
+    assert all(issue.actual["conflict_set"] for issue in issues)
+
+
+def test_cross_chunk_same_value_core_tensile_is_not_handled_by_new_same_value_gate():
+    """Core tensile remains owned by its dedicated precision gates."""
+
+    source = (
+        "A1 and A2 were evaluated under different conditions; the reported "
+        "yield strength was 900 MPa."
+    )
+    facts = [
+        _property(
+            sample="A1",
+            name="yield strength",
+            value="900",
+            unit="MPa",
+            condition="",
+            evidence="the reported yield strength was 900 MPa",
+            evidence_unit_id="prose-L000001-L000001-a1",
+        ),
+        _property(
+            sample="A2",
+            name="yield strength",
+            value="900",
+            unit="MPa",
+            condition="",
+            evidence="yield strength was 900 MPa",
+            evidence_unit_id="prose-L000001-L000001-a2",
+        ),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], facts, source_text=source
+    )
+
+    assert not any(
+        issue.code == "promotion_source_block_property_same_value_fanout_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_cross_chunk_fanout_preserves_explicit_owner_pairs():
+    source = "A1 had hardness of 334 HV, while A2 had hardness of 346 HV."
+    facts = [
+        _property(
+            sample="A1",
+            name="Vickers microhardness",
+            value="334",
+            condition="",
+            evidence="A1 had hardness of 334 HV",
+        ),
+        _property(
+            sample="A2",
+            name="Vickers microhardness",
+            value="346",
+            condition="",
+            evidence="A2 had hardness of 346 HV",
+        ),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], facts, source_text=source
+    )
+
+    assert len(result.accepted) == 2
+    assert not any(
+        issue.code == "promotion_source_block_property_fanout_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_cross_chunk_fanout_preserves_distinct_grounded_conditions():
+    source = (
+        "The hardness at 0 s delay was 334 HV, while at 300 s delay it was 346 HV."
+    )
+    facts = [
+        _property(
+            sample="A1",
+            name="Vickers microhardness",
+            value="334",
+            condition="0 s delay",
+            evidence="hardness at 0 s delay was 334 HV",
+        ),
+        _property(
+            sample="A1",
+            name="Vickers microhardness",
+            value="346",
+            condition="300 s delay",
+            evidence="at 300 s delay it was 346 HV",
+        ),
+    ]
+
+    result = promote_axis_facts([_anchor("A1")], facts, source_text=source)
+
+    assert len(result.accepted) == 2
+    assert not any(
+        issue.code == "promotion_source_block_property_fanout_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_cross_chunk_fanout_preserves_temperature_state_owner_coordinates():
+    source = (
+        "The fracture strain increased to 45.0% for the 1290 °C and then "
+        "declined to 35.6% for the 1300 °C sample."
+    )
+    facts = [
+        _property(
+            sample="1290 °C sample",
+            name="fracture strain",
+            value="45.0",
+            unit="%",
+            condition="",
+            evidence="The fracture strain increased to 45.0% for the 1290 °C",
+        ),
+        _property(
+            sample="1300 °C sample",
+            name="fracture strain",
+            value="35.6",
+            unit="%",
+            condition="",
+            evidence="declined to 35.6% for the 1300 °C sample",
+        ),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("1290 °C sample"), _anchor("1300 °C sample")],
+        facts,
+        source_text=source,
+    )
+
+    assert len(result.accepted) == 2
+    assert not any(
+        issue.code == "promotion_source_block_property_fanout_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_cross_chunk_fanout_does_not_reinterpret_table_or_collective_rows():
+    table = "| Sample | Hardness (HV) |\n| --- | --- |\n| A1 | 334 |\n| A2 | 346 |"
+    table_facts = [
+        _property(sample="A1", name="Vickers microhardness", value="334", condition="", evidence="| A1 | 334 |"),
+        _property(sample="A2", name="Vickers microhardness", value="346", condition="", evidence="| A2 | 346 |"),
+    ]
+    table_result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], table_facts, source_text=table
+    )
+    assert len(table_result.accepted) == 2
+    assert not any(
+        issue.code == "promotion_source_block_property_fanout_quarantined"
+        for issue in table_result.issues
+    )
+
+    collective = "Both A1 and A2 showed hardness values of 334 HV and 346 HV."
+    collective_facts = [
+        _property(sample="A1", name="Vickers microhardness", value="334", condition="", evidence="Both A1 and A2 showed hardness values of 334 HV and 346 HV."),
+        _property(sample="A2", name="Vickers microhardness", value="346", condition="", evidence="Both A1 and A2 showed hardness values of 334 HV and 346 HV."),
+    ]
+    collective_result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], collective_facts, source_text=collective
+    )
+    assert len(collective_result.accepted) == 2
+    assert not any(
+        issue.code == "promotion_source_block_property_fanout_quarantined"
+        for issue in collective_result.issues
+    )
+
+
+def test_cross_chunk_structure_feature_fanout_without_coordinate_is_quarantined():
+    source = (
+        "A1 showed an average grain size of 10 um in one region, while another "
+        "region showed an average grain size of 20 um."
+    )
+    facts = [
+        _structure(
+            sample="A1",
+            evidence="A1 showed an average grain size of 10 um in one region",
+            entities=[],
+            features=[
+                {
+                    "feature_name_raw": "average grain size",
+                    "value_kind": "scalar",
+                    "value_raw": "10",
+                    "unit_raw": "um",
+                    "data_nature": "reported",
+                    "source_evidence": [
+                        "A1 showed an average grain size of 10 um in one region"
+                    ],
+                }
+            ],
+        ),
+        _structure(
+            sample="A1",
+            evidence="another region showed an average grain size of 20 um",
+            entities=[],
+            features=[
+                {
+                    "feature_name_raw": "average grain size",
+                    "value_kind": "scalar",
+                    "value_raw": "20",
+                    "unit_raw": "um",
+                    "data_nature": "reported",
+                    "source_evidence": [
+                        "another region showed an average grain size of 20 um"
+                    ],
+                }
+            ],
+        ),
+    ]
+
+    result = promote_axis_facts([_anchor("A1")], facts, source_text=source)
+
+    assert result.accepted == ()
+    assert sum(
+        issue.code == "promotion_source_block_structure_fanout_quarantined"
+        for issue in result.issues
+    ) == 2
+
+
+def test_cross_chunk_structure_feature_fanout_preserves_explicit_owner_pairs():
+    source = "A1 showed grain size of 10 um, while A2 showed grain size of 20 um."
+    facts = [
+        _structure(
+            sample="A1",
+            evidence="A1 showed grain size of 10 um",
+            entities=[],
+            features=[
+                {
+                    "feature_name_raw": "grain size",
+                    "value_kind": "scalar",
+                    "value_raw": "10",
+                    "unit_raw": "um",
+                    "data_nature": "reported",
+                    "source_evidence": ["A1 showed grain size of 10 um"],
+                }
+            ],
+        ),
+        _structure(
+            sample="A2",
+            evidence="A2 showed grain size of 20 um",
+            entities=[],
+            features=[
+                {
+                    "feature_name_raw": "grain size",
+                    "value_kind": "scalar",
+                    "value_raw": "20",
+                    "unit_raw": "um",
+                    "data_nature": "reported",
+                    "source_evidence": ["A2 showed grain size of 20 um"],
+                }
+            ],
+        ),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], facts, source_text=source
+    )
+
+    assert len(result.accepted) == 2
+    assert not any(
+        issue.code == "promotion_source_block_structure_fanout_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_structure_entity_only_collective_range_fanout_is_quarantined():
+    evidence = (
+        "For samples #1-#3, the laser glazing regions mainly consisted of "
+        "columnar grains."
+    )
+    entities = [
+        {
+            "name_raw": "columnar grains",
+            "entity_type": "grain_population",
+            "role": "morphology",
+            "features": [],
+            "raw_expression": "columnar grains",
+        }
+    ]
+    facts = [
+        _structure(sample="#1", evidence=evidence, entities=entities),
+        _structure(sample="#2", evidence=evidence, entities=entities),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("#1"), _anchor("#2"), _anchor("#3")], facts, source_text=evidence
+    )
+
+    assert result.accepted == ()
+    assert sum(
+        issue.code == "promotion_structure_collective_range_fanout_quarantined"
+        for issue in result.issues
+    ) == 2
+
+
+def test_structure_collective_both_assertion_remains_eligible():
+    evidence = "Both A1 and A2 contained columnar grains."
+    entities = [
+        {
+            "name_raw": "columnar grains",
+            "entity_type": "grain_population",
+            "role": "morphology",
+            "features": [],
+            "raw_expression": "columnar grains",
+        }
+    ]
+    facts = [
+        _structure(sample="A1", evidence=evidence, entities=entities),
+        _structure(sample="A2", evidence=evidence, entities=entities),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], facts, source_text=evidence
+    )
+
+    assert len(result.accepted) == 2
+    assert not any(
+        issue.code == "promotion_structure_collective_range_fanout_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_structure_code_range_fanout_is_quarantined():
+    evidence = "R45-R70 powders exhibited semi-molten agglomerates."
+    entities = [
+        {
+            "name_raw": "semi-molten agglomerates",
+            "entity_type": "particle",
+            "role": "reported",
+            "features": [],
+            "raw_expression": "semi-molten agglomerates",
+        }
+    ]
+    facts = [
+        _structure(sample="R45", evidence=evidence, entities=entities),
+        _structure(sample="R70", evidence=evidence, entities=entities),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("R45"), _anchor("R70")], facts, source_text=evidence
+    )
+
+    assert result.accepted == ()
+    assert sum(
+        issue.code == "promotion_structure_collective_range_fanout_quarantined"
+        for issue in result.issues
+    ) == 2
+
+
+def test_cross_chunk_processing_parameter_fanout_without_coordinate_is_quarantined():
+    source = "The laser power was 200 W in one condition, and the laser power was 300 W in another condition."
+    facts = [
+        _processing(
+            sample="A1",
+            evidence="The laser power was 200 W in one condition",
+            parameters=[
+                {
+                    "parameter_name_raw": "laser power",
+                    "value_raw": "200",
+                    "unit_raw": "W",
+                    "source_evidence": [
+                        "The laser power was 200 W in one condition"
+                    ],
+                }
+            ],
+        ),
+        _processing(
+            sample="A1",
+            evidence="and the laser power was 300 W in another condition",
+            parameters=[
+                {
+                    "parameter_name_raw": "laser power",
+                    "value_raw": "300",
+                    "unit_raw": "W",
+                    "source_evidence": [
+                        "and the laser power was 300 W in another condition"
+                    ],
+                }
+            ],
+        ),
+    ]
+
+    result = promote_axis_facts([_anchor("A1")], facts, source_text=source)
+
+    assert result.accepted == ()
+    assert sum(
+        issue.code == "promotion_source_block_processing_fanout_quarantined"
+        for issue in result.issues
+    ) == 2
+
+
+def test_cross_chunk_processing_parameter_fanout_preserves_grounded_conditions():
+    source = "The laser power at 0 s delay was 200 W, while at 120 s delay it was 300 W."
+    facts = [
+        _processing(
+            sample="A1",
+            evidence="The laser power at 0 s delay was 200 W",
+            parameters=[
+                {
+                    "parameter_name_raw": "laser power",
+                    "value_raw": "200",
+                    "unit_raw": "W",
+                    "condition_label_raw": "0 s delay",
+                    "source_evidence": [
+                        "The laser power at 0 s delay was 200 W"
+                    ],
+                }
+            ],
+        ),
+        _processing(
+            sample="A1",
+            evidence="while at 120 s delay it was 300 W",
+            parameters=[
+                {
+                    "parameter_name_raw": "laser power",
+                    "value_raw": "300",
+                    "unit_raw": "W",
+                    "condition_label_raw": "120 s delay",
+                    "source_evidence": [
+                        "while at 120 s delay it was 300 W"
+                    ],
+                }
+            ],
+        ),
+    ]
+
+    result = promote_axis_facts([_anchor("A1")], facts, source_text=source)
+
+    assert len(result.accepted) == 2
+    assert not any(
+        issue.code == "promotion_source_block_processing_fanout_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_processing_generic_base_owner_is_quarantined_when_state_children_exist():
+    evidence = "The laser power was 300 W."
+    fact = _processing(
+        sample="Alloy A",
+        evidence=evidence,
+        parameters=[
+            {
+                "parameter_name_raw": "laser power",
+                "value_raw": "300",
+                "unit_raw": "W",
+                "source_evidence": evidence,
+            }
+        ],
+    )
+    result = promote_axis_facts(
+        [
+            _anchor("Alloy A", material="Alloy A", state="as-built"),
+            _anchor("Alloy A", material="Alloy A", state="HIPed"),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_processing_owner_ambiguous_quarantined"
+    )
+    assert issue.actual["removed"] == fact.model_dump()
+    assert set(issue.actual["candidate_states"]) == {"HIPed", "as-built"}
+
+
+def test_processing_literal_owner_is_reassigned_to_existing_state_owner():
+    evidence = "The as-built Alloy A specimens used a laser power of 300 W."
+    fact = _processing(
+        sample="Alloy A",
+        evidence=evidence,
+        parameters=[
+            {
+                "parameter_name_raw": "laser power",
+                "value_raw": "300",
+                "unit_raw": "W",
+                "source_evidence": evidence,
+            }
+        ],
+    )
+    result = promote_axis_facts(
+        [
+            _anchor("Alloy A", material="Alloy A", state="as-built"),
+            _anchor("Alloy A", material="Alloy A", state="HIPed"),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "Alloy A"
+    assert not any(
+        issue.code == "promotion_processing_owner_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_core_tensile_literal_state_survives_generic_sibling_gate():
+    evidence = "The HIPed Alloy A had a yield strength of 900 MPa."
+    fact = _property(
+        sample="Alloy A",
+        name="yield strength",
+        value="900",
+        condition="HIPed",
+        evidence=evidence,
+    )
+    result = promote_axis_facts(
+        [
+            _anchor("Alloy A", material="Alloy A", state="as-built"),
+            _anchor("Alloy A", material="Alloy A", state="HIPed"),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "Alloy A"
+    assert not any(
+        issue.code == "promotion_core_tensile_owner_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_core_tensile_explicit_base_owner_survives_state_siblings():
+    evidence = "Alloy A had a yield strength of 900 MPa."
+    fact = _property(
+        sample="Alloy A",
+        name="yield strength",
+        value="900",
+        condition="",
+        evidence=evidence,
+    )
+    result = promote_axis_facts(
+        [
+            _anchor("Alloy A", material="Alloy A", state="as-built"),
+            _anchor("Alloy A", material="Alloy A", state="HIPed"),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_core_tensile_owner_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_core_tensile_structured_state_survives_when_evidence_omits_sample_label():
+    evidence = (
+        "The average yield strength after HIP2 + HT2 was 1000 MPa."
+    )
+    fact = _property(
+        sample="Alloy A",
+        name="yield strength",
+        value="1000",
+        condition="",
+        evidence=evidence,
+    )
+    fact.data["material_state"] = "HIP2 + HT2"
+    result = promote_axis_facts(
+        [
+            _anchor("Alloy A", material="Alloy A", state="as-built"),
+            _anchor("Alloy A", material="Alloy A", state="HIP2 + HT2"),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert len(result.accepted) == 1
+    assert not any(
+        issue.code == "promotion_core_tensile_owner_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_same_material_different_sample_ids_are_not_lineage_siblings():
+    evidence = "A1 had a yield strength of 900 MPa."
+    fact = _property(sample="A1", evidence=evidence)
+    result = promote_axis_facts(
+        [
+            _anchor("A1", material="Ti-6Al-4V", state="as-built"),
+            _anchor("A2", material="Ti-6Al-4V", state="HIPed"),
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "A1"
+    assert not any(
+        issue.code == "promotion_core_tensile_owner_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_html_tensile_row_coordinate_quarantines_value_copied_to_other_owner():
+    source = (
+        "<table><tr><th>Sample</th><th>UTS (MPa)</th></tr>"
+        "<tr><td>A1</td><td>900 ± 10</td></tr>"
+        "<tr><td>A2</td><td>850 ± 10</td></tr></table>"
+    )
+    fact = _property(
+        sample="A1",
+        name="ultimate tensile strength",
+        value="850 ± 10",
+        unit="MPa",
+        condition="",
+        evidence=source,
+    )
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], [fact], source_text=source
+    )
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_table_owner_condition_ambiguous_quarantined"
+        for issue in result.issues
+    )
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_table_owner_condition_ambiguous_quarantined"
+    )
+    assert issue.actual["reason"] == "value_bound_to_other_owner_row"
+
+
+def test_v202_structured_column_owner_preserves_one_rowspan_cell(monkeypatch):
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_SOURCE_COORDINATE_PRECISION_V202", "1")
+    source = (
+        "<table><tr><td>Properties</td><td>WLAM</td><td>WEBAM</td></tr>"
+        '<tr><td rowspan="2">Yield Strength (MPa)</td>'
+        '<td rowspan="2">825–835 [43]</td><td>846 [44]</td></tr>'
+        "<tr><td>956 [45]</td></tr></table>"
+    )
+    evidence = (
+        "| Properties | WLAM | WEBAM |\n"
+        "| Yield Strength (MPa) | 825–835 [43] | 956 [45] |"
+    )
+    fact = _property(
+        sample="WLAM",
+        name="Yield Strength",
+        value="825–835",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+    fact.data["data_source"] = "table"
+    fact.data["raw_note"] = "[43]"
+
+    result = promote_axis_facts(
+        [_anchor("WLAM"), _anchor("WEBAM")], [fact], source_text=source
+    )
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_table_owner_condition_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_same_metric_prose_value_fanout_with_grounded_conditions_survives():
+    evidence = (
+        "The hardness values for 0 s delay and 300 s delay were 334 HV and "
+        "346 HV, respectively."
+    )
+    facts = [
+        _property(
+            sample="Ti64",
+            name="Vickers microhardness",
+            value="334",
+            unit="HV",
+            condition="0 s delay",
+            evidence=evidence,
+        ),
+        _property(
+            sample="Ti64",
+            name="Vickers microhardness",
+            value="346",
+            unit="HV",
+            condition="300 s delay",
+            evidence=evidence,
+        ),
+    ]
+
+    result = promote_axis_facts([_anchor("Ti64")], facts, source_text=evidence)
+
+    assert len(result.accepted) == 2
+    assert not any(
+        issue.code == "promotion_property_value_fanout_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_numeric_condition_grounding_does_not_match_suffix_of_larger_number():
+    evidence = (
+        "The hardness values rose from 334 HV to 346 HV after a 300 s delay."
+    )
+    facts = [
+        _property(
+            sample="Ti64",
+            name="Vickers microhardness",
+            value="334",
+            unit="HV",
+            condition="0 s delay",
+            evidence=evidence,
+        ),
+        _property(
+            sample="Ti64",
+            name="Vickers microhardness",
+            value="346",
+            unit="HV",
+            condition="300 s delay",
+            evidence=evidence,
+        ),
+    ]
+
+    result = promote_axis_facts([_anchor("Ti64")], facts, source_text=evidence)
+
+    assert result.accepted == ()
+    assert sum(
+        issue.code == "promotion_property_value_fanout_ambiguous_quarantined"
+        for issue in result.issues
+    ) == 2
+
+
+def test_respectively_condition_pair_routes_generic_owner_to_existing_states():
+    evidence = (
+        "The fracture-location ranges were 1.10 and 0.96 mm for delays of "
+        "0 and 120 s, respectively."
+    )
+    facts = [
+        _property(
+            sample="Ti-6Al-4V",
+            name="fracture location variation range",
+            value="1.10",
+            unit="mm",
+            condition="delay of 0 s",
+            evidence=evidence,
+        ),
+        _property(
+            sample="Ti-6Al-4V",
+            name="fracture location variation range",
+            value="0.96",
+            unit="mm",
+            condition="delay of 120 s",
+            evidence=evidence,
+        ),
+    ]
+    anchors = [
+        _anchor("Ti-6Al-4V", material="Ti-6Al-4V"),
+        _anchor("0 s Delay", state="0 s Delay"),
+        _anchor("120 s Delay", state="120 s Delay"),
+    ]
+
+    result = promote_axis_facts(anchors, facts, source_text=evidence)
+
+    assert {
+        row.data["value_raw"]: row.sample_id_raw for row in result.accepted
+    } == {
+        "1.10": "0 s Delay",
+        "0.96": "120 s Delay",
+    }
+    assert sum(
+        issue.code == "promotion_respectively_state_owner_reassigned"
+        for issue in result.issues
+    ) == 2
+
+
+def test_respectively_condition_pair_does_not_route_when_state_mapping_is_tied():
+    evidence = (
+        "The fracture-location ranges were 1.10 and 0.96 mm for delays of "
+        "0 and 120 s, respectively."
+    )
+    facts = [
+        _property(
+            sample="Ti-6Al-4V",
+            name="fracture location variation range",
+            value="1.10",
+            unit="mm",
+            condition="delay of 0 s",
+            evidence=evidence,
+        ),
+        _property(
+            sample="Ti-6Al-4V",
+            name="fracture location variation range",
+            value="0.96",
+            unit="mm",
+            condition="delay of 120 s",
+            evidence=evidence,
+        ),
+    ]
+    anchors = [
+        _anchor("Ti-6Al-4V", material="Ti-6Al-4V"),
+        _anchor("0 s Delay A", state="0 s Delay"),
+        _anchor("0 s Delay B", state="0 s Delay"),
+        _anchor("120 s Delay", state="120 s Delay"),
+    ]
+
+    result = promote_axis_facts(anchors, facts, source_text=evidence)
+
+    assert all(row.sample_id_raw == "Ti-6Al-4V" for row in result.accepted)
+    assert not any(
+        issue.code == "promotion_respectively_state_owner_reassigned"
+        for issue in result.issues
+    )
+
+
+def test_identical_comparative_property_projection_to_two_owners_is_quarantined():
+    evidence = (
+        "The phase fraction in Alloy-A (42.3 %) was approximately six times "
+        "more than that in Alloy-B (7.34 %)."
+    )
+    facts = [
+        _property(
+            sample="Alloy-A",
+            name="phase fraction",
+            value="42.3",
+            unit="%",
+            condition="",
+            evidence=evidence,
+        ),
+        _property(
+            sample="Alloy-B",
+            name="phase fraction",
+            value="42.3",
+            unit="%",
+            condition="",
+            evidence=evidence,
+        ),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("Alloy-A"), _anchor("Alloy-B")], facts, source_text=evidence
+    )
+
+    assert result.accepted == ()
+    assert sum(
+        issue.code == "promotion_comparative_owner_duplicate_quarantined"
+        for issue in result.issues
+    ) == 2
+
+
+def test_collective_comparative_property_projection_is_preserved():
+    evidence = "Both Alloy-A and Alloy-B showed higher hardness of 300 HV."
+    facts = [
+        _property(
+            sample="Alloy-A",
+            name="hardness",
+            value="300",
+            unit="HV",
+            condition="",
+            evidence=evidence,
+        ),
+        _property(
+            sample="Alloy-B",
+            name="hardness",
+            value="300",
+            unit="HV",
+            condition="",
+            evidence=evidence,
+        ),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("Alloy-A"), _anchor("Alloy-B")], facts, source_text=evidence
+    )
+
+    assert len(result.accepted) == 2
+    assert not any(
+        issue.code == "promotion_comparative_owner_duplicate_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_distinct_values_in_comparative_owner_projection_are_preserved():
+    evidence = "The phase fractions of Alloy-A and Alloy-B were 42.3 and 7.34 %, respectively."
+    facts = [
+        _property(
+            sample="Alloy-A",
+            name="phase fraction",
+            value="42.3",
+            unit="%",
+            condition="",
+            evidence=evidence,
+        ),
+        _property(
+            sample="Alloy-B",
+            name="phase fraction",
+            value="7.34",
+            unit="%",
+            condition="",
+            evidence=evidence,
+        ),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("Alloy-A"), _anchor("Alloy-B")], facts, source_text=evidence
+    )
+
+    assert len(result.accepted) == 2
+    assert not any(
+        issue.code == "promotion_comparative_owner_duplicate_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_same_metric_table_values_are_left_to_table_coordinate_gate():
+    source = (
+        "| Property | A1 | A2 |\n"
+        "|---|---:|---:|\n"
+        "| Hardness (HV) | 334 | 346 |"
+    )
+    facts = [
+        _property(
+            sample="A1",
+            name="Hardness",
+            value="334",
+            unit="HV",
+            condition="",
+            evidence=source,
+        ),
+        _property(
+            sample="A2",
+            name="Hardness",
+            value="346",
+            unit="HV",
+            condition="",
+            evidence=source,
+        ),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("A2")], facts, source_text=source
+    )
+
+    assert len(result.accepted) == 2
+    assert not any(
+        issue.code == "promotion_property_value_fanout_ambiguous_quarantined"
+        for issue in result.issues
+    )
 
 
 def test_respectively_different_property_names_remain_atomic():
@@ -4172,7 +8802,14 @@ def test_explicit_sample_named_as_powder_keeps_composition_owner():
 
     result = promote_axis_facts([_anchor("H230")], [fact], source_text=evidence)
 
-    assert result.accepted == (fact,)
+    # A table-heading mention alone does not ground the emitted numeric
+    # component.  Keep the owner auditable, but isolate the unbound value.
+    assert result.accepted == ()
+    assert any(
+        issue.code == "composition_component_precision_quarantined"
+        and issue.actual["reason"] == "numeric_literal_not_in_component_evidence"
+        for issue in result.issues
+    )
     assert not any(
         issue.code.startswith("promotion_feedstock_owner_")
         for issue in result.issues
@@ -4287,6 +8924,151 @@ def test_tensile_table_unique_owner_column_value_is_preserved():
     assert result.accepted == (fact,)
 
 
+def test_tensile_table_condition_column_routes_truncated_row_to_state_owner():
+    """A numeric-only evidence row can retain its source table condition."""
+
+    source = (
+        "| Properties | 0 s Delay | 120 s Delay | 300 s Delay |\n"
+        "| --- | --- | --- | --- |\n"
+        "| Avg. YS (MPa) | 817 ± 8.7 | 859.7 ± 9.2 | 825.3 ± 3.1 |"
+    )
+    evidence = "| Avg. YS (MPa) | 817 ± 8.7 | 859.7 ± 9.2 | 825.3 ± 3.1 |"
+    fact = _property(
+        sample="Ti64",
+        value="825.3 ± 3.1",
+        condition="300 s Delay",
+        evidence=evidence,
+    )
+    anchors = [
+        _anchor("Ti64", material="Ti64"),
+        _anchor("0 s Delay", material="Ti64", state="0 s Delay"),
+        _anchor("120 s Delay", material="Ti64", state="120 s Delay"),
+        _anchor("300 s Delay", material="Ti64", state="300 s Delay"),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=source)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "300 s Delay"
+    assert result.accepted[0].data["test_condition_raw"] == "300 s Delay"
+    assert any(
+        issue.code == "promotion_tensile_table_condition_owner_reassigned"
+        for issue in result.issues
+    )
+
+
+def test_two_level_tensile_table_uses_test_specimen_as_literal_condition_coordinate():
+    """A compact HT/aging label in ``test_specimen_raw`` is table evidence."""
+
+    source = (
+        "|  | A | A | B | B |\n"
+        "|  | HT | 200 h | HT | 200 h |\n"
+        "| UTS (MPa) | 900 | 800 | 700 | 600 |"
+    )
+    evidence = "| UTS (MPa) | 900 | 800 | 700 | 600 |"
+    fact = _property(sample="A", value="900", condition="", evidence=evidence)
+    fact.data["data_source"] = "table"
+    fact.data["test_specimen_raw"] = "HT"
+
+    result = promote_axis_facts(
+        [_anchor("A", material="A"), _anchor("B", material="B")],
+        [fact],
+        source_text=source,
+    )
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_table_owner_condition_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_two_level_table_does_not_rescue_bare_tensile_strength_label():
+    """A generic summary label stays quarantined despite a repeated header."""
+
+    source = (
+        "|  | A | A | B | B |\n"
+        "|  | HT | 200 h | HT | 200 h |\n"
+        "| Tensile strength (MPa) | 900 | 900 | 700 | 600 |"
+    )
+    evidence = "| Tensile strength (MPa) | 900 | 900 | 700 | 600 |"
+    fact = _property(
+        sample="A", name="Tensile strength", value="900", condition="", evidence=evidence
+    )
+    fact.data["data_source"] = "table"
+    fact.data["test_specimen_raw"] = "HT"
+
+    result = promote_axis_facts(
+        [_anchor("A", material="A"), _anchor("B", material="B")],
+        [fact],
+        source_text=source,
+    )
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_table_owner_condition_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_tensile_table_condition_column_quarantines_value_from_wrong_column():
+    source = (
+        "| Properties | 0 s Delay | 120 s Delay | 300 s Delay |\n"
+        "| --- | --- | --- | --- |\n"
+        "| Avg. YS (MPa) | 817 ± 8.7 | 859.7 ± 9.2 | 825.3 ± 3.1 |"
+    )
+    evidence = "| Avg. YS (MPa) | 817 ± 8.7 | 859.7 ± 9.2 | 825.3 ± 3.1 |"
+    fact = _property(
+        sample="Ti64",
+        value="825.3 ± 3.1",
+        condition="0 s Delay",
+        evidence=evidence,
+    )
+    anchors = [
+        _anchor("Ti64", material="Ti64"),
+        _anchor("0 s Delay", material="Ti64", state="0 s Delay"),
+        _anchor("120 s Delay", material="Ti64", state="120 s Delay"),
+        _anchor("300 s Delay", material="Ti64", state="300 s Delay"),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=source)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_table_owner_condition_ambiguous_quarantined"
+    )
+    assert issue.actual["reason"] == "value_bound_to_other_condition_column"
+    assert issue.actual["condition_binding"]["condition_columns"] == [1]
+
+
+def test_tensile_table_condition_match_does_not_confuse_zero_and_three_hundred():
+    source = (
+        "| Properties | 0 s Delay | 300 s Delay |\n"
+        "| --- | --- | --- |\n"
+        "| Avg. YS (MPa) | 817 ± 8.7 | 825.3 ± 3.1 |"
+    )
+    evidence = "| Avg. YS (MPa) | 817 ± 8.7 | 825.3 ± 3.1 |"
+    fact = _property(
+        sample="Ti64",
+        value="825.3 ± 3.1",
+        condition="0 s Delay",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("Ti64", material="Ti64")], [fact], source_text=source
+    )
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_table_owner_condition_ambiguous_quarantined"
+        and issue.actual["reason"] == "value_bound_to_other_condition_column"
+        for issue in result.issues
+    )
+
+
 def test_tensile_feedstock_condition_is_isolated_but_value_survives():
     evidence = (
         "A1 had a yield strength of 900 MPa; gas-atomized powder was used as feedstock."
@@ -4339,6 +9121,280 @@ def test_tensile_source_gate_does_not_touch_composition():
     assert not any("tensile" in issue.code for issue in result.issues)
 
 
+def test_external_composition_subject_is_quarantined_without_losing_current_value():
+    source = (
+        "Pyczak et al. [34] reported that in the Ni-based alloys with "
+        "10–30 vol.% Cr, Cr2O3 was observed as external scales, which are "
+        "both expected to form in our sintered parts with 21.2 wt.% of Cr [34]."
+    )
+    external = _composition(
+        sample="alloy 625 [sintered]",
+        component="Cr",
+        value="10–30",
+        unit="vol.%",
+        evidence="in the Ni-based alloys with 10–30 vol.% Cr",
+    )
+    external.data.update(
+        {
+            "material_state": "sintered",
+            "basis": "vol%",
+            "note": "range reported in literature for Ni-based alloys",
+        }
+    )
+    external.data["components"][0]["value_kind"] = "range"
+    current = _composition(
+        sample="alloy 625 [sintered]",
+        component="Cr",
+        value="21.2",
+        unit="wt.%",
+        evidence="our sintered parts with 21.2 wt.% of Cr",
+    )
+    current.data.update({"material_state": "sintered", "basis": "wt%"})
+    current.data["components"][0]["value_kind"] = "scalar"
+
+    result = promote_axis_facts(
+        [
+            _anchor(
+                "alloy 625 [sintered]",
+                material="alloy 625",
+                state="sintered",
+            )
+        ],
+        [external, current],
+        source_text=source,
+    )
+
+    assert result.accepted == (current,)
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_external_composition_subject_quarantined"
+    )
+    assert issue.actual["before"] == external.model_dump()
+    assert issue.actual["after"] is None
+    assert issue.actual["removed_component"] == external.data["components"][0]
+    assert issue.actual["decision_class"] == "attributed_literature_chemistry"
+    assert "Pyczak et al." in issue.actual["matched_source_sentence"]
+    assert issue.actual["value_local_proposition"] == external.source_evidence[0]
+    assert issue.actual["current_source_guard"] is False
+    assert issue.actual["owner_invented"] is False
+
+
+def test_general_solid_solubility_limits_are_not_current_composition():
+    evidence = (
+        "the transition metal elements have very low solid solubility in Al: "
+        "Ti < 0.05 at%, Fe < 0.04 at%, Co < 0.05 at%, Ni < 0.04 at%."
+    )
+    source = "In general, " + evidence
+    fact = _composition(
+        sample="Al92Ti2Fe2Co2Ni2",
+        component="Ti",
+        value="<0.05",
+        unit="at%",
+        evidence=evidence,
+    )
+    fact.data.update(
+        {
+            "material_state": "as-printed",
+            "basis": "at%",
+            "note": "equilibrium solid solubility of transition metals in Al",
+        }
+    )
+    fact.data["components"] = [
+        {
+            "name_raw": name,
+            "value_kind": "inequality",
+            "value_raw": value,
+            "unit_raw": "at%",
+            "data_nature": "reported",
+        }
+        for name, value in (
+            ("Ti", "<0.05"),
+            ("Fe", "<0.04"),
+            ("Co", "<0.05"),
+            ("Ni", "<0.04"),
+        )
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("Al92Ti2Fe2Co2Ni2", state="as-printed")],
+        [fact],
+        source_text=source,
+    )
+
+    assert result.accepted == ()
+    issues = [
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_external_composition_subject_quarantined"
+    ]
+    assert [issue.actual["removed_component"]["name_raw"] for issue in issues] == [
+        "Ti",
+        "Fe",
+        "Co",
+        "Ni",
+    ]
+    assert {issue.actual["decision_class"] for issue in issues} == {
+        "general_reference_constraint"
+    }
+    assert all(issue.actual["after"] is None for issue in issues)
+
+
+def test_measured_apt_matrix_composition_survives_reference_constraint_note():
+    evidence = (
+        "APT measured 0.20 at% Ti, 0.30 at% Fe, 0.03 at% Co and 0.09 at% Ni "
+        "in the A1 matrix."
+    )
+    fact = _composition(
+        sample="A1",
+        component="Ti",
+        value="0.20",
+        unit="at%",
+        evidence=evidence,
+    )
+    fact.data["note"] = "measured values compared with equilibrium solid solubility"
+    fact.data["components"][0]["value_kind"] = "scalar"
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_external_composition_subject_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_external_composition_gate_filters_only_disproven_component():
+    external_evidence = "Smith et al. reported 10–30 vol.% Cr for reference alloys."
+    current_evidence = "A1 contained 58 wt.% Ni."
+    source = external_evidence + " " + current_evidence
+    fact = _composition(
+        sample="A1",
+        component="Cr",
+        value="10–30",
+        unit="vol.%",
+        evidence=external_evidence,
+    )
+    fact.source_evidence.append(current_evidence)
+    fact.data.update(
+        {
+            "basis": "wt%",
+            "source_evidence": [external_evidence, current_evidence],
+            "note": "Cr range reported in literature; Ni measured in current sample",
+        }
+    )
+    fact.data["components"] = [
+        {
+            "name_raw": "Cr",
+            "value_kind": "range",
+            "value_raw": "10–30",
+            "unit_raw": "vol.%",
+            "data_nature": "reported",
+        },
+        {
+            "name_raw": "Ni",
+            "value_kind": "scalar",
+            "value_raw": "58",
+            "unit_raw": "wt.%",
+            "data_nature": "reported",
+        },
+    ]
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=source)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["components"] == [fact.data["components"][1]]
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_external_composition_subject_quarantined"
+    )
+    assert issue.actual["before"] == fact.model_dump()
+    assert issue.actual["after"] == result.accepted[0].model_dump()
+    assert issue.actual["removed_component"] == fact.data["components"][0]
+
+
+def test_current_composition_with_citation_and_general_language_survives():
+    evidence = "In general, A1 contained 47.86 at.% Al in the measured region [34]."
+    fact = _composition(
+        sample="A1",
+        component="Al",
+        value="47.86",
+        unit="at.%",
+        evidence=evidence,
+    )
+    fact.data["note"] = "value discussed with literature reference"
+    fact.data["components"][0]["value_kind"] = "scalar"
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_external_composition_subject_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_external_composition_gate_is_noop_for_table_reference_and_ambiguity():
+    table_evidence = "| A1 | Cr | 10–30 | vol.% | [34] |"
+    table_fact = _composition(
+        sample="A1",
+        component="Cr",
+        value="10–30",
+        unit="vol.%",
+        evidence=table_evidence,
+    )
+    table_fact.data["note"] = "literature range"
+    reference_evidence = "Smith et al. reported 10–30 vol.% Cr."
+    reference_fact = _composition(
+        sample="Smith alloy [reference]",
+        component="Cr",
+        value="10–30",
+        unit="vol.%",
+        evidence=reference_evidence,
+    )
+    reference_fact.data["note"] = "literature range"
+    ambiguous_fact = _composition(
+        sample="A2",
+        component="Cr",
+        value="10–30",
+        unit="vol.%",
+        evidence=reference_evidence,
+    )
+    ambiguous_fact.data["note"] = "literature range"
+    repeated_source = reference_evidence + " " + reference_evidence
+
+    table_result = promote_axis_facts(
+        [_anchor("A1")], [table_fact], source_text=table_evidence
+    )
+    reference_result = promote_axis_facts(
+        [_anchor("Smith alloy [reference]", role="Reference")],
+        [reference_fact],
+        source_text=reference_evidence,
+    )
+    ambiguous_result = promote_axis_facts(
+        [_anchor("A2")], [ambiguous_fact], source_text=repeated_source
+    )
+    missing_source_result = promote_axis_facts(
+        [_anchor("A2")], [ambiguous_fact], source_text=""
+    )
+
+    assert table_fact in table_result.accepted
+    assert reference_fact in reference_result.accepted
+    assert ambiguous_fact in ambiguous_result.accepted
+    assert ambiguous_fact in missing_source_result.accepted
+    assert not any(
+        issue.code == "promotion_external_composition_subject_quarantined"
+        for result in (
+            table_result,
+            reference_result,
+            ambiguous_result,
+            missing_source_result,
+        )
+        for issue in result.issues
+    )
+
+
 def test_cited_previous_work_projection_is_quarantined_without_owner_literal():
     evidence = "Previous work [26] reported fine gamma-prime precipitates in the alloy."
     fact = _structure(sample="A1", evidence=evidence)
@@ -4369,3 +9425,2459 @@ def test_cited_sentence_with_literal_current_owner_is_preserved():
         issue.code == "promotion_external_source_projection_quarantined"
         for issue in result.issues
     )
+
+
+def test_author_year_citation_is_quarantined_from_current_target():
+    evidence = (
+        "The gamma-prime precipitates in AM-fabricated Inconel 718 are "
+        "50~120 μm (Hosseini and Popovich, 2019)."
+    )
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "grain size",
+                "value_kind": "range",
+                "value_raw": "50~120",
+                "unit_raw": "μm",
+                "data_nature": "reported",
+                "source_evidence": [evidence],
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_external_source_projection_quarantined"
+    )
+    assert "2019" in issue.actual["external_cue"]
+
+
+def test_cited_tensile_value_without_owner_literal_is_quarantined():
+    evidence = "Cast alloy 625 [11] had a UTS of 710 MPa with 48% elongation."
+    fact = _property(
+        sample="alloy 625 powder",
+        name="ultimate tensile strength",
+        value="710",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+
+    # No inventory anchor is available for the generic owner, so the older
+    # graph-resolved external-source gate cannot identify this as a projection.
+    result = promote_axis_facts([], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_unbound_external_tensile_quarantined"
+    )
+    assert issue.actual["removed"] == fact.model_dump()
+
+
+def test_cited_tensile_subject_does_not_rescue_current_owner_substring():
+    evidence = "cast alloy 625 [11] had a UTS of 710 MPa with 48% elongation"
+    facts = [
+        _property(
+            sample="cast alloy 625",
+            name="UTS",
+            value="710",
+            unit="MPa",
+            condition="",
+            evidence=evidence,
+            candidate_id="cited-uts",
+            evidence_unit_id="cited-uts",
+        ),
+        _property(
+            sample="cast alloy 625",
+            name="elongation",
+            value="48",
+            unit="%",
+            condition="",
+            evidence=evidence,
+            candidate_id="cited-elongation",
+            evidence_unit_id="cited-elongation",
+        ),
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("alloy 625", material="alloy 625")],
+        facts,
+        source_text=evidence,
+    )
+
+    assert result.accepted == ()
+    issues = [
+        issue
+        for issue in result.issues
+        if issue.code
+        == "promotion_external_current_tensile_projection_quarantined"
+    ]
+    assert [issue.actual["removed"]["data"]["value_raw"] for issue in issues] == [
+        "710",
+        "48",
+    ]
+    assert all(
+        issue.actual["removed"]["sample_id_raw"] == "alloy 625"
+        for issue in issues
+    )
+    assert all(
+        issue.actual["reason"]
+        == "external_comparator_subject_on_current_owner"
+        for issue in issues
+    )
+    assert all(issue.actual["matched_source_sentence"] == evidence for issue in issues)
+    assert all(issue.actual["value_local_proposition"] == evidence for issue in issues)
+    assert all(
+        issue.actual["external_subject"] == "cast alloy 625 [11]"
+        for issue in issues
+    )
+    assert all(issue.actual["subject_cue"] == "[11]" for issue in issues)
+    assert all(
+        issue.actual["embedded_owner_literal"] == "alloy 625"
+        for issue in issues
+    )
+    assert all(issue.actual["owner_invented"] is False for issue in issues)
+
+
+def test_numeric_tensile_value_owned_by_uncited_comparator_is_quarantined():
+    evidence = "comparable to those of cast TNM alloys (700–800 MPa)"
+    owner = "44–4 alloy rods [fabricated by the EBM]"
+    fact = _property(
+        sample="cast TNM alloys",
+        name="ultimate tensile strength",
+        value="700–800 MPa",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [
+            _anchor(
+                owner,
+                material="44–4 alloy",
+                state="fabricated by the EBM",
+            )
+        ],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_unbound_external_tensile_quarantined"
+    )
+    assert issue.actual["removed"] == fact.model_dump()
+    assert issue.actual["reason"] == "external_comparator_without_reference_owner"
+    assert issue.actual["matched_source_sentence"] == evidence
+    assert issue.actual["value_local_proposition"] == evidence
+    assert issue.actual["external_subject"] == "cast tnm alloys"
+    assert issue.actual["subject_cue"] == "comparable to those of"
+    assert issue.actual["embedded_owner_literal"] is None
+    assert issue.actual["owner_invented"] is False
+
+
+def test_higher_than_comparator_value_has_clean_audit_subject():
+    evidence = "higher than those of cast 48–2–2 (~450 MPa)"
+    fact = _property(
+        sample="cast 48–2–2 alloys",
+        name="ultimate tensile strength",
+        value="~450",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("44–4 alloy rods", material="44–4 alloy")],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert result.accepted == ()
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "promotion_unbound_external_tensile_quarantined"
+    )
+    assert issue.actual["reason"] == "external_comparator_without_reference_owner"
+    assert issue.actual["external_subject"] == "cast 48 2 2"
+    assert issue.actual["subject_cue"] == "higher than"
+
+
+def test_direct_author_attributed_tensile_subject_overrides_collective_escape():
+    evidence = (
+        "Yan et al. presented that the yield stress of high-Nb-containing "
+        "TiAl alloys with the fully lamellar structure is approximately "
+        "900 MPa at 1023 K"
+    )
+    fact = _property(
+        sample="44–4 alloy rods",
+        name="yield stress",
+        value="approximately 900",
+        unit="MPa",
+        condition="1023 K",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("44–4 alloy rods", material="44–4 alloy")],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert result.accepted == ()
+    issue = next(
+        row
+        for row in result.issues
+        if row.code
+        == "promotion_external_current_tensile_projection_quarantined"
+    )
+    assert issue.actual["removed"] == fact.model_dump()
+    assert issue.actual["reason"] == "external_comparator_subject_on_current_owner"
+    assert issue.actual["matched_source_sentence"] == evidence
+    assert issue.actual["value_local_proposition"] == evidence
+    assert issue.actual["external_subject"] == (
+        "high-nb-containing tial alloys with the fully lamellar structure"
+    )
+    assert issue.actual["subject_cue"] == "yan et al. presented"
+    assert issue.actual["embedded_owner_literal"] is None
+    assert issue.actual["owner_invented"] is False
+
+
+def test_current_collective_tensile_result_without_author_attribution_survives():
+    evidence = (
+        "The 44–4 alloy rods exhibit an elongation of approximately 40% "
+        "at 1023 K."
+    )
+    fact = _property(
+        sample="44–4 alloy rods",
+        name="elongation",
+        value="approximately 40",
+        unit="%",
+        condition="1023 K",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("44–4 alloy rods", material="44–4 alloy")],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert result.accepted == (fact,)
+    assert not any(
+        row.code
+        == "promotion_external_current_tensile_projection_quarantined"
+        for row in result.issues
+    )
+
+
+def test_exact_tensile_value_quarantines_same_owner_nested_threshold():
+    threshold_evidence = "exceed 700 MPa (773 MPa for R1)"
+    exact_evidence = "773 MPa for R1"
+    source_text = (
+        "The ultimate tensile strengths of these rods at RT exceed 700 MPa "
+        "(773 MPa for R1) and are higher than those of cast alloys."
+    )
+    threshold = _property(
+        sample="R1",
+        name="ultimate tensile strength",
+        value=">700",
+        unit="MPa",
+        condition="RT",
+        evidence=threshold_evidence,
+        candidate_id="threshold",
+        evidence_unit_id="threshold",
+    )
+    exact = _property(
+        sample="R1",
+        name="ultimate tensile strength",
+        value="773 MPa",
+        unit="MPa",
+        condition="RT",
+        evidence=exact_evidence,
+        confidence=0.95,
+        candidate_id="exact",
+        evidence_unit_id="exact",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("R1", material="44–4 alloy")],
+        [threshold, exact],
+        source_text=source_text,
+    )
+
+    assert [row.data["value_raw"] for row in result.accepted] == ["773 MPa"]
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "promotion_tensile_dominated_threshold_quarantined"
+    )
+    assert issue.actual["removed"]["data"]["value_raw"] == ">700"
+    assert issue.actual["survivor"]["data"]["value_raw"] == "773 MPa"
+    assert issue.actual["owner"] == "R1"
+    assert issue.actual["tensile_family"] == "uts"
+    assert issue.actual["operator"] == ">"
+    assert issue.actual["bound"] == 700.0
+    assert issue.actual["scalar"] == 773.0
+    assert issue.actual["relation_satisfied"] is True
+    assert issue.actual["bounded_source_proposition"] == threshold_evidence
+    assert issue.actual["nested_owner_value_phrase"] == exact_evidence
+    assert issue.actual["unique_survivor"] is True
+    assert issue.actual["owner_invented"] is False
+
+
+def test_tensile_threshold_relation_operators_are_respected():
+    cases = (
+        (">700", "773", True),
+        (">=773", "773", True),
+        ("<800", "773", True),
+        ("<=773", "773", True),
+        (">773", "773", False),
+        ("<773", "773", False),
+    )
+    for index, (bound, scalar, dominated) in enumerate(cases):
+        threshold_evidence = f"R1 had UTS {bound} MPa ({scalar} MPa for R1)"
+        exact_evidence = f"{scalar} MPa for R1"
+        source_text = (
+            f"The ultimate tensile strength of R1 at RT was {bound} MPa "
+            f"({scalar} MPa for R1) in the reported result."
+        )
+        threshold = _property(
+            sample="R1",
+            name="UTS",
+            value=bound,
+            unit="MPa",
+            condition="RT",
+            evidence=threshold_evidence,
+            candidate_id=f"threshold-{index}",
+            evidence_unit_id=f"threshold-{index}",
+        )
+        exact = _property(
+            sample="R1",
+            name="UTS",
+            value=scalar,
+            unit="MPa",
+            condition="RT",
+            evidence=exact_evidence,
+            candidate_id=f"exact-{index}",
+            evidence_unit_id=f"exact-{index}",
+        )
+
+        result = promote_axis_facts(
+            [_anchor("R1", material="44–4 alloy")],
+            [threshold, exact],
+            source_text=source_text,
+        )
+
+        values = [row.data["value_raw"] for row in result.accepted]
+        assert (bound not in values) is dominated
+
+
+def test_lone_or_cross_owner_tensile_threshold_is_preserved():
+    threshold_evidence = "The 44–4 alloy rods exceed 700 MPa"
+    threshold = _property(
+        sample="44–4 alloy rods",
+        name="ultimate tensile strength",
+        value=">700",
+        unit="MPa",
+        condition="RT",
+        evidence=threshold_evidence,
+        candidate_id="group-threshold",
+        evidence_unit_id="group-threshold",
+    )
+    exact = _property(
+        sample="R1",
+        name="ultimate tensile strength",
+        value="773",
+        unit="MPa",
+        condition="RT",
+        evidence="773 MPa for R1",
+        candidate_id="r1-exact",
+        evidence_unit_id="r1-exact",
+    )
+
+    lone = promote_axis_facts(
+        [_anchor("44–4 alloy rods", material="44–4 alloy")],
+        [threshold],
+        source_text=threshold_evidence,
+    )
+    cross_owner = promote_axis_facts(
+        [
+            _anchor("44–4 alloy rods", material="44–4 alloy"),
+            _anchor("R1", material="44–4 alloy"),
+        ],
+        [threshold, exact],
+        source_text=f"{threshold_evidence}. 773 MPa for R1.",
+    )
+
+    assert any(row.data["value_raw"] == ">700" for row in lone.accepted)
+    assert {row.data["value_raw"] for row in cross_owner.accepted} == {
+        ">700",
+        "773",
+    }
+    assert not any(
+        row.code == "promotion_tensile_dominated_threshold_quarantined"
+        for row in (*lone.issues, *cross_owner.issues)
+    )
+
+
+def test_condition_or_unit_mismatch_protects_tensile_threshold():
+    threshold_evidence = "R1 exceeded 700 MPa (773 MPa for R1) at RT"
+    threshold = _property(
+        sample="R1",
+        name="ultimate tensile strength",
+        value=">700",
+        unit="MPa",
+        condition="RT",
+        evidence=threshold_evidence,
+        candidate_id="threshold",
+        evidence_unit_id="threshold",
+    )
+    condition_mismatch = _property(
+        sample="R1",
+        name="ultimate tensile strength",
+        value="773",
+        unit="MPa",
+        condition="1023 K",
+        evidence="773 MPa for R1 at 1023 K",
+        candidate_id="condition-mismatch",
+        evidence_unit_id="condition-mismatch",
+    )
+    unit_mismatch = _property(
+        sample="R1",
+        name="ultimate tensile strength",
+        value="773",
+        unit="GPa",
+        condition="RT",
+        evidence="773 GPa for R1 at RT",
+        candidate_id="unit-mismatch",
+        evidence_unit_id="unit-mismatch",
+    )
+
+    for exact in (condition_mismatch, unit_mismatch):
+        result = promote_axis_facts(
+            [_anchor("R1", material="44–4 alloy")],
+            [threshold, exact],
+            source_text="\n".join(
+                [threshold_evidence, *exact.source_evidence]
+            ),
+        )
+        assert any(row.data["value_raw"] == ">700" for row in result.accepted)
+
+
+def test_same_owner_independent_tensile_assertions_are_not_collapsed():
+    threshold = _property(
+        sample="R1",
+        name="ultimate tensile strength",
+        value=">700",
+        unit="MPa",
+        condition="RT",
+        evidence="R1 exceeded 700 MPa at RT",
+        candidate_id="threshold",
+        evidence_unit_id="threshold",
+    )
+    exact = _property(
+        sample="R1",
+        name="ultimate tensile strength",
+        value="773",
+        unit="MPa",
+        condition="RT",
+        evidence="A separate R1 test reached 773 MPa at RT",
+        candidate_id="separate-exact",
+        evidence_unit_id="separate-exact",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("R1", material="44–4 alloy")],
+        [threshold, exact],
+        source_text=(
+            "R1 exceeded 700 MPa at RT. "
+            "A separate R1 test reached 773 MPa at RT."
+        ),
+    )
+
+    assert not any(
+        row.code == "promotion_tensile_dominated_threshold_quarantined"
+        for row in result.issues
+    )
+
+
+def test_multiple_exact_tensile_survivors_leave_threshold_unchanged():
+    threshold_evidence = (
+        "R1 exceeded 700 MPa (773 MPa for R1 and 758 MPa for R1)"
+    )
+    threshold = _property(
+        sample="R1",
+        name="ultimate tensile strength",
+        value=">700",
+        unit="MPa",
+        condition="RT",
+        evidence=threshold_evidence,
+        candidate_id="threshold",
+        evidence_unit_id="threshold",
+    )
+    exact_rows = [
+        _property(
+            sample="R1",
+            name="ultimate tensile strength",
+            value=value,
+            unit="MPa",
+            condition="RT",
+            evidence=f"{value} MPa for R1",
+            candidate_id=f"exact-{index}",
+            evidence_unit_id=f"exact-{index}",
+        )
+        for index, value in enumerate(("773", "758"))
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("R1", material="44–4 alloy")],
+        [threshold, *exact_rows],
+        source_text=threshold_evidence,
+    )
+
+    assert not any(
+        row.code == "promotion_tensile_dominated_threshold_quarantined"
+        for row in result.issues
+    )
+
+
+def test_approximate_range_or_subtype_mismatch_does_not_dominate_threshold():
+    cases = (
+        ("ultimate tensile strength", "~773"),
+        ("ultimate tensile strength", "770–776"),
+        ("uniform elongation", "12"),
+    )
+    for index, (exact_name, exact_value) in enumerate(cases):
+        unit = "%" if "elongation" in exact_name else "MPa"
+        threshold_name = (
+            "total elongation" if "elongation" in exact_name else exact_name
+        )
+        threshold_value = ">10" if unit == "%" else ">700"
+        threshold_evidence = (
+            f"R1 had {threshold_name} {threshold_value} {unit} "
+            f"({exact_value} {unit} for R1)"
+        )
+        threshold = _property(
+            sample="R1",
+            name=threshold_name,
+            value=threshold_value,
+            unit=unit,
+            condition="RT",
+            evidence=threshold_evidence,
+            candidate_id=f"threshold-{index}",
+            evidence_unit_id=f"threshold-{index}",
+        )
+        exact = _property(
+            sample="R1",
+            name=exact_name,
+            value=exact_value,
+            unit=unit,
+            condition="RT",
+            evidence=f"{exact_value} {unit} for R1",
+            candidate_id=f"exact-{index}",
+            evidence_unit_id=f"exact-{index}",
+        )
+
+        result = promote_axis_facts(
+            [_anchor("R1", material="44–4 alloy")],
+            [threshold, exact],
+            source_text=(
+                f"The reported result for R1 at RT was {threshold_evidence}."
+            ),
+        )
+
+        assert not any(
+            row.code == "promotion_tensile_dominated_threshold_quarantined"
+            for row in result.issues
+        )
+
+
+def test_tensile_threshold_dominance_is_input_order_deterministic():
+    threshold_evidence = "exceed 700 MPa (773 MPa for R1)"
+    source_text = (
+        "The ultimate tensile strengths of these rods at RT exceed 700 MPa "
+        "(773 MPa for R1)."
+    )
+    threshold = _property(
+        sample="R1",
+        name="ultimate tensile strength",
+        value=">700",
+        unit="MPa",
+        condition="RT",
+        evidence=threshold_evidence,
+        candidate_id="threshold",
+        evidence_unit_id="threshold",
+    )
+    exact = _property(
+        sample="R1",
+        name="ultimate tensile strength",
+        value="773",
+        unit="MPa",
+        condition="RT",
+        evidence="773 MPa for R1",
+        candidate_id="exact",
+        evidence_unit_id="exact",
+    )
+
+    signatures = []
+    for facts in ([threshold, exact], [exact, threshold]):
+        result = promote_axis_facts(
+            [_anchor("R1", material="44–4 alloy")],
+            facts,
+            source_text=source_text,
+        )
+        issue = next(
+            row
+            for row in result.issues
+            if row.code == "promotion_tensile_dominated_threshold_quarantined"
+        )
+        signatures.append(
+            (
+                tuple(row.data["value_raw"] for row in result.accepted),
+                issue.actual["removed"]["data"]["value_raw"],
+                issue.actual["survivor"]["data"]["value_raw"],
+                issue.actual["bounded_source_proposition"],
+            )
+        )
+
+    assert signatures[0] == signatures[1]
+
+
+def test_identical_unresolved_owner_envelope_can_prove_threshold_dominance():
+    threshold_evidence = "exceed 700 MPa (773 MPa for R1)"
+    threshold = _property(
+        sample="R1",
+        name="UTS",
+        value=">700",
+        unit="MPa",
+        condition="RT",
+        evidence=threshold_evidence,
+        candidate_id="threshold",
+        evidence_unit_id="threshold",
+    )
+    exact = _property(
+        sample="R1",
+        name="UTS",
+        value="773",
+        unit="MPa",
+        condition="RT",
+        evidence="773 MPa for R1",
+        candidate_id="exact",
+        evidence_unit_id="exact",
+    )
+
+    result = promote_axis_facts(
+        [
+            _anchor("R1", material="44–4 alloy", state="state A"),
+            _anchor("R1", material="44–4 alloy", state="state B"),
+        ],
+        [threshold, exact],
+        source_text=(
+            "The UTS of R1 at RT exceeds 700 MPa (773 MPa for R1)."
+        ),
+    )
+
+    assert [row.data["value_raw"] for row in result.accepted] == ["773"]
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "promotion_tensile_dominated_threshold_quarantined"
+    )
+    assert issue.actual["owner_id"] is None
+    assert issue.actual["owner_coordinate_kind"] == (
+        "identical_candidate_envelope"
+    )
+    assert len(issue.actual["owner_candidate_ids"]) == 2
+    assert issue.actual["owner_role"] == "Target"
+    assert issue.actual["owner_data_nature"] == "Experimental"
+
+
+def test_generic_paired_tensile_summary_merges_into_unique_richer_table_specimen():
+    summary = (
+        "Ti-6Al-4V alloys with ultimate tensile strength and total elongation "
+        "of 1190 MPa and 16.5%, respectively, are produced."
+    )
+    table_row = "| 3-2 | 2 | 43.85 | 1190 ± 12.4 | 16.5 ± 1.3 |"
+    generic_uts = _property(
+        sample="Ti-6Al-4V",
+        name="ultimate tensile strength",
+        value="1190",
+        unit="MPa",
+        condition="",
+        evidence=summary,
+        candidate_id="generic-uts",
+        evidence_unit_id="generic-uts",
+    )
+    generic_te = _property(
+        sample="Ti-6Al-4V",
+        name="total elongation",
+        value="16.5",
+        unit="%",
+        condition="",
+        evidence=summary,
+        candidate_id="generic-te",
+        evidence_unit_id="generic-te",
+    )
+    table_uts = _property(
+        sample="3-2",
+        name="ultimate tensile strength",
+        value="1190 ± 12.4",
+        unit="MPa",
+        condition="",
+        evidence=table_row,
+        candidate_id="table-uts",
+        evidence_unit_id="table-uts",
+    )
+    table_uts.data["data_source"] = "table"
+    table_te = _property(
+        sample="3-2",
+        name="total elongation",
+        value="16.5 ± 1.3",
+        unit="%",
+        condition="",
+        evidence=table_row,
+        candidate_id="table-te",
+        evidence_unit_id="table-te",
+    )
+    table_te.data["data_source"] = "table"
+
+    result = promote_axis_facts(
+        [
+            _anchor("Ti-6Al-4V", material="Ti-6Al-4V alloy"),
+            _anchor("3-2", material="Ti-6Al-4V"),
+        ],
+        [generic_uts, generic_te, table_uts, table_te],
+        source_text=f"{summary}\n\n{table_row}",
+    )
+
+    assert {
+        (row.sample_id_raw, row.data["value_raw"])
+        for row in result.accepted
+    } == {
+        ("3-2", "1190 ± 12.4"),
+        ("3-2", "16.5 ± 1.3"),
+    }
+    issues = [
+        row
+        for row in result.issues
+        if row.code == "core_tensile_generic_summary_shadow_quarantined"
+    ]
+    assert len(issues) == 2
+    for issue in issues:
+        assert issue.actual["generic_summary"] is True
+        assert issue.actual["material_lineage"] == "ti 6al 4v"
+        assert issue.actual["unique_survivor"] is True
+        assert issue.actual["owner_invented"] is False
+        assert issue.actual["removed"]["sample_id_raw"] == "Ti-6Al-4V"
+        assert issue.actual["survivor_before"]["sample_id_raw"] == "3-2"
+        assert issue.actual["survivor_after"]["sample_id_raw"] == "3-2"
+        merged_evidence = issue.actual["survivor_after"]["source_evidence"]
+        assert merged_evidence[0] == table_row
+        assert summary in merged_evidence
+
+
+def test_generic_summary_requires_one_exact_source_bound_state_anchor():
+    summary = (
+        "Ti alloy samples with ultimate tensile strength and total elongation "
+        "of 1190 MPa and 16.5%, respectively, were produced."
+    )
+    generic = _property(
+        sample="Ti alloy",
+        name="ultimate tensile strength",
+        value="1190",
+        unit="MPa",
+        condition="",
+        evidence=summary,
+        candidate_id="generic",
+        evidence_unit_id="generic",
+    )
+    table_row = "| 3-2 | 1190 ± 12.4 MPa |"
+    survivor = _property(
+        sample="3-2",
+        name="ultimate tensile strength",
+        value="1190 ± 12.4",
+        unit="MPa",
+        condition="",
+        evidence=table_row,
+        candidate_id="table",
+        evidence_unit_id="table",
+    )
+    survivor.data["data_source"] = "table"
+    source_bound = _anchor(
+        "Ti alloy",
+        material="Ti alloy",
+        state="produced with selected parameters",
+        evidence=summary,
+    )
+    competing = _anchor(
+        "Ti alloy",
+        material="Ti alloy",
+        state="as-built",
+        evidence="The as-built Ti alloy samples contained martensite.",
+    ).model_copy(update={"data_nature": "Literature_Experimental"})
+
+    unique = promote_axis_facts(
+        [source_bound, competing, _anchor("3-2", material="Ti alloy")],
+        [generic, survivor],
+        source_text=f"{summary}\n\n{table_row}",
+    )
+
+    issue = next(
+        row
+        for row in unique.issues
+        if row.code == "core_tensile_generic_summary_shadow_quarantined"
+    )
+    assert len(issue.actual["generic_owner_ids"]) == 1
+    assert issue.actual["owner_invented"] is False
+
+    duplicate_source_anchors = [
+        _anchor(
+            "Ti alloy",
+            material="Ti alloy",
+            state=state,
+            evidence=summary,
+        )
+        for state in ("state A", "state B")
+    ]
+    ambiguous = promote_axis_facts(
+        [*duplicate_source_anchors, _anchor("3-2", material="Ti alloy")],
+        [generic, survivor],
+        source_text=f"{summary}\n\n{table_row}",
+    )
+
+    assert any(
+        row.sample_id_raw == "Ti alloy"
+        and row.data.get("value_raw") == "1190"
+        for row in ambiguous.accepted
+    )
+    assert not any(
+        row.code == "core_tensile_generic_summary_shadow_quarantined"
+        for row in ambiguous.issues
+    )
+
+
+def test_generic_tensile_summary_requires_one_survivor_and_not_an_average():
+    summary = (
+        "Ti alloy samples with ultimate tensile strength and total elongation "
+        "of 1190 MPa and 16.5%, respectively, were produced."
+    )
+    generic = _property(
+        sample="Ti alloy",
+        name="ultimate tensile strength",
+        value="1190",
+        unit="MPa",
+        condition="",
+        evidence=summary,
+        candidate_id="generic",
+        evidence_unit_id="generic",
+    )
+    survivors = []
+    for sample in ("3-2", "4-1"):
+        row = f"| {sample} | 1190 ± 12.4 MPa |"
+        survivor = _property(
+            sample=sample,
+            name="ultimate tensile strength",
+            value="1190 ± 12.4",
+            unit="MPa",
+            condition="",
+            evidence=row,
+            candidate_id=f"table-{sample}",
+            evidence_unit_id=f"table-{sample}",
+        )
+        survivor.data["data_source"] = "table"
+        survivors.append(survivor)
+
+    ambiguous = promote_axis_facts(
+        [
+            _anchor("Ti alloy", material="Ti alloy"),
+            _anchor("3-2", material="Ti alloy"),
+            _anchor("4-1", material="Ti alloy"),
+        ],
+        [generic, *survivors],
+        source_text="\n\n".join(
+            [summary, *(row.source_evidence[0] for row in survivors)]
+        ),
+    )
+
+    average_evidence = (
+        "The Ti alloy samples had an average ultimate tensile strength of "
+        "1190 MPa."
+    )
+    average = _property(
+        sample="Ti alloy",
+        name="ultimate tensile strength",
+        value="1190",
+        unit="MPa",
+        condition="",
+        evidence=average_evidence,
+        candidate_id="average",
+        evidence_unit_id="average",
+    )
+    independent_average = promote_axis_facts(
+        [
+            _anchor("Ti alloy", material="Ti alloy"),
+            _anchor("3-2", material="Ti alloy"),
+        ],
+        [average, survivors[0]],
+        source_text=f"{average_evidence}\n\n{survivors[0].source_evidence[0]}",
+    )
+
+    assert generic in ambiguous.accepted
+    assert average in independent_average.accepted
+    assert not any(
+        row.code == "core_tensile_generic_summary_shadow_quarantined"
+        for row in (*ambiguous.issues, *independent_average.issues)
+    )
+
+
+def test_generic_tensile_summary_preserves_condition_or_lineage_mismatch():
+    summary = (
+        "Ti alloy samples with ultimate tensile strength and total elongation "
+        "of 1190 MPa and 16.5%, respectively, were produced."
+    )
+    generic = _property(
+        sample="Ti alloy",
+        name="ultimate tensile strength",
+        value="1190",
+        unit="MPa",
+        condition="room temperature",
+        evidence=summary,
+        candidate_id="generic",
+        evidence_unit_id="generic",
+    )
+    table_row = "| 3-2 | 1190 ± 12.4 MPa at 650 °C |"
+    survivor = _property(
+        sample="3-2",
+        name="ultimate tensile strength",
+        value="1190 ± 12.4",
+        unit="MPa",
+        condition="650 °C",
+        evidence=table_row,
+        candidate_id="table",
+        evidence_unit_id="table",
+    )
+    survivor.data["data_source"] = "table"
+
+    condition_mismatch = promote_axis_facts(
+        [
+            _anchor("Ti alloy", material="Ti alloy"),
+            _anchor("3-2", material="Ti alloy"),
+        ],
+        [generic, survivor],
+        source_text=f"{summary}\n\n{table_row}",
+    )
+    lineage_mismatch = promote_axis_facts(
+        [
+            _anchor("Ti alloy", material="Ti alloy"),
+            _anchor("3-2", material="Ni alloy"),
+        ],
+        [generic, survivor.model_copy(deep=True, update={"data": {
+            **survivor.data,
+            "test_condition_raw": "room temperature",
+        }})],
+        source_text=f"{summary}\n\n{table_row}",
+    )
+
+    assert any(
+        row.sample_id_raw == "Ti alloy"
+        and row.data.get("value_raw") == "1190"
+        for row in condition_mismatch.accepted
+    )
+    assert any(
+        row.sample_id_raw == "Ti alloy"
+        and row.data.get("value_raw") == "1190"
+        for row in lineage_mismatch.accepted
+    )
+
+
+def test_ownerless_tensile_group_extrema_are_quarantined_with_full_audit():
+    te_evidence = (
+        "the highest TE in the alloys with a UTS of ~1060 MPa was 14%"
+    )
+    uts_evidence = (
+        "the highest UTS among alloys with ~18% of TE was 945 MPa"
+    )
+    te = _property(
+        sample="Table 1 combinations",
+        name="TE",
+        value="14%",
+        unit="%",
+        condition="",
+        evidence=te_evidence,
+        candidate_id="frontier-te",
+        evidence_unit_id="frontier-te",
+    )
+    uts = _property(
+        sample="Table 1 combinations",
+        name="UTS",
+        value="945 MPa",
+        unit="MPa",
+        condition="",
+        evidence=uts_evidence,
+        candidate_id="frontier-uts",
+        evidence_unit_id="frontier-uts",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("Table 1 combinations", material="Ti alloy")],
+        [te, uts],
+        source_text=f"{te_evidence}. {uts_evidence}.",
+    )
+
+    assert result.accepted == ()
+    issues = [
+        row
+        for row in result.issues
+        if row.code == "promotion_tensile_group_extremum_quarantined"
+    ]
+    assert len(issues) == 2
+    for issue in issues:
+        assert issue.actual["removed"]["sample_id_raw"] == (
+            "Table 1 combinations"
+        )
+        assert issue.actual["extremum_cue"] == "highest"
+        assert issue.actual["collective_scope"]
+        assert issue.actual["companion_tensile_family"]
+        assert issue.actual["named_owner_ids"] == []
+        assert issue.actual["owner_invented"] is False
+
+
+def test_group_extremum_gate_preserves_named_table_or_unconstrained_results():
+    cases = []
+    named_evidence = (
+        "Sample A had the highest UTS among the alloys with ~18% TE at 945 MPa."
+    )
+    named = _property(
+        sample="Sample A",
+        name="UTS",
+        value="945",
+        unit="MPa",
+        condition="",
+        evidence=named_evidence,
+        candidate_id="named",
+        evidence_unit_id="named",
+    )
+    cases.append(([_anchor("Sample A", material="Ti alloy")], named, named_evidence))
+
+    unconstrained_evidence = "The highest UTS among the alloys was 945 MPa."
+    unconstrained = _property(
+        sample="Ti alloys",
+        name="UTS",
+        value="945",
+        unit="MPa",
+        condition="",
+        evidence=unconstrained_evidence,
+        candidate_id="unconstrained",
+        evidence_unit_id="unconstrained",
+    )
+    cases.append(([_anchor("Ti alloys", material="Ti alloy")], unconstrained, unconstrained_evidence))
+
+    table_evidence = "| Sample | UTS maximum | TE |\n| A | 945 MPa | 18% |"
+    table = _property(
+        sample="Sample A",
+        name="UTS maximum",
+        value="945",
+        unit="MPa",
+        condition="",
+        evidence="| A | 945 MPa | 18% |",
+        candidate_id="table",
+        evidence_unit_id="table",
+    )
+    table.data["data_source"] = "table"
+    cases.append(([_anchor("Sample A", material="Ti alloy")], table, table_evidence))
+
+    for anchors, fact, source_text in cases:
+        result = promote_axis_facts(anchors, [fact], source_text=source_text)
+        assert fact in result.accepted
+        assert not any(
+            row.code == "promotion_tensile_group_extremum_quarantined"
+            for row in result.issues
+        )
+
+
+def test_new_tensile_precision_gates_are_semantically_input_order_deterministic():
+    summary = (
+        "Ti alloy samples with ultimate tensile strength and total elongation "
+        "of 1190 MPa and 16.5%, respectively, were produced."
+    )
+    table_row = "| 3-2 | 1190 ± 12.4 MPa |"
+    generic = _property(
+        sample="Ti alloy",
+        name="UTS",
+        value="1190",
+        unit="MPa",
+        condition="",
+        evidence=summary,
+        candidate_id="generic",
+        evidence_unit_id="generic",
+    )
+    survivor = _property(
+        sample="3-2",
+        name="UTS",
+        value="1190 ± 12.4",
+        unit="MPa",
+        condition="",
+        evidence=table_row,
+        candidate_id="table",
+        evidence_unit_id="table",
+    )
+    survivor.data["data_source"] = "table"
+    extremum_evidence = (
+        "the highest UTS among alloys with ~18% TE was 945 MPa"
+    )
+    extremum = _property(
+        sample="Table 1 combinations",
+        name="UTS",
+        value="945",
+        unit="MPa",
+        condition="",
+        evidence=extremum_evidence,
+        candidate_id="frontier",
+        evidence_unit_id="frontier",
+    )
+    anchors = [
+        _anchor("Ti alloy", material="Ti alloy"),
+        _anchor("3-2", material="Ti alloy"),
+        _anchor("Table 1 combinations", material="Ti alloy"),
+    ]
+    source_text = f"{summary}\n\n{extremum_evidence}\n\n{table_row}"
+
+    signatures = []
+    for facts in ([generic, survivor, extremum], [extremum, survivor, generic]):
+        result = promote_axis_facts(anchors, facts, source_text=source_text)
+        accepted = sorted(
+            (row.sample_id_raw, row.data.get("value_raw"))
+            for row in result.accepted
+        )
+        issues = sorted(
+            (
+                row.code,
+                row.actual["removed"]["sample_id_raw"],
+                row.actual["removed"]["data"]["value_raw"],
+            )
+            for row in result.issues
+            if row.code in {
+                "core_tensile_generic_summary_shadow_quarantined",
+                "promotion_tensile_group_extremum_quarantined",
+            }
+        )
+        signatures.append((accepted, issues))
+
+    assert signatures[0] == signatures[1]
+
+
+def test_current_tensile_subject_with_trailing_citation_is_preserved():
+    evidence = "Alloy 625 had a UTS of 780 MPa in this study [11]."
+    fact = _property(
+        sample="alloy 625",
+        name="ultimate tensile strength",
+        value="780",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("alloy 625", material="alloy 625")],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code
+        == "promotion_external_current_tensile_projection_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_current_and_comparator_tensile_values_are_filtered_value_locally():
+    evidence = (
+        "The binder-jet alloy 625 reached a UTS of 780 MPa, compared with "
+        "cast alloy 625 [11] at 710 MPa."
+    )
+    current = _property(
+        sample="alloy 625",
+        name="ultimate tensile strength",
+        value="780",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+        candidate_id="current-uts",
+        evidence_unit_id="current-uts",
+    )
+    comparator = _property(
+        sample="cast alloy 625",
+        name="ultimate tensile strength",
+        value="710",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+        candidate_id="comparator-uts",
+        evidence_unit_id="comparator-uts",
+    )
+
+    result = promote_axis_facts(
+        [_anchor("alloy 625", material="alloy 625")],
+        [current, comparator],
+        source_text=evidence,
+    )
+
+    assert result.accepted == (current,)
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code
+        == "promotion_external_current_tensile_projection_quarantined"
+    )
+    assert issue.actual["removed"]["data"] == comparator.model_dump()["data"]
+    assert issue.actual["removed"]["sample_id_raw"] == "alloy 625"
+    assert issue.actual["value_local_proposition"] == (
+        "compared with cast alloy 625 [11] at 710 MPa"
+    )
+    assert issue.actual["external_subject"] == "cast alloy 625 [11]"
+    assert issue.actual["embedded_owner_literal"] == "alloy 625"
+
+
+def test_ambiguous_repeated_tensile_value_is_left_to_existing_owner_gate():
+    evidence = (
+        "Alloy 625 reached a UTS of 710 MPa, while cast alloy 625 [11] also "
+        "reached a UTS of 710 MPa."
+    )
+    fact = _property(
+        sample="alloy 625",
+        name="ultimate tensile strength",
+        value="710",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("alloy 625", material="alloy 625")],
+        [fact],
+        source_text=evidence,
+    )
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code
+        == "promotion_external_current_tensile_projection_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_direct_author_tensile_uses_unique_existing_rich_reference_anchor():
+    evidence = (
+        "Mostafaei et al. reported values of UTS and YS of 612 MPa "
+        "and 327 MPa, respectively."
+    )
+    owner = "binder jetting as-sintered (Mostafaei et al., 2016b)"
+    fact = _property(
+        sample=owner,
+        name="ultimate tensile strength",
+        value="612",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+    anchor = _anchor(
+        owner,
+        material="Inconel 625",
+        state="as-sintered",
+        role="Reference",
+        evidence=f"for binder jetting as-sintered parts, {evidence}",
+    )
+
+    result = promote_axis_facts([anchor], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_unbound_external_tensile_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_direct_author_tensile_does_not_use_reference_anchor_without_same_assertion():
+    evidence = "Mostafaei et al. reported a UTS of 612 MPa."
+    owner = "binder jetting as-sintered (Mostafaei et al., 2016b)"
+    fact = _property(
+        sample=owner,
+        name="ultimate tensile strength",
+        value="612",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+    anchor = _anchor(
+        owner,
+        material="Inconel 625",
+        state="as-sintered",
+        role="Reference",
+        evidence="Mostafaei et al. reported porosity after sintering.",
+    )
+
+    result = promote_axis_facts([anchor], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_unbound_external_tensile_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_literal_author_year_tensile_uses_exact_existing_reference_anchor():
+    evidence = "ductility of 33% ± 1% (Marchese et al., 2018)"
+    owner = "LPBF as-fabricated (Marchese et al., 2018)"
+    fact = _property(
+        sample=owner,
+        name="ductility",
+        value="33 ± 1",
+        unit="%",
+        condition="",
+        evidence=evidence,
+    )
+    anchor = _anchor(
+        owner,
+        material="Inconel 625",
+        state="as-fabricated",
+        role="Reference",
+        evidence=(
+            "The as-fabricated values included UTS of 1041 ± 36 MPa and "
+            + evidence
+        ),
+    )
+
+    result = promote_axis_facts([anchor], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_unbound_external_tensile_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_cited_tensile_multi_state_reference_without_coordinate_is_quarantined():
+    evidence = (
+        "Mostafaei et al. reported values of UTS, YS, and strain "
+        "of 612 MPa, 327 MPa, and 41%."
+    )
+    fact = _property(
+        sample="Mostafaei et al., 2016b",
+        name="yield strength",
+        value="327 MPa",
+        unit="MPa",
+        condition="",
+        evidence=evidence,
+    )
+    anchors = [
+        _anchor(
+            "Mostafaei et al., 2016b",
+            role="Reference",
+            state="solutionizing treatment",
+        ),
+        _anchor(
+            "Mostafaei et al., 2016b",
+            role="Reference",
+            state="binder jetting as-sintered",
+        ),
+        _anchor(
+            "Mostafaei et al., 2016b",
+            role="Reference",
+            state="aged condition",
+        ),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_unbound_external_tensile_quarantined"
+    )
+    assert issue.actual["reason"] == "external_prose_without_owner_coordinate"
+    assert issue.actual["owner_candidates"] == [
+        "Mostafaei et al., 2016b",
+        "Mostafaei et al., 2016b",
+        "Mostafaei et al., 2016b",
+    ]
+
+
+def test_cited_tensile_condition_routes_to_unique_reference_treatment_state():
+    evidence = (
+        "UTS, YS and elongation were 697 MPa, 329 MPa, and 30%, "
+        "following aging for 60 h at 745 °C (Mostafaei et al., 2016b)."
+    )
+    fact = _property(
+        sample="Mostafaei et al., 2016b",
+        name="yield strength",
+        value="329",
+        unit="MPa",
+        condition="aging for 60 h at 745 °C",
+        evidence=evidence,
+    )
+    anchors = [
+        _anchor(
+            "Mostafaei et al., 2016b",
+            role="Reference",
+            state="solutionizing treatment",
+        ),
+        _anchor(
+            "Mostafaei et al., 2016b",
+            role="Reference",
+            state="binder jetting as-sintered",
+        ),
+        _anchor(
+            "Mostafaei et al., 2016b",
+            role="Reference",
+            state="aged condition",
+        ),
+    ]
+
+    result = promote_axis_facts(anchors, [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].sample_id_raw == "Mostafaei et al., 2016b"
+    assert result.accepted[0].data["material_state"] == "aged condition"
+    assert any(
+        issue.code == "promotion_external_tensile_reference_state_reassigned"
+        for issue in result.issues
+    )
+
+
+def test_table_value_on_existing_state_sibling_is_not_kept_on_base_owner():
+    source = (
+        "| Sample | Density (g/cm3) |\n"
+        "| --- | --- |\n"
+        "| A1 | 8.40 |\n"
+        "| A1 [HIPed] | 8.55 |"
+    )
+    fact = _property(
+        sample="A1",
+        name="density",
+        value="8.55",
+        unit="g/cm3",
+        condition="",
+        evidence=source,
+    )
+    result = promote_axis_facts(
+        [
+            _anchor("A1", material="Alloy A"),
+            _anchor("A1 [HIPed]", material="Alloy A", state="HIPed"),
+        ],
+        [fact],
+        source_text=source,
+    )
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_table_owner_value_ambiguous_quarantined"
+    )
+    assert issue.actual["reason"] == "value_bound_to_existing_state_sibling"
+    assert issue.actual["state_sibling_value_hits"][0]["owner"] == "A1 [HIPed]"
+
+
+def test_table_owner_row_condition_suffix_preserves_unique_value():
+    source = (
+        "| Samples | yield strength (MPa) | Elongation (%) |\n"
+        "| --- | --- | --- |\n"
+        "| AF-RT | 482 | 9 |\n"
+        "| AF-250 $ \\mathring{A} $ $ \\mathring{C} $ | 355 | 16 |"
+    )
+    evidence = (
+        "| Samples | yield strength (MPa) | Elongation (%) |\n"
+        "| AF-250 $ \\mathring{A} $ $ \\mathring{C} $ | 355 | 16 |"
+    )
+    fact_rt = _property(
+        sample="AF",
+        name="elongation",
+        value="9",
+        unit="%",
+        condition="RT",
+        evidence="| Samples | yield strength (MPa) | Elongation (%) |\n| AF-RT | 482 | 9 |",
+    )
+    fact_250 = _property(
+        sample="AF",
+        name="elongation",
+        value="16",
+        unit="%",
+        condition="250 °C",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("AF")], [fact_rt, fact_250], source_text=source
+    )
+
+    assert result.accepted == (fact_rt, fact_250)
+    assert not any(
+        issue.code == "promotion_table_owner_condition_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_unasserted_process_stage_from_sample_label_is_quarantined():
+    evidence = "as-built EBAM Ti-6Al-4V sample"
+    fact = _processing(
+        sample="EBAM",
+        process="electron beam additive manufacturing",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("EBAM")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_processing_stage_unasserted_quarantined"
+    )
+    assert issue.actual["reason"] == "process_stage_without_source_assertion"
+    assert issue.actual["removed"] == fact.model_dump()
+
+
+def test_process_stage_with_only_grounded_process_noun_is_quarantined():
+    evidence = "EBAM samples showed a lower cooling rate than the wrought material."
+    fact = _processing(
+        sample="EBAM",
+        process="electron beam additive manufacturing",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("EBAM")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_processing_stage_unasserted_quarantined"
+    )
+    assert issue.actual["reason"] == "process_stage_without_source_assertion"
+    assert issue.actual["removed"] == fact.model_dump()
+
+
+def test_qualitative_comparative_process_parameter_from_result_is_quarantined():
+    evidence = (
+        "The WAAM material did not show significant anisotropy, likely due to "
+        "the higher cooling rate."
+    )
+    fact = _processing(
+        sample="WAAM",
+        process="WAAM",
+        evidence=evidence,
+        parameters=[
+            {
+                "parameter_name_raw": "cooling rate",
+                "value_raw": "higher",
+                "unit_raw": "",
+                "source_evidence": [evidence],
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("WAAM")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_processing_result_or_hypothetical_stage_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_explicit_process_event_survives_unasserted_stage_gate():
+    evidence = "EBAM specimens were built in a vacuum chamber."
+    fact = _processing(
+        sample="EBAM",
+        process="electron beam additive manufacturing",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("EBAM")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_processing_stage_unasserted_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_processing_result_explanation_is_not_promoted_as_stage():
+    evidence = (
+        "The high build temperature of the EBAM process usually results in "
+        "decomposition of the metastable phase."
+    )
+    fact = _processing(
+        sample="EBAM",
+        process="electron beam additive manufacturing",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("EBAM")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code
+        == "promotion_processing_result_or_hypothetical_stage_quarantined"
+    )
+    assert issue.actual["reason"] == "result_explanation_not_process_event"
+    assert issue.actual["removed"] == fact.model_dump()
+
+
+def test_zero_duration_post_heat_treatment_row_is_quarantined():
+    evidence = "| 5-2 | 0 | 100.0 | 1214 ± 21.5 | 8.64 ± 1.4 |"
+    parameter = {
+        "parameter_name_raw": "Heating Time",
+        "value_raw": "0",
+        "unit_raw": "h",
+        "source_evidence": evidence,
+    }
+    fact = _processing(
+        sample="5-2",
+        process="Post-HT",
+        evidence=evidence,
+        parameters=[parameter],
+    )
+
+    result = promote_axis_facts([_anchor("5-2")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_processing_zero_duration_stage_quarantined"
+    )
+    assert issue.actual == {
+        "removed": fact.model_dump(),
+        "reason": "zero_duration_encodes_treatment_not_applied",
+    }
+    assert issue.evidence == [evidence]
+
+
+def test_nonzero_or_direct_zero_hold_heat_treatment_is_preserved():
+    nonzero_evidence = "| 5-1 | 2 | 41.66 | 1207 ± 10.2 | 12.9 ± 1.2 |"
+    nonzero = _processing(
+        sample="5-1",
+        process="Post-HT",
+        evidence=nonzero_evidence,
+        parameters=[
+            {
+                "parameter_name_raw": "Heating Time",
+                "value_raw": "2",
+                "unit_raw": "h",
+                "source_evidence": nonzero_evidence,
+            }
+        ],
+    )
+    direct_evidence = "A1 was heat-treated at 900 °C with a zero-hour hold."
+    direct = _processing(
+        sample="A1",
+        process="heat treatment",
+        evidence=direct_evidence,
+        parameters=[
+            {
+                "parameter_name_raw": "hold time",
+                "value_raw": "0",
+                "unit_raw": "h",
+                "source_evidence": direct_evidence,
+            }
+        ],
+    )
+
+    result = promote_axis_facts(
+        [_anchor("5-1"), _anchor("A1")],
+        [nonzero, direct],
+        source_text=f"{nonzero_evidence}\n{direct_evidence}",
+    )
+
+    assert result.accepted == (nonzero, direct)
+    assert not any(
+        issue.code == "promotion_processing_zero_duration_stage_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_specimen_preparation_processing_stage_is_quarantined():
+    evidence = (
+        "All samples were prepared by sectioning the walls transverse to the "
+        "scan direction to fit a 32 mm mount using wire-cut EDM."
+    )
+    fact = _processing(
+        sample="Ti wall structures",
+        process="wire-cut EDM",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("Ti wall structures")], [fact], source_text=evidence
+    )
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_processing_specimen_preparation_quarantined"
+    )
+    assert issue.actual["reason"] == "specimen_preparation_protocol_not_material_process"
+    assert issue.actual["removed"] == fact.model_dump()
+
+
+def test_specimen_polishing_preparation_stage_is_quarantined():
+    evidence = (
+        "The samples were mounted in phenolic powder and polished for "
+        "metallographic analysis according to a three-step procedure."
+    )
+    fact = _processing(
+        sample="Ti wall structures",
+        process="metallographic preparation",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("Ti wall structures")], [fact], source_text=evidence
+    )
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_processing_specimen_preparation_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_material_processing_event_survives_specimen_preparation_gate():
+    evidence = (
+        "The polished cylinders were laser-glazed on the top surface before "
+        "microstructural examination."
+    )
+    fact = _processing(
+        sample="A1",
+        process="laser glazing",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_processing_specimen_preparation_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_specimen_preparation_table_stage_remains_coordinate_eligible():
+    evidence = "| Preparation | Sectioned and polished specimens |"
+    fact = _processing(
+        sample="A1",
+        process="specimen preparation",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_processing_specimen_preparation_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_mechanical_test_protocol_stage_is_quarantined():
+    evidence = "S-S curves of R5, R2 and R1 tensile-deformed at 1023 K."
+    facts = [
+        _processing(sample=sample, process="tensile test", evidence=evidence)
+        for sample in ("R1", "R2", "R5")
+    ]
+
+    result = promote_axis_facts(
+        [_anchor("R1"), _anchor("R2"), _anchor("R5")],
+        facts,
+        source_text=evidence,
+    )
+
+    assert result.accepted == ()
+    assert sum(
+        issue.code == "promotion_processing_test_protocol_quarantined"
+        for issue in result.issues
+    ) == 3
+
+
+def test_mechanical_test_protocol_gate_preserves_material_fabrication_sentence():
+    evidence = (
+        "The tensile samples were directly printed using the optimized laser "
+        "power of 200 W and scanning speed of 900 mm/s."
+    )
+    fact = _processing(
+        sample="A1",
+        process="laser powder bed fusion",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_processing_test_protocol_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_processing_hypothetical_treatment_is_not_promoted_as_stage():
+    evidence = (
+        "The fatigue life could approach the wrought condition if a hot "
+        "isostatic pressing (HIP) step is added."
+    )
+    fact = _processing(sample="A1", process="hot isostatic pressing", evidence=evidence)
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code
+        == "promotion_processing_result_or_hypothetical_stage_quarantined"
+    )
+    assert issue.actual["reason"] == "hypothetical_process_step"
+
+
+def test_processing_metadata_parameter_isolated_but_event_and_numeric_survive():
+    evidence = (
+        "EBAM specimens were built on a Sciaky EBAM 110 machine, with a "
+        "layer thickness of 500 um."
+    )
+    fact = _processing(
+        sample="EBAM",
+        process="electron beam additive manufacturing",
+        evidence=evidence,
+        parameters=[
+            {
+                "parameter_name_raw": "equipment",
+                "value_raw": "Sciaky EBAM 110 machine",
+                "unit_raw": "",
+                "source_evidence": [evidence],
+            },
+            {
+                "parameter_name_raw": "layer thickness",
+                "value_raw": "500",
+                "unit_raw": "um",
+                "source_evidence": [evidence],
+            },
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("EBAM")], [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert [
+        row["parameter_name_raw"]
+        for row in result.accepted[0].data["parameters_raw"]
+    ] == ["layer thickness"]
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_processing_metadata_parameter_quarantined"
+    )
+    assert issue.actual["removed"]["parameter_name_raw"] == "equipment"
+    assert issue.actual["before"] == fact.model_dump()
+
+
+def test_processing_qualified_environment_metadata_isolated_but_table_remains_eligible():
+    prose = (
+        "EBAM specimens were built; the EBAM printing environment was a vacuum "
+        "build chamber."
+    )
+    fact = _processing(
+        sample="EBAM",
+        process="electron beam additive manufacturing",
+        evidence=prose,
+        parameters=[
+            {
+                "parameter_name_raw": "printing environment",
+                "value_raw": "vacuum build chamber",
+                "unit_raw": "",
+                "source_evidence": [prose],
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("EBAM")], [fact], source_text=prose)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["parameters_raw"] == []
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_processing_metadata_parameter_quarantined"
+    )
+    assert issue.actual["removed"]["parameter_name_raw"] == "printing environment"
+
+
+def test_processing_table_metadata_parameter_remains_coordinate_eligible():
+    evidence = "| Equipment | Sciaky EBAM 110 machine |"
+    fact = _processing(
+        sample="EBAM",
+        process="electron beam additive manufacturing",
+        evidence=evidence,
+        parameters=[
+            {
+                "parameter_name_raw": "equipment",
+                "value_raw": "Sciaky EBAM 110 machine",
+                "unit_raw": "",
+                "source_evidence": [evidence],
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("EBAM")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_processing_metadata_parameter_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_structure_generalization_entity_is_quarantined_without_local_payload():
+    evidence = "Typically, columnar grains are observed in EBAM deposits."
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "columnar grains",
+                "entity_type": "grain",
+                "role": "reported",
+                "features": [],
+                "raw_expression": "columnar grains",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_structure_generalization_projection_quarantined"
+    )
+    assert issue.actual["removed"] == fact.data["entities"][0]
+    assert issue.actual["reason"] == "generic_generalization_without_local_payload"
+
+
+def test_structure_direct_entity_survives_generalization_gate():
+    evidence = "A1 contained columnar grains in the build direction."
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "columnar grains",
+                "entity_type": "grain",
+                "role": "reported",
+                "features": [],
+                "raw_expression": "columnar grains",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_structure_generalization_projection_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_structure_generalization_with_numeric_local_payload_survives():
+    evidence = "Typically, grains with an average size of 20 um were observed."
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "grains",
+                "entity_type": "grain",
+                "role": "reported",
+                "features": [],
+                "raw_expression": "grains",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+
+
+def test_structure_figure_locator_projection_is_quarantined():
+    evidence = (
+        "The yellow dashed line was used to distinguish the continuous and "
+        "discontinuous regions."
+    )
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "region delineation",
+                "value_kind": "categorical",
+                "value_raw": "yellow dashed line used to distinguish regions",
+                "data_nature": "reported",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_structure_procedural_projection_quarantined"
+    )
+    assert issue.actual["reason"] == "procedural_or_figure_locator_only"
+
+
+def test_direct_structure_observation_survives_figure_presentation_gate():
+    evidence = (
+        "The lamellar L12 nanorods were clearly observed in the DP region "
+        "in the dark-field TEM image."
+    )
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[
+            {
+                "name_raw": "lamellar L12 nanorods",
+                "entity_type": "precipitate",
+                "role": "reported",
+                "features": [],
+                "raw_expression": "lamellar L12 nanorods",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        issue.code == "promotion_structure_procedural_projection_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_repeated_structure_table_metrics_without_feature_coordinates_are_isolated():
+    source = (
+        "| Parameter | T5 / 1030 C/0.5h | T5 / 1030 C/2h |\n"
+        "| gamma-prime volume fraction (%) | 70.4 | 69.6 |\n"
+        "| gamma-prime volume fraction (%) | 75.7 | 74.3 |"
+    )
+    evidence_rows = [
+        "| Parameter | T5 / 1030 C/2h |",
+        "| gamma-prime volume fraction (%) | 70.4 |",
+        "| gamma-prime volume fraction (%) | 74.3 |",
+    ]
+    evidence = "\n".join(evidence_rows)
+    base_fact = _structure(
+        sample="T5 [1030 C/2h]",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "gamma-prime volume fraction",
+                "value_kind": "scalar",
+                "value_raw": "70.4",
+                "unit_raw": "%",
+                "data_nature": "reported",
+            },
+            {
+                "feature_name_raw": "gamma-prime volume fraction",
+                "value_kind": "scalar",
+                "value_raw": "74.3",
+                "unit_raw": "%",
+                "data_nature": "reported",
+            },
+        ],
+    )
+    base_fact = base_fact.model_copy(
+        deep=True,
+        update={
+            "source_evidence": evidence_rows,
+            "data": {
+                **base_fact.data,
+                "material_state": "1030 C/2h",
+                "source_evidence": evidence_rows,
+            },
+        },
+    )
+
+    result = promote_axis_facts(
+        [_anchor("T5 [1030 C/2h]")], [base_fact], source_text=source
+    )
+
+    assert len(result.accepted) == 1
+    assert [
+        row["value_raw"] for row in result.accepted[0].data["features"]
+    ] == ["74.3"]
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_structure_table_feature_projection_filtered"
+    )
+    assert issue.actual["reason"] == "sibling_column_value_projection"
+
+
+def test_repeated_structure_html_table_metrics_are_also_isolated():
+    source = (
+        "<table><tr><th>Parameter</th><th>T5 / 1030 C/0.5h</th>"
+        "<th>T5 / 1030 C/2h</th></tr>"
+        "<tr><td>gamma-prime volume fraction (%)</td><td>70.4</td><td>69.6</td></tr>"
+        "<tr><td>gamma-prime volume fraction (%)</td><td>75.7</td><td>74.3</td></tr>"
+        "</table>"
+    )
+    rows = [
+        "| Parameter | T5 / 1030 C/2h |",
+        "| gamma-prime volume fraction (%) | 70.4 |",
+        "| gamma-prime volume fraction (%) | 74.3 |",
+    ]
+    base_fact = _structure(
+        sample="T5 [1030 C/2h]",
+        evidence=rows[0],
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "gamma-prime volume fraction",
+                "value_kind": "scalar",
+                "value_raw": "70.4",
+                "unit_raw": "%",
+                "data_nature": "reported",
+            },
+            {
+                "feature_name_raw": "gamma-prime volume fraction",
+                "value_kind": "scalar",
+                "value_raw": "74.3",
+                "unit_raw": "%",
+                "data_nature": "reported",
+            },
+        ],
+    )
+    base_fact = base_fact.model_copy(
+        deep=True,
+        update={"data": {**base_fact.data, "material_state": "1030 C/2h"}},
+    )
+    fact = base_fact.model_copy(
+        deep=True,
+        update={
+            "source_evidence": rows,
+            "data": {**base_fact.data, "source_evidence": rows},
+        },
+    )
+
+    result = promote_axis_facts(
+        [_anchor("T5 [1030 C/2h]")], [fact], source_text=source
+    )
+
+    assert len(result.accepted) == 1
+    assert [
+        row["value_raw"] for row in result.accepted[0].data["features"]
+    ] == ["74.3"]
+    assert any(
+        issue.code == "promotion_structure_table_feature_projection_filtered"
+        for issue in result.issues
+    )
+
+
+def test_prose_multi_owner_processing_requires_local_owner_payload_binding():
+    source = "A1 and B1 were investigated. The laser power was 300 W."
+    parameter = {
+        "parameter_name_raw": "laser power",
+        "value_raw": "300",
+        "unit_raw": "W",
+        "condition_label_raw": "",
+        "source_evidence": [source],
+    }
+    fact = _processing(sample="A1", evidence=source, parameters=[parameter])
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("B1")], [fact], source_text=source
+    )
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_prose_multi_owner_atomicity_quarantined"
+    )
+    assert issue.actual["reason"] == "multi_owner_without_local_payload_binding"
+    assert issue.actual["removed"]["sample_id_raw"] == "A1"
+
+
+def test_prose_multi_owner_processing_keeps_local_owner_payload_binding():
+    source = "A1 used a laser power of 300 W. B1 used a laser power of 200 W."
+    parameter = {
+        "parameter_name_raw": "laser power",
+        "value_raw": "300",
+        "unit_raw": "W",
+        "condition_label_raw": "",
+        "source_evidence": [source],
+    }
+    fact = _processing(sample="A1", evidence=source, parameters=[parameter])
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("B1")], [fact], source_text=source
+    )
+
+    assert len(result.accepted) == 1
+    assert not any(
+        issue.code == "promotion_prose_multi_owner_atomicity_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_prose_multi_owner_property_wrong_value_owner_isolated():
+    source = "A1 had hardness of 900 HV. B1 had hardness of 700 HV."
+    fact = _property(
+        sample="A1",
+        name="hardness",
+        value="700",
+        unit="HV",
+        condition="",
+        evidence=source,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("B1")], [fact], source_text=source
+    )
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_prose_multi_owner_atomicity_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_prose_multi_owner_structure_wrong_value_owner_isolated():
+    source = "A1 had a grain size of 10 um. B1 had a grain size of 20 um."
+    fact = _structure(
+        sample="A1",
+        evidence=source,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "grain size",
+                "canonical_name": "grain_size",
+                "value_kind": "scalar",
+                "value_raw": "20",
+                "unit_raw": "um",
+                "data_nature": "reported",
+                "source_evidence": [source],
+            }
+        ],
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1"), _anchor("B1")], [fact], source_text=source
+    )
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "promotion_prose_multi_owner_atomicity_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_region_scoped_property_without_owner_isolated():
+    evidence = "certain regions have flow stresses exceeding 900 MPa"
+    fact = _property(
+        sample="Alloy-A",
+        name="flow stress",
+        value=">900",
+        unit="MPa",
+        condition="certain regions",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("Alloy-A"), _anchor("Alloy-B")], [fact], source_text=evidence
+    )
+
+    assert result.accepted == ()
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "promotion_region_scoped_owner_ambiguous_quarantined"
+    )
+    assert issue.actual["coordinate"] == "certain regions"
+    assert issue.actual["removed"]["data"]["value_raw"] == ">900"
+
+
+def test_region_scoped_property_with_explicit_owner_is_preserved():
+    evidence = "Alloy-A fine rosette region has a flow stress exceeding 900 MPa"
+    fact = _property(
+        sample="Alloy-A",
+        name="flow stress",
+        value=">900",
+        unit="MPa",
+        condition="fine rosette region",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("Alloy-A"), _anchor("Alloy-B")], [fact], source_text=evidence
+    )
+
+    assert len(result.accepted) == 1
+    assert not any(
+        issue.code == "promotion_region_scoped_owner_ambiguous_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_tensile_test_temperature_projected_as_property_is_quarantined():
+    evidence = (
+        "Quasi-static uniaxial tensile tests at room temperature and 600 °C "
+        "were conducted at an initial strain rate of 1.0 × 10^-3 s^-1."
+    )
+    fact = _property(
+        sample="A1",
+        name="quasi-static uniaxial tensile test",
+        value="600",
+        unit="°C",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "property_non_result_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_tensile_test_rate_projected_as_property_is_quarantined():
+    evidence = "Rate controlled tensile tests at 5 mm/min were performed."
+    fact = _property(
+        sample="A1",
+        name="tensile test rate",
+        value="5",
+        unit="mm/min",
+        condition="",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        issue.code == "property_non_result_quarantined"
+        for issue in result.issues
+    )
+
+
+def test_build_orientation_projected_as_structure_is_quarantined():
+    evidence = "EPBF samples fabricated in the Z orientation showed dimples."
+    fact = _structure(
+        sample="EPBF",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "build_orientation",
+                "value_kind": "categorical",
+                "value_raw": "Z orientation",
+                "data_nature": "reported",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("EPBF")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_structure_process_coordinate_quarantined"
+    )
+    assert issue.actual["reason"] == "build_or_printing_orientation_is_not_structure"
+
+
+def test_regression_coefficient_is_not_projected_as_grain_diameter():
+    evidence = "The coefficient x for HA1065 and HA1100 is 0.30 and 0.32, respectively."
+    fact = _structure(
+        sample="HA1065",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "area-weighted grain diameter",
+                "value_kind": "scalar",
+                "value_raw": "x = 0.30",
+                "data_nature": "reported",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("HA1065")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code == "promotion_structure_derived_feature_quarantined"
+    )
+    assert issue.actual["reason"] == "regression_coefficient_projected_as_physical_size"
+
+
+def test_powder_particle_size_comparison_is_not_a_grain_measurement():
+    evidence = (
+        "Equiaxed grains with sizes comparable to the used D50 powder particle "
+        "size, 15–20 μm, are obtained."
+    )
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "grain size",
+                "value_kind": "range",
+                "value_raw": "15–20",
+                "unit_raw": "μm",
+                "data_nature": "reported",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    issue = next(
+        issue
+        for issue in result.issues
+        if issue.code
+        == "promotion_structure_indirect_comparison_projection_quarantined"
+    )
+    assert issue.actual["reason"] == "powder_particle_size_projected_as_grain_measurement"

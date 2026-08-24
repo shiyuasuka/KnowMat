@@ -320,6 +320,21 @@ def tensile_protocol_ledger_v203_enabled() -> bool:
     }
 
 
+def tensile_result_protocol_binding_v204_enabled() -> bool:
+    """Return whether assertion coordinates may bind one unique protocol."""
+
+    raw = os.getenv(
+        "KNOWMAT2_ALPHA25_TENSILE_RESULT_PROTOCOL_BINDING_V204", "1"
+    )
+    return raw.strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "disabled",
+    }
+
+
 def _fold(value: Any) -> str:
     text = str(value or "").casefold()
     # OCR and Markdown frequently alternate hyphen-minus, en/em dashes, and
@@ -1744,7 +1759,14 @@ def _event_identity(candidate: TestContextCandidate) -> tuple[Any, ...]:
 
 def _protocol_coordinate_present(row: dict[str, Any]) -> bool:
     decision_key = str(row.get("property_id_candidate") or "").strip()
-    return decision_key.startswith(("table-cell:", "sidecar-cell:", "dense-table-cell:"))
+    if decision_key.startswith(
+        ("table-cell:", "sidecar-cell:", "dense-table-cell:")
+    ):
+        return True
+    return (
+        tensile_result_protocol_binding_v204_enabled()
+        and decision_key.startswith("tensile-assertion:")
+    )
 
 
 def _selected_protocol_scope(
@@ -1831,20 +1853,24 @@ def _unique_dense_target_protocol(
     *,
     owner_role: str | None,
 ) -> bool:
-    """Authorize one current-study protocol for one dense Target coordinate.
+    """Authorize one current-study protocol for one immutable Target coordinate.
 
-    The table cell itself supplies the immutable property coordinate.  A
-    single non-conflicting tensile method event may complete its protocol even
-    when the paper inventory contains several state/orientation owners.  Two
-    events, a Reference owner, a rejected foreign event, or a multi-valued
-    protocol dimension remains fail-closed.
+    A dense table cell keeps its v203 compatibility contract.  With the v204
+    switch enabled, a source-literal tensile assertion may use the same narrow
+    escape hatch, but every event dimension must contain exactly one literal.
+    Two events, a Reference owner, a rejected/foreign event, or an ambiguous
+    dimension remains fail-closed.
     """
 
+    decision_key = str(row.get("property_id_candidate") or "").strip()
+    dense_coordinate = decision_key.startswith("dense-table-cell:")
+    assertion_coordinate = (
+        tensile_result_protocol_binding_v204_enabled()
+        and decision_key.startswith("tensile-assertion:")
+    )
     if (
         _fold(owner_role) != "target"
-        or not str(row.get("property_id_candidate") or "").startswith(
-            "dense-table-cell:"
-        )
+        or not (dense_coordinate or assertion_coordinate)
         or len(events) != 1
         or rejected_events
     ):
@@ -1852,6 +1878,8 @@ def _unique_dense_target_protocol(
     event = events[0]
     if not event.dimensions or event.foreign_global_scope_evidence:
         return False
+    if assertion_coordinate:
+        return all(len(dimension.literals) == 1 for dimension in event.dimensions)
     discriminating = {"temperature", "rate", "standard", "orientation", "environment"}
     return all(
         dimension.name not in discriminating or len(dimension.literals) == 1
