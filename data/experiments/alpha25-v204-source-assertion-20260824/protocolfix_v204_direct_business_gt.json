@@ -1,0 +1,39 @@
+{
+  "schema_version": "knowmat_alpha25_v204_direct_business_gt_v1",
+  "date": "2026-08-24",
+  "system_root": "data/output-alpha25-v204-source-assertion-protocolfix-final30-20260824",
+  "business_gt_root": "data/gt/papers-native-ids-with-pdf-ocr-images-20260809",
+  "paper_count": 30,
+  "unique_global_loose": {
+    "matched": 786,
+    "system": 1610,
+    "expert": 2813,
+    "precision": 0.488199,
+    "recall": 0.279417,
+    "f1": 0.355415
+  },
+  "unique_global_strict": {
+    "matched": 421,
+    "system": 1610,
+    "expert": 2813,
+    "precision": 0.261491,
+    "recall": 0.149662,
+    "f1": 0.190369
+  },
+  "target_core_tensile_loose": {
+    "matched": 139,
+    "system": 159,
+    "expert": 189,
+    "precision": 0.874214,
+    "recall": 0.735450,
+    "f1": 0.798851
+  },
+  "target_core_tensile_strict": {
+    "matched": 97,
+    "system": 159,
+    "expert": 189,
+    "precision": 0.610063,
+    "recall": 0.513228,
+    "f1": 0.557471
+  }
+}

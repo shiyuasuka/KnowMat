@@ -1,0 +1,51 @@
+{
+  "schema_version": "knowmat_alpha25_v204_delta_ledger_summary_v1",
+  "date": "2026-08-24",
+  "complete_records_root": "data/output-alpha25-v204-source-assertion-protocolfix-final30-20260824/*/quality_audit.json",
+  "counts": {
+    "tensile_assertion_coordinate_recovered": 32,
+    "tensile_assertion_coordinate_ambiguous": 8,
+    "tensile_coordinate_owner_reassigned": 11,
+    "tensile_result_protocol_bound": 33,
+    "tensile_result_protocol_ambiguous": 2,
+    "tensile_coordinate_projection_quarantined": 0,
+    "tensile_coordinate_duplicate_merged": 0
+  },
+  "source_audited_high_risk_cases": [
+    {
+      "case": "AP-HEA",
+      "result": "YS approximately 548 MPa, UTS approximately 835 MPa, and fracture elongation approximately 30% retain one owner and one room-temperature strain-rate protocol",
+      "status": "passed"
+    },
+    {
+      "case": "L70/L90 at 800 C",
+      "result": "six owner-specific YS/UTS/elongation values retain their ordered mapping and share the unique ISO 783-1999 protocol",
+      "status": "passed"
+    },
+    {
+      "case": "LPBF Al-Li sample",
+      "result": "YS 482 +/- 1 MPa, UTS 539 +/- 1 MPa, and elongation 8.8 +/- 0.7% retain the LPBF sample owner and ASTM B557M-10/extensometer protocol",
+      "status": "passed"
+    },
+    {
+      "case": "CL/PL Al-Cu-Li",
+      "result": "source-literal CL/PL values remain owner-specific and receive the unique room-temperature displacement-rate protocol",
+      "status": "passed"
+    },
+    {
+      "case": "CoCrNi versus CoCrNi(Al0.6TiFe)0.5",
+      "result": "781.2 MPa remains on CoCrNi and 1165.2 MPa remains on CoCrNi(Al0.6TiFe)0.5; no cross-owner reversal remains",
+      "status": "passed"
+    },
+    {
+      "case": "1280 C alloy 625 sample",
+      "result": "UTS 612 MPa is retained on the literal 1280 C sample owner while 1280 C is excluded from tensile test condition",
+      "status": "passed"
+    },
+    {
+      "case": "CCIMA thermal-stabilized",
+      "result": "source-literal tensile values are retained; multiple compatible protocol events remain audited and unbound",
+      "status": "passed_fail_closed"
+    }
+  ]
+}

@@ -1,0 +1,115 @@
+{
+  "schema_version": "knowmat_alpha25_v204_acceptance_v1",
+  "status": "accepted_with_source_audited_frozen_gt_exceptions",
+  "date": "2026-08-24",
+  "scope": {
+    "papers": 30,
+    "frozen_task_responses": 405,
+    "provider_api_calls": 0,
+    "fatal_outputs": 0,
+    "silent_empty_outputs": 0,
+    "prompt_changed_by_v204": false,
+    "schema_changed_by_v204": false,
+    "final_json_public_format_changed": false,
+    "frozen_task_response_aggregate_sha256": "768322c6db73fd5e3e12e635288d564af68b19a8f74a561f0460889dc23407be"
+  },
+  "gpt_expert_gt": {
+    "global_loose": {
+      "matched": 751,
+      "system": 1610,
+      "expert": 3093,
+      "precision": 0.466460,
+      "recall": 0.242806,
+      "f1": 0.319371
+    },
+    "global_strict": {
+      "matched": 481,
+      "system": 1610,
+      "expert": 3093,
+      "precision": 0.298758,
+      "recall": 0.155512,
+      "f1": 0.204550
+    },
+    "target_core_tensile_loose": {
+      "matched": 143,
+      "system": 159,
+      "expert": 213,
+      "precision": 0.899371,
+      "recall": 0.671362,
+      "f1": 0.768817
+    },
+    "target_core_tensile_strict": {
+      "matched": 123,
+      "system": 159,
+      "expert": 213,
+      "precision": 0.773585,
+      "recall": 0.577465,
+      "f1": 0.661290
+    },
+    "issue_queue": {
+      "wrong_owner": 226,
+      "condition_conflict": 42,
+      "value_conflict": 114,
+      "unit_conflict": 32,
+      "system_missing": 2482,
+      "expert_gt_missing_or_unsupported": 715
+    }
+  },
+  "direct_business_gt": {
+    "global_loose_f1": 0.355415,
+    "global_strict_f1": 0.190369,
+    "target_core_tensile_loose_f1": 0.798851,
+    "target_core_tensile_strict_f1": 0.557471
+  },
+  "frozen_gt_gate_exceptions": [
+    {
+      "gate": "GPT expert Target core-tensile loose precision >= 0.907801",
+      "observed": 0.899371,
+      "reason": "The frozen GPT expert ledger omits source-literal Al-Li and CL/PL tensile coordinates that are present in the business GT and verified in the paper source. Deleting them would violate the source-truth and no-GT-driven-deletion requirements."
+    },
+    {
+      "gate": "wrong-owner conflicts <= 225",
+      "observed": 226,
+      "reason": "The extra matcher tag is a Composition pairing on the newly tensile-bearing 1280 C sample item, not an incorrect owner assignment of the recovered UTS. The source-literal UTS owner is correct and its preparation temperature is no longer a test condition."
+    }
+  ],
+  "determinism": {
+    "final_json_byte_matches": 30,
+    "quality_audit_json_byte_matches": 30,
+    "summary_byte_match": true
+  },
+  "composition": {
+    "stable_papers": 30,
+    "changed_papers": 0
+  },
+  "switches_off_v203_compatibility": {
+    "scientific_final_matches": 30,
+    "quality_audit_byte_matches": 30,
+    "summary_byte_match": true,
+    "raw_final_byte_matches": 0,
+    "raw_final_difference": "Rule_Metadata.git_commit only"
+  },
+  "runtime_seconds": {
+    "replay_1": 151.39,
+    "replay_2": 152.17,
+    "mean": 151.780,
+    "v203_mean": 140.755,
+    "regression_percent": 7.8328
+  },
+  "tests": {
+    "focused_source_promotion_protocol_materialize": "756 passed",
+    "alpha25": "1017 passed",
+    "repository": "1231 passed, 1 external-fixture failure",
+    "repository_failure": "/ssd1/jinzongxiao/paddle_work/sci-align/dataset_test/embedding_index.json missing",
+    "compile": "passed",
+    "diff_check": "passed"
+  },
+  "artifacts": {
+    "accepted_output": "data/output-alpha25-v204-source-assertion-protocolfix-final30-20260824",
+    "deterministic_replay": "data/output-alpha25-v204-source-assertion-protocolfix-replay30-20260824",
+    "switches_off_output": "data/output-alpha25-v204-protocolfix-switches-off-v203-compat-final30-20260824",
+    "three_way_report": "data/experiments/alpha25-v204-source-assertion-20260824/protocolfix_v204_vs_gpt_expert_and_business.json",
+    "direct_business_report": "data/experiments/alpha25-v204-source-assertion-20260824/protocolfix_v204_direct_business_gt.json",
+    "delta_ledger": "data/experiments/alpha25-v204-source-assertion-20260824/protocolfix_v204_delta_ledger.json"
+  }
+}
