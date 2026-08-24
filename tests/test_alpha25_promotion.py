@@ -7629,6 +7629,108 @@ def test_long_method_condition_without_coordinate_is_cleared_but_value_survives(
     )
 
 
+def test_v205_locator_only_condition_is_removed_without_dropping_property():
+    evidence = (
+        "A1 had a yield strength of 900 MPa. The result is listed in Table 3."
+    )
+    fact = _property(
+        sample="A1",
+        value="900",
+        condition="Table 3",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["test_condition_raw"] == ""
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "property_provenance_locator_removed_from_condition"
+    )
+    assert issue.actual["before"] == fact.model_dump()
+    assert issue.actual["after"] == result.accepted[0].model_dump()
+    assert issue.actual["removed_locators"] == ["Table 3"]
+
+
+def test_v205_locator_and_duplicate_condition_segments_preserve_science():
+    evidence = (
+        "At room temperature, A1 had a yield strength of 900 MPa; the result "
+        "is summarized in Table 3."
+    )
+    fact = _property(
+        sample="A1",
+        value="900",
+        condition="room temperature | Table 3 | room temperature",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["test_condition_raw"] == "room temperature"
+    codes = [row.code for row in result.issues]
+    assert "property_provenance_locator_removed_from_condition" in codes
+    assert "property_condition_duplicate_segment_removed" in codes
+
+
+def test_v205_condition_separation_preserves_distinct_scientific_dimensions():
+    evidence = (
+        "At room temperature and a strain rate of 1e-3 s^-1, the A1 specimen "
+        "in the vertical direction had a yield strength of 900 MPa, as "
+        "reported in Fig. 8."
+    )
+    fact = _property(
+        sample="A1",
+        value="900",
+        condition=(
+            "room temperature; strain rate of 1e-3 s^-1; vertical direction; "
+            "Fig. 8"
+        ),
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    condition = result.accepted[0].data["test_condition_raw"]
+    assert condition == (
+        "room temperature; strain rate of 1e-3 s^-1; vertical direction"
+    )
+    assert any(
+        row.code == "property_provenance_locator_removed_from_condition"
+        for row in result.issues
+    )
+
+
+def test_v205_condition_separation_switch_off_restores_v204_locator(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_PROPERTY_PROVENANCE_CONDITION_SEPARATION_V205", "0"
+    )
+    evidence = (
+        "A1 had a yield strength of 900 MPa. The result is listed in Table 3."
+    )
+    fact = _property(
+        sample="A1",
+        value="900",
+        condition="Table 3",
+        evidence=evidence,
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["test_condition_raw"] == "Table 3"
+    assert not any(
+        row.code.startswith("property_provenance_")
+        or row.code.startswith("property_condition_duplicate_")
+        for row in result.issues
+    )
+
+
 def test_ambiguous_respectively_values_with_one_metric_are_quarantined():
     evidence = "The fracture-location ranges were 1.10 and 0.96 mm, respectively."
     facts = [

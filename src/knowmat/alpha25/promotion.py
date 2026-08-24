@@ -86,6 +86,64 @@ def tensile_result_protocol_binding_v204_enabled() -> bool:
     }
 
 
+def structure_assertion_atomicity_v205_enabled() -> bool:
+    """Return whether source-atomic Structure projection gates are enabled."""
+
+    raw = os.getenv("KNOWMAT2_ALPHA25_STRUCTURE_ASSERTION_ATOMICITY_V205", "1")
+    return raw.strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "disabled",
+    }
+
+
+def characterization_event_atomicity_v205_enabled() -> bool:
+    """Return whether source-atomic Characterization events are enabled."""
+
+    raw = os.getenv(
+        "KNOWMAT2_ALPHA25_CHARACTERIZATION_EVENT_ATOMICITY_V205", "1"
+    )
+    return raw.strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "disabled",
+    }
+
+
+def property_provenance_condition_separation_v205_enabled() -> bool:
+    """Return whether provenance is separated from scientific conditions."""
+
+    raw = os.getenv(
+        "KNOWMAT2_ALPHA25_PROPERTY_PROVENANCE_CONDITION_SEPARATION_V205", "1"
+    )
+    return raw.strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "disabled",
+    }
+
+
+def unique_material_owner_convergence_v205_enabled() -> bool:
+    """Return whether uniquely proven tensile material owners may converge."""
+
+    raw = os.getenv(
+        "KNOWMAT2_ALPHA25_UNIQUE_MATERIAL_OWNER_CONVERGENCE_V205", "1"
+    )
+    return raw.strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "disabled",
+    }
+
+
 PromotionAction = Literal[
     "accept",
     "merge",
@@ -2495,6 +2553,31 @@ _CONDITION_COORDINATE_FRAGMENT = re.compile(
     r"[-+]?\d+(?:\.\d+)?(?:\s*[×x]\s*10\s*\^?\s*[-+]?\d+)?\s*"
     r"(?:s\s*\^?\s*[-+]?\s*1|1\s*/\s*s|%\s*/\s*s)\b"
     r"|\b(?:stress|strain)\s+ratio\s*(?:of|=|:)\s*[-+]?\d+(?:\.\d+)?\b"
+    r")"
+)
+
+# Presentation locators prove where a result appeared, not the scientific
+# coordinate under which it was measured.  Keep the expression deliberately
+# identifier-bound so words such as ``table temperature`` or ``figure of
+# merit`` are not removed as locators.
+_CONDITION_PROVENANCE_LOCATOR_V205 = re.compile(
+    r"(?ix)\b(?:supp(?:lementary)?\.?\s*)?"
+    r"(?:table|fig(?:ure)?\.?|page|section|appendix)\s*"
+    r"(?:[A-Z]?\d+(?:[.\-]\d+)*(?:[a-z])?|[IVXLC]+)\b"
+)
+_CONDITION_PROVENANCE_GLUE_V205 = re.compile(
+    r"(?ix)(?:\b(?:as\s+)?(?:shown|reported|listed|given|summari[sz]ed|"
+    r"presented|provided)\s+(?:in|by|from)\s*$|\b(?:see|cf\.)\s*$)"
+)
+_SCIENTIFIC_CONDITION_CUE_V205 = re.compile(
+    r"(?ix)(?:"
+    r"\b(?:temperature|ambient|cryogenic|vacuum|air|argon|inert|"
+    r"orientation|oriented|direction|parallel|perpendicular|state|"
+    r"condition|delay|aged|ageing|aging|annealed|heat[\s-]*treated|"
+    r"as[\s-]*(?:built|printed|fabricated|deposited)|strain\s+rate|"
+    r"stress\s+rate|loading\s+rate|crosshead\s+(?:rate|speed)|"
+    r"tension|compression|fatigue|creep)\b|"
+    r"(?:°\s*C|\bK\b|\bs\s*\^?\s*-?1\b|\b1\s*/\s*s\b)"
     r")"
 )
 
@@ -6670,6 +6753,182 @@ def _gate_characterizations(
     )
     issues.extend(cross_source_issues)
     return accepted, issues
+
+
+def _v205_condition_segments(value: Any) -> tuple[str, ...]:
+    """Return stable top-level condition segments without splitting units."""
+
+    return tuple(
+        segment
+        for raw in re.split(r"\s*(?:\||;|\n)\s*", str(value or ""))
+        if (segment := re.sub(r"\s+", " ", raw).strip(" ,;:|"))
+    )
+
+
+def _v205_remove_locator_from_segment(
+    segment: str,
+) -> tuple[str, tuple[str, ...]]:
+    matches = tuple(
+        re.sub(r"\s+", " ", match.group(0)).strip()
+        for match in _CONDITION_PROVENANCE_LOCATOR_V205.finditer(segment)
+    )
+    if not matches:
+        return segment, ()
+    cleaned = _CONDITION_PROVENANCE_LOCATOR_V205.sub("", segment)
+    cleaned = _CONDITION_PROVENANCE_GLUE_V205.sub("", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,;:|()[]")
+    # A locator-bearing segment that leaves only presentation prose does not
+    # contain a scientific coordinate.  Do not manufacture a replacement.
+    if cleaned and not _SCIENTIFIC_CONDITION_CUE_V205.search(cleaned):
+        cleaned = ""
+    return cleaned, matches
+
+
+def _separate_property_provenance_conditions_v205(
+    facts: Sequence[AxisFact],
+) -> tuple[list[AxisFact], list[PromotionIssue]]:
+    """Remove provenance locators and exact duplicate condition segments.
+
+    The pass is source-neutral and idempotent.  It changes only
+    ``test_condition_raw``; full evidence and every before/after record remain
+    available to the audit writer.  Grounding is still enforced by the
+    downstream condition gate.
+    """
+
+    if not property_provenance_condition_separation_v205_enabled():
+        return list(facts), []
+    accepted: list[AxisFact] = []
+    issues: list[PromotionIssue] = []
+    for fact in facts:
+        if not isinstance(fact, PropertyFact):
+            accepted.append(fact)
+            continue
+        raw_condition = str(fact.data.get("test_condition_raw") or "").strip()
+        if not raw_condition or _scientific_fold(raw_condition) in _UNREPORTED:
+            accepted.append(fact)
+            continue
+
+        current = fact
+        locator_segments: list[str] = []
+        removed_locators: list[str] = []
+        for segment in _v205_condition_segments(raw_condition):
+            cleaned, locators = _v205_remove_locator_from_segment(segment)
+            removed_locators.extend(locators)
+            if cleaned:
+                locator_segments.append(cleaned)
+        locator_condition = "; ".join(locator_segments)
+        if removed_locators and _condition_fragment_key(locator_condition) != (
+            _condition_fragment_key(raw_condition)
+        ):
+            data = deepcopy(current.data)
+            data["test_condition_raw"] = locator_condition
+            updated = current.model_copy(deep=True, update={"data": data})
+            issues.append(
+                _promotion_issue(
+                    current,
+                    code="property_provenance_locator_removed_from_condition",
+                    message=(
+                        "Presentation locators were removed from a Property's "
+                        "scientific condition while the complete evidence and "
+                        "candidate were retained in audit."
+                    ),
+                    expected={
+                        "test_condition": "source-literal scientific coordinates only",
+                        "provenance_retained_in_evidence": True,
+                        "property_value_preserved": True,
+                        "audit_preserved": True,
+                    },
+                    actual={
+                        "before": current.model_dump(),
+                        "after": updated.model_dump(),
+                        "removed_locators": list(dict.fromkeys(removed_locators)),
+                    },
+                    evidence=_fact_evidence(current),
+                )
+            )
+            current = updated
+
+        current_condition = str(
+            current.data.get("test_condition_raw") or ""
+        ).strip()
+        unique_segments: list[str] = []
+        duplicate_segments: list[str] = []
+        seen: set[str] = set()
+        for segment in _v205_condition_segments(current_condition):
+            key = _condition_fragment_key(segment)
+            if not key:
+                continue
+            if key in seen:
+                duplicate_segments.append(segment)
+                continue
+            seen.add(key)
+            unique_segments.append(segment)
+        deduplicated_condition = "; ".join(unique_segments)
+        if duplicate_segments:
+            data = deepcopy(current.data)
+            data["test_condition_raw"] = deduplicated_condition
+            updated = current.model_copy(deep=True, update={"data": data})
+            issues.append(
+                _promotion_issue(
+                    current,
+                    code="property_condition_duplicate_segment_removed",
+                    message=(
+                        "Equivalent repeated scientific-condition segments were "
+                        "collapsed without removing any distinct test dimension."
+                    ),
+                    expected={
+                        "one_segment_per_scientific_coordinate": True,
+                        "distinct_dimensions_preserved": True,
+                        "property_value_preserved": True,
+                        "audit_preserved": True,
+                    },
+                    actual={
+                        "before": current.model_dump(),
+                        "after": updated.model_dump(),
+                        "removed_duplicate_segments": duplicate_segments,
+                    },
+                    evidence=_fact_evidence(current),
+                )
+            )
+            current = updated
+        accepted.append(current)
+    return accepted, issues
+
+
+def _v205_protocol_separation_audit(
+    issues: Sequence[PromotionIssue],
+) -> list[PromotionIssue]:
+    """Mirror v204 method cleanup with the explicit v205 audit contract."""
+
+    if not property_provenance_condition_separation_v205_enabled():
+        return []
+    output: list[PromotionIssue] = []
+    for issue in issues:
+        if issue.code != "promotion_condition_method_context_trimmed":
+            continue
+        actual = deepcopy(issue.actual)
+        output.append(
+            PromotionIssue(
+                code="property_condition_protocol_context_separated",
+                sample_id_raw=issue.sample_id_raw,
+                message=(
+                    "Protocol or method prose was separated from the scientific "
+                    "Property condition; the complete original remains in audit."
+                ),
+                severity=issue.severity,
+                path=issue.path,
+                evidence=deepcopy(issue.evidence),
+                expected={
+                    "test_condition": "source-literal scientific coordinates only",
+                    "protocol_context_retained_in_evidence": True,
+                    "property_value_preserved": True,
+                    "audit_preserved": True,
+                },
+                actual=actual,
+                suggested_action=issue.suggested_action,
+            )
+        )
+    return output
 
 
 def _strip_unbound_conditions(
@@ -18600,6 +18859,14 @@ def promote_axis_facts(
         fact_rows, source_text
     )
     issues.extend(stage_issues)
+    # Normalize presentation-only locators and repeated fragments before the
+    # all-or-nothing source-grounding check.  Otherwise a condition such as
+    # ``room temperature | Table 3 | room temperature`` is either retained as
+    # provenance pollution or cleared together with its valid coordinate.
+    fact_rows, stage_issues = _separate_property_provenance_conditions_v205(
+        fact_rows
+    )
+    issues.extend(stage_issues)
     fact_rows, stage_issues = _strip_unbound_conditions(fact_rows, source_text)
     issues.extend(stage_issues)
     fact_rows, stage_issues = _bind_explicit_treatment_conditions(fact_rows)
@@ -18607,6 +18874,14 @@ def promote_axis_facts(
     fact_rows, stage_issues = _bind_property_condition_labels(fact_rows)
     issues.extend(stage_issues)
     fact_rows, stage_issues = _clean_method_conditions(fact_rows)
+    issues.extend(stage_issues)
+    issues.extend(_v205_protocol_separation_audit(stage_issues))
+    # Condition labels and treatment binding may add a segment after the first
+    # pass.  Re-run the idempotent normalizer so the public condition has one
+    # presentation-neutral representation.
+    fact_rows, stage_issues = _separate_property_provenance_conditions_v205(
+        fact_rows
+    )
     issues.extend(stage_issues)
     fact_rows, stage_issues = _quarantine_tensile_source_unit_conflicts(
         fact_rows
@@ -18830,6 +19105,10 @@ __all__ = [
     "group_source_assertions",
     "promote_axis_facts",
     "resolve_record_owner",
+    "structure_assertion_atomicity_v205_enabled",
+    "characterization_event_atomicity_v205_enabled",
+    "property_provenance_condition_separation_v205_enabled",
+    "unique_material_owner_convergence_v205_enabled",
     "tensile_assertion_coordinates_v204_enabled",
     "tensile_coordinate_fanout_guard_v204_enabled",
     "tensile_result_protocol_binding_v204_enabled",
