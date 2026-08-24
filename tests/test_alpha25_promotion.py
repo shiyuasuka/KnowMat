@@ -1168,6 +1168,176 @@ def test_literal_lattice_parameter_and_schmid_factor_are_preserved():
     )
 
 
+def test_v205_structure_relation_keeps_atomic_result_and_quarantines_denominator():
+    evidence = (
+        "The Laves phase volume fraction was 1.2 vol% per 0.1 at.% Al loss."
+    )
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "Laves phase volume fraction",
+                "value_kind": "scalar",
+                "value_raw": "1.2",
+                "unit_raw": "vol%",
+                "data_nature": "reported",
+            },
+            {
+                "feature_name_raw": "Al loss increment",
+                "value_kind": "scalar",
+                "value_raw": "0.1",
+                "unit_raw": "at.%",
+                "data_nature": "reported",
+            },
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert [
+        row["feature_name_raw"] for row in result.accepted[0].data["features"]
+    ] == ["Laves phase volume fraction"]
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "structure_assertion_projection_quarantined"
+    )
+    assert issue.actual["removed"]["feature_name_raw"] == "Al loss increment"
+    assert issue.actual["reason"] == "relational_denominator_fragment"
+    assert issue.actual["decision_key"].startswith("structure-v205:")
+
+
+def test_v205_structure_fraction_keeps_atomic_fraction_not_size_threshold_operand():
+    evidence = "Over 60% of the grains measured less than 5 μm."
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "fraction of grains below 5 μm",
+                "value_kind": "inequality",
+                "value_raw": ">60%",
+                "unit_raw": "%",
+                "data_nature": "reported",
+            },
+            {
+                "feature_name_raw": "size threshold",
+                "value_kind": "inequality",
+                "value_raw": "<5",
+                "unit_raw": "μm",
+                "data_nature": "reported",
+            },
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert len(result.accepted) == 1
+    assert [row["value_raw"] for row in result.accepted[0].data["features"]] == [
+        ">60%"
+    ]
+    assert any(
+        row.code == "structure_assertion_projection_quarantined"
+        and row.actual["reason"] == "relational_threshold_fragment"
+        for row in result.issues
+    )
+
+
+def test_v205_structure_process_condition_is_not_an_observed_feature():
+    evidence = "Sintered above 1260 °C, NbC peaks were detected."
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "formation temperature condition",
+                "value_kind": "inequality",
+                "value_raw": "above 1260 °C",
+                "unit_raw": "°C",
+                "data_nature": "reported",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == ()
+    assert any(
+        row.code == "structure_assertion_projection_quarantined"
+        and row.actual["reason"] == "process_condition_fragment"
+        for row in result.issues
+    )
+
+
+def test_v205_structure_atomicity_preserves_literal_grain_size_and_lattice_parameter():
+    evidence = (
+        "A1 had grain sizes below 10 μm and an a lattice parameter of 0.384 nm."
+    )
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "grain size",
+                "value_kind": "inequality",
+                "value_raw": "<10",
+                "unit_raw": "μm",
+                "data_nature": "reported",
+            },
+            {
+                "feature_name_raw": "a lattice parameter",
+                "value_kind": "scalar",
+                "value_raw": "0.384",
+                "unit_raw": "nm",
+                "data_nature": "reported",
+            },
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        row.code == "structure_assertion_projection_quarantined"
+        for row in result.issues
+    )
+
+
+def test_v205_structure_atomicity_switch_off_preserves_relational_operand(
+    monkeypatch,
+):
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_STRUCTURE_ASSERTION_ATOMICITY_V205", "0")
+    evidence = "The Laves phase increased 1.2 vol% per 0.1 at.% Al loss."
+    fact = _structure(
+        sample="A1",
+        evidence=evidence,
+        entities=[],
+        features=[
+            {
+                "feature_name_raw": "Al loss increment",
+                "value_kind": "scalar",
+                "value_raw": "0.1",
+                "unit_raw": "at.%",
+                "data_nature": "reported",
+            }
+        ],
+    )
+
+    result = promote_axis_facts([_anchor("A1")], [fact], source_text=evidence)
+
+    assert result.accepted == (fact,)
+    assert not any(
+        row.code == "structure_assertion_projection_quarantined"
+        for row in result.issues
+    )
+
+
 def test_crystallographic_orientation_relationship_is_preserved():
     evidence = "A1 showed a cube-cube orientation relationship between gamma and gamma-prime."
     fact = _structure(
@@ -3311,6 +3481,145 @@ def test_characterization_aliases_merge_across_source_types_for_one_state():
         for issue in result.issues
         if issue.code == "promotion_characterization_alias_merged"
     ] == ["promotion_characterization_alias_merged"]
+
+
+def test_v205_characterization_event_separates_simulation_from_experimental_caption():
+    formal_evidence = "Atomic-resolution HAADF-STEM simulations were performed."
+    simulation_result_evidence = (
+        "HAADF-STEM simulations confirm the ordered phase transformation."
+    )
+    experimental_caption_evidence = (
+        "High-resolution experimental HAADF-STEM image of ordering in A1."
+    )
+    formal = _characterization(
+        method="atomic-resolution HAADF-STEM simulations",
+        method_class="STEM simulation",
+        evidence=formal_evidence,
+    )
+    simulation_result = _characterization(
+        method="HAADF-STEM",
+        method_class="STEM",
+        evidence=simulation_result_evidence,
+    )
+    experimental_caption = _characterization(
+        method="HAADF-STEM",
+        method_class="electron microscopy",
+        evidence=experimental_caption_evidence,
+    )
+    source = "\n\n".join(
+        [formal_evidence, simulation_result_evidence, experimental_caption_evidence]
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1")],
+        [formal, simulation_result, experimental_caption],
+        source_text=source,
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].data["method_raw"] == formal.data["method_raw"]
+    assert result.accepted[0].source_evidence == [
+        formal_evidence,
+        simulation_result_evidence,
+    ]
+    projection = next(
+        row
+        for row in result.issues
+        if row.code == "characterization_event_projection_quarantined"
+    )
+    assert projection.actual["removed"] == experimental_caption.model_dump()
+    assert projection.actual["reason"] == "event_kind_coordinate_conflict"
+    assert any(
+        row.code == "characterization_event_alias_merged"
+        and row.actual["removed"] == simulation_result.model_dump()
+        for row in result.issues
+    )
+
+
+def test_v205_characterization_line_scan_caption_does_not_hitchhike_on_eds_event():
+    formal_evidence = "A1 was examined by EDS using a Bruker detector."
+    caption_evidence = "Integrated EDS line scan of the area denoted by the box."
+    formal = _characterization(
+        method="EDS",
+        method_class="EDS",
+        evidence=formal_evidence,
+    )
+    caption = _characterization(
+        method="EDS line scan",
+        method_class="spectroscopy",
+        evidence=caption_evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1")],
+        [formal, caption],
+        source_text=f"{formal_evidence}\n\n{caption_evidence}",
+    )
+
+    assert result.accepted == (formal,)
+    assert any(
+        row.code == "characterization_event_projection_quarantined"
+        and row.actual["removed"] == caption.model_dump()
+        for row in result.issues
+    )
+
+
+def test_v205_characterization_alias_is_ambiguous_between_two_formal_events():
+    first_evidence = "A1 was examined by SEM using a Zeiss microscope."
+    second_evidence = "A1 was independently examined by SEM using a Tescan microscope."
+    caption_evidence = "SEM images show the pore distribution in A1."
+    first = _characterization(method="SEM Zeiss", evidence=first_evidence)
+    second = _characterization(method="SEM Tescan", evidence=second_evidence)
+    caption = _characterization(method="SEM images", evidence=caption_evidence)
+
+    result = promote_axis_facts(
+        [_anchor("A1")],
+        [first, second, caption],
+        source_text="\n\n".join(
+            [first_evidence, second_evidence, caption_evidence]
+        ),
+    )
+
+    assert result.accepted == (first, second)
+    issue = next(
+        row
+        for row in result.issues
+        if row.code == "characterization_event_coordinate_ambiguous"
+    )
+    assert issue.actual["removed"] == caption.model_dump()
+    assert issue.actual["formal_event_count"] == 2
+
+
+def test_v205_characterization_event_switch_off_restores_v204_family_alias(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_CHARACTERIZATION_EVENT_ATOMICITY_V205", "0"
+    )
+    formal_evidence = "Atomic-resolution HAADF-STEM simulations were performed."
+    caption_evidence = "Experimental HAADF-STEM image of ordering in A1."
+    formal = _characterization(
+        method="HAADF-STEM simulations",
+        method_class="STEM simulation",
+        evidence=formal_evidence,
+    )
+    caption = _characterization(
+        method="HAADF-STEM",
+        method_class="STEM",
+        evidence=caption_evidence,
+    )
+
+    result = promote_axis_facts(
+        [_anchor("A1")],
+        [formal, caption],
+        source_text=f"{formal_evidence}\n\n{caption_evidence}",
+    )
+
+    assert len(result.accepted) == 1
+    assert result.accepted[0].source_evidence == [formal_evidence, caption_evidence]
+    assert not any(
+        row.code.startswith("characterization_event_") for row in result.issues
+    )
 
 
 def test_caption_shaped_characterization_projection_is_quarantined():

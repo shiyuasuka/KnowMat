@@ -4099,6 +4099,28 @@ _STRUCTURE_COUNT_RELATION = re.compile(
     r"(?P<denominator>\d+)(?!\d)"
 )
 _STRUCTURE_BARE_INTEGER = re.compile(r"^\s*\d+\s*$")
+_STRUCTURE_RELATIONAL_DENOMINATOR_NAME_V205 = re.compile(
+    r"(?ix)^\s*(?:[a-z0-9'′γασδ_()/\-]+\s+){0,8}"
+    r"(?:increment|denominator|per[\s_-]*increment|reference[\s_-]*increment)\s*$"
+)
+_STRUCTURE_RELATIONAL_THRESHOLD_NAME_V205 = re.compile(
+    r"(?ix)^\s*(?:size|diameter|width|length|spacing|fraction|value)?"
+    r"[\s_-]*threshold\s*$"
+)
+_STRUCTURE_PROCESS_CONDITION_NAME_V205 = re.compile(
+    r"(?ix)^\s*(?:(?:formation|processing|process|sintering|annealing|"
+    r"aging|heat[\s_-]*treatment)\s+)?(?:temperature\s+)?condition\s*$"
+)
+_STRUCTURE_PROCESS_CONDITION_EVIDENCE_V205 = re.compile(
+    r"(?ix)\b(?:sinter(?:ed|ing)?|anneal(?:ed|ing)?|ag(?:ed|ing)|"
+    r"heat[\s-]*treat(?:ed|ment|ing)?|solution(?:ized|ised|izing)|"
+    r"homogeni[sz](?:ed|ation|ing)?)\b"
+)
+_STRUCTURE_RESULT_AFTER_CONDITION_V205 = re.compile(
+    r"(?ix)\b(?:detect(?:ed|ion)|observ(?:ed|ation)|form(?:ed|ation)|"
+    r"precipitat(?:ed|ion)|dissolv(?:ed|ution)|phase|grain|pore|"
+    r"microstructur(?:e|al))\b"
+)
 
 
 def _structure_count_status(
@@ -4201,6 +4223,50 @@ def _structure_feature_precision_risk(
     name = str(feature.get("feature_name_raw") or "")
     value = str(feature.get("value_raw") or "")
     joined = "\n".join(str(row or "") for row in evidence)
+
+    if structure_assertion_atomicity_v205_enabled():
+        value_numbers = set(_numeric_tokens(value))
+        if _STRUCTURE_RELATIONAL_DENOMINATOR_NAME_V205.fullmatch(name):
+            per_match = re.search(r"(?is)\bper\b(?P<denominator>.{0,120})", joined)
+            if per_match is not None:
+                denominator_numbers = set(
+                    _numeric_tokens(per_match.group("denominator"))
+                )
+                numerator_numbers = set(
+                    _numeric_tokens(joined[: per_match.start()])
+                )
+                if (
+                    value_numbers
+                    and numerator_numbers
+                    and value_numbers <= denominator_numbers
+                ):
+                    return (
+                        "structure_assertion_projection_quarantined",
+                        "relational_denominator_fragment",
+                    )
+        if _STRUCTURE_RELATIONAL_THRESHOLD_NAME_V205.fullmatch(name):
+            source_numbers = set(_numeric_tokens(joined))
+            other_numbers = source_numbers - value_numbers
+            fraction_relation = re.search(
+                r"(?ix)(?:%|percent)\s+of\b.{0,100}\b"
+                r"(?:measur(?:e|ed|ing)|below|under|less\s+than|smaller\s+than)\b",
+                joined,
+            )
+            if value_numbers and other_numbers and fraction_relation is not None:
+                return (
+                    "structure_assertion_projection_quarantined",
+                    "relational_threshold_fragment",
+                )
+        if (
+            _STRUCTURE_PROCESS_CONDITION_NAME_V205.fullmatch(name)
+            and _STRUCTURE_PROCESS_CONDITION_EVIDENCE_V205.search(joined)
+            and _STRUCTURE_RESULT_AFTER_CONDITION_V205.search(joined)
+            and (value_numbers or re.search(r"(?ix)\b(?:ambient|room)\b", value))
+        ):
+            return (
+                "structure_assertion_projection_quarantined",
+                "process_condition_fragment",
+            )
 
     # A fabrication orientation is a process/specimen coordinate, not a
     # microstructural feature.  Crystallographic orientations remain eligible
@@ -4386,6 +4452,30 @@ def _structure_feature_precision_risk(
             "feedstock_table_projected_as_structure",
         )
     return None
+
+
+def _structure_assertion_decision_key_v205(
+    fact: StructureFact,
+    feature: dict[str, Any],
+    evidence: Sequence[str],
+    reason: str,
+) -> str:
+    payload = {
+        "owner": _identity_text(fact.sample_id_raw),
+        "state": _scientific_fold(fact.data.get("material_state")),
+        "feature": _scientific_fold(feature.get("feature_name_raw")),
+        "value": _scientific_fold(feature.get("value_raw")),
+        "unit": _scientific_fold(feature.get("unit_raw")),
+        "evidence": [normalize_evidence_text(row) for row in evidence],
+        "reason": reason,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "structure-v205:" + hashlib.sha256(encoded).hexdigest()[:24]
 
 
 def _is_negated_structure_feature(feature: dict[str, Any]) -> bool:
@@ -4862,6 +4952,16 @@ def _gate_structure_fact(
                             "removed": deepcopy(feature),
                             "entity": deepcopy(entity),
                             "reason": reason,
+                            **(
+                                {
+                                    "decision_key": _structure_assertion_decision_key_v205(
+                                        fact, feature, feature_evidence, reason
+                                    )
+                                }
+                                if issue_code
+                                == "structure_assertion_projection_quarantined"
+                                else {}
+                            ),
                         },
                         evidence=feature_evidence,
                     )
@@ -4985,6 +5085,16 @@ def _gate_structure_fact(
                     actual={
                         "removed": deepcopy(feature),
                         "reason": reason,
+                        **(
+                            {
+                                "decision_key": _structure_assertion_decision_key_v205(
+                                    fact, feature, feature_evidence, reason
+                                )
+                            }
+                            if issue_code
+                            == "structure_assertion_projection_quarantined"
+                            else {}
+                        ),
                     },
                     evidence=feature_evidence,
                 )
@@ -6336,6 +6446,54 @@ def _characterization_has_direct_method_assertion(
     )
 
 
+_CHARACTERIZATION_SIMULATION_EVENT_V205 = re.compile(
+    r"(?ix)\b(?:simulation|simulations|simulated|computational)\b"
+)
+_CHARACTERIZATION_LINE_SCAN_EVENT_V205 = re.compile(
+    r"(?ix)\bline[\s-]*scan(?:ning)?\b"
+)
+
+
+def _characterization_event_kind_v205(fact: AxisFact) -> str:
+    """Return a source-literal event discriminator, or v204's empty key."""
+
+    if not characterization_event_atomicity_v205_enabled():
+        return ""
+    text = "\n".join(
+        [str(fact.data.get("method_raw") or ""), *_fact_evidence(fact)]
+    )
+    if _CHARACTERIZATION_SIMULATION_EVENT_V205.search(text):
+        return "simulation"
+    if _CHARACTERIZATION_LINE_SCAN_EVENT_V205.search(text):
+        return "line_scan"
+    return "experiment"
+
+
+def _characterization_event_decision_key_v205(
+    fact: AxisFact, *, event_kind: str, reason: str
+) -> str:
+    payload = {
+        "owner": _identity_text(fact.sample_id_raw),
+        "state": _fact_material_state(fact),
+        "family": _resolved_method_family(
+            fact.data.get("method_raw"), _fact_evidence(fact)
+        ),
+        "event_kind": event_kind,
+        "method": _scientific_fold(fact.data.get("method_raw")),
+        "evidence": [
+            normalize_evidence_text(row) for row in _fact_evidence(fact)
+        ],
+        "reason": reason,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "characterization-v205:" + hashlib.sha256(encoded).hexdigest()[:24]
+
+
 def _merge_characterization_across_source_blocks(
     facts: Sequence[AxisFact], source_text: str
 ) -> tuple[list[AxisFact], list[PromotionIssue]]:
@@ -6349,7 +6507,7 @@ def _merge_characterization_across_source_blocks(
     # Keeping that field in the grouping key lets the same SEM/EBSD/TEM method
     # leak into the material ledger twice.  Group by the owner and material
     # state instead; explicit state/region observations are split below.
-    grouped: dict[tuple[str, str, str], list[StructureFact]] = {}
+    grouped: dict[tuple[str, str, str, str], list[StructureFact]] = {}
     passthrough: list[AxisFact] = []
     for fact in facts:
         if not isinstance(fact, StructureFact) or fact.fact_type != "characterization":
@@ -6370,6 +6528,7 @@ def _merge_characterization_across_source_blocks(
                 _resolved_method_family(
                     fact.data.get("method_raw"), _fact_evidence(fact)
                 ),
+                _characterization_event_kind_v205(fact),
             ),
             [],
         ).append(fact)
@@ -6457,6 +6616,45 @@ def _merge_characterization_across_source_blocks(
         # acquisition conditions.  Without an explicit condition field, keep
         # them separate instead of selecting by confidence or output order.
         if len(procedural) != 1:
+            if (
+                characterization_event_atomicity_v205_enabled()
+                and len(procedural) > 1
+            ):
+                accepted.extend(procedural)
+                formal_events = [row.model_dump() for row in procedural]
+                for row in mergeable:
+                    if row in procedural:
+                        continue
+                    event_kind = _characterization_event_kind_v205(row)
+                    issues.append(
+                        _promotion_issue(
+                            row,
+                            code="characterization_event_coordinate_ambiguous",
+                            message=(
+                                "A Characterization result alias was compatible "
+                                "with multiple formal owner-local events and was "
+                                "isolated instead of being promoted independently."
+                            ),
+                            expected={
+                                "unique_formal_event": True,
+                                "result_alias_as_independent_event": False,
+                                "audit_preserved": True,
+                            },
+                            actual={
+                                "removed": row.model_dump(),
+                                "formal_event_count": len(procedural),
+                                "formal_events": formal_events,
+                                "event_kind": event_kind,
+                                "decision_key": _characterization_event_decision_key_v205(
+                                    row,
+                                    event_kind=event_kind,
+                                    reason="multiple_compatible_formal_events",
+                                ),
+                            },
+                            evidence=_fact_evidence(row),
+                        )
+                    )
+                continue
             # ``contextual_results`` were already emitted above.  Extending
             # the whole group here would duplicate them in the materializer.
             for row in mergeable:
@@ -6521,6 +6719,38 @@ def _merge_characterization_across_source_blocks(
                     evidence=list(survivor_after.source_evidence),
                 )
             )
+            event_kind = _characterization_event_kind_v205(survivor_after)
+            if (
+                characterization_event_atomicity_v205_enabled()
+                and event_kind != "experiment"
+            ):
+                issues.append(
+                    _promotion_issue(
+                        survivor_after,
+                        code="characterization_event_alias_merged",
+                        message=(
+                            "A presentation alias was merged into one source-"
+                            "compatible Characterization event coordinate."
+                        ),
+                        expected={
+                            "same_owner_state_family_event_kind": True,
+                            "one_formal_event": True,
+                            "audit_preserved": True,
+                        },
+                        actual={
+                            "removed": loser.model_dump(),
+                            "survivor_before": survivor_before.model_dump(),
+                            "survivor_after": survivor_after.model_dump(),
+                            "event_kind": event_kind,
+                            "decision_key": _characterization_event_decision_key_v205(
+                                loser,
+                                event_kind=event_kind,
+                                reason="source_compatible_alias_merged",
+                            ),
+                        },
+                        evidence=list(survivor_after.source_evidence),
+                    )
+                )
     return accepted, issues
 
 
@@ -6641,10 +6871,12 @@ def _gate_characterizations(
             _resolved_method_family(
                 row.data.get("method_raw"), _fact_evidence(row)
             ),
+            _characterization_event_kind_v205(row),
         )
         for row in valid
         if isinstance(row, StructureFact) and row.fact_type == "characterization"
     }
+    direct_family_keys = {key[:3] for key in direct_keys}
     for fact, evidence in pending_unasserted:
         key = (
             _identity_text(fact.sample_id_raw),
@@ -6652,6 +6884,7 @@ def _gate_characterizations(
             _resolved_method_family(
                 fact.data.get("method_raw"), _fact_evidence(fact)
             ),
+            _characterization_event_kind_v205(fact),
         )
         reusable_alias = (
             key in direct_keys
@@ -6660,6 +6893,46 @@ def _gate_characterizations(
         )
         if reusable_alias:
             valid.append(fact)
+            continue
+        event_coordinate_conflict = (
+            characterization_event_atomicity_v205_enabled()
+            and key[:3] in direct_family_keys
+            and key not in direct_keys
+        )
+        if event_coordinate_conflict:
+            issues.append(
+                _promotion_issue(
+                    fact,
+                    code="characterization_event_projection_quarantined",
+                    message=(
+                        "A Characterization result mention shared a method family "
+                        "with a formal event but had an incompatible source-"
+                        "literal event kind; it was isolated instead of hitchhiking "
+                        "on that event."
+                    ),
+                    expected={
+                        "same_owner_state_family_event_kind": True,
+                        "result_alias_as_independent_event": False,
+                        "audit_preserved": True,
+                    },
+                    actual={
+                        "removed": fact.model_dump(),
+                        "reason": "event_kind_coordinate_conflict",
+                        "event_kind": key[3],
+                        "compatible_formal_event_kinds": sorted(
+                            direct[3]
+                            for direct in direct_keys
+                            if direct[:3] == key[:3]
+                        ),
+                        "decision_key": _characterization_event_decision_key_v205(
+                            fact,
+                            event_kind=key[3],
+                            reason="event_kind_coordinate_conflict",
+                        ),
+                    },
+                    evidence=evidence,
+                )
+            )
             continue
         issues.append(
             _promotion_issue(
