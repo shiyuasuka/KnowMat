@@ -12,17 +12,298 @@ is kept for providers with unstable tool-call compatibility.
 """
 
 import json
+import hashlib
 import logging
+import os
 import re
+import time
+from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
+from threading import BoundedSemaphore, Condition, Lock, local
 from typing import Any, Dict
+from urllib.parse import urlsplit, urlunsplit
 
-from knowmat.extractors import CompositionList, extraction_extractor, get_llm
-from knowmat.prompt_generator import generate_system_prompt, generate_user_prompt
+from bs4 import BeautifulSoup
+
+from knowmat.extractors import (
+    CompositionList,
+    V11CandidateDocument,
+    extraction_thinking_mode,
+    extraction_extractor,
+    get_llm,
+    v11_extraction_extractor,
+)
+from knowmat.alpha25.contracts import AxisFact, InventoryAnchor, parse_task_response
+from knowmat.alpha25.coverage import CoverageLedger, IncompleteCoverageError
+from knowmat.alpha25.evidence import gate_task_response
+from knowmat.alpha25.materialize import (
+    dense_tensile_table_completion_v203_enabled,
+    materialize_candidate,
+    property_coordinate_quarantine_v203_enabled,
+)
+from knowmat.alpha25.property_context import tensile_protocol_ledger_v203_enabled
+from knowmat.alpha25.promotion import promote_axis_facts
+from knowmat.alpha25.package import load_alpha25_package
+from knowmat.alpha25.planner import (
+    AxisTask,
+    TableStateAnchor,
+    build_evidence_units,
+    fact_signal_score,
+    plan_axis_tasks,
+    plan_combined_axis_tasks,
+    plan_inventory_tasks,
+    split_task_once,
+)
+from knowmat.alpha25.prompt_compiler import prompt_hash
+from knowmat.ocr_manifest import load_ocr_manifest, verify_ocr_record
+from knowmat.prompt_generator import (
+    generate_axis_task_prompt,
+    generate_system_prompt,
+    generate_user_prompt,
+)
 from knowmat.states import KnowMatState
 from knowmat.app_config import settings
+from knowmat.v11_reconcile import reconcile_v11_candidates
 
 logger = logging.getLogger(__name__)
+
+
+_V11_COMPACT_OUTPUT_INSTRUCTION = (
+    "Return exactly one compact raw JSON object matching the v11 evidence-first "
+    "candidate shape. Do not output markdown, reasoning, or Rule_Metadata. "
+    "Keep the required object/list structure but omit absent, null, and empty optional "
+    "fields. Never copy a whole paragraph into *_Text: keep original/simplified text "
+    "focused on the extracted fact. Use at most two short, exact source_evidence quotes "
+    "per record and do not repeat the same quote in multiple fields. Do not create "
+    "Reference items for generic discussion or unquantified citations."
+)
+
+
+def _figure_enrichment_enabled(state: KnowMatState) -> bool:
+    """Keep frozen-baseline extraction deterministic unless explicitly opted in."""
+
+    if not settings.figure_description_enabled:
+        return False
+    if not str(state.get("ocr_manifest_path") or "").strip():
+        return True
+    return os.getenv(
+        "KNOWMAT2_ALPHA25_ENABLE_FIGURE_ENRICHMENT", "0"
+    ).strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def _figure_prose_fallback_enabled(state: KnowMatState) -> bool:
+    """Keep frozen alpha25 enrichment chart-only unless explicitly expanded."""
+
+    configured = os.getenv("KNOWMAT2_ALPHA25_FIGURE_PROSE_FALLBACK")
+    if configured is not None:
+        return configured.strip().casefold() in {"1", "true", "yes", "on"}
+    return not bool(str(state.get("ocr_manifest_path") or "").strip())
+
+
+class V11RawResponseError(ValueError):
+    """Classified malformed response from the v11 raw-JSON extraction path."""
+
+    def __init__(
+        self,
+        code: str,
+        *,
+        finish_reason: str = "",
+        content: str = "",
+        response_metadata: Dict[str, Any] | None = None,
+        validation_error: str = "",
+    ) -> None:
+        self.code = code
+        self.finish_reason = finish_reason
+        self.content_length = len(content)
+        metadata = response_metadata or {}
+        usage = metadata.get("token_usage") or {}
+        completion_tokens = usage.get("completion_tokens")
+        model_name = metadata.get("model_name") or settings.extraction_model
+        compact = re.sub(r"\s+", " ", content).strip()
+        if len(compact) > 320:
+            excerpt = compact[:160] + " ... " + compact[-160:]
+        else:
+            excerpt = compact
+        details = [
+            f"code={code}",
+            f"model={model_name}",
+            f"finish_reason={finish_reason or 'unknown'}",
+            f"content_chars={self.content_length}",
+        ]
+        if completion_tokens is not None:
+            details.append(f"completion_tokens={completion_tokens}")
+        if excerpt:
+            details.append(f"excerpt={excerpt!r}")
+        if validation_error:
+            details.append(f"validation_error={validation_error}")
+        super().__init__("V11 raw JSON response failed (" + ", ".join(details) + ")")
+
+
+class V11IncompleteCoverageError(RuntimeError):
+    """One or more original evidence chunks could not be recovered completely."""
+
+
+class V11ChunkPlanError(ValueError):
+    """Configured initial chunk ceiling is unsafe for the requested chunk size."""
+
+
+class V11QuotaError(RuntimeError):
+    """Provider quota exhaustion must stop extraction without a fallback request."""
+
+
+class V11TaskCacheMissError(RuntimeError):
+    """Cache-only replay encountered a task without a matching cached response."""
+
+
+def _is_quota_error(exc: Exception) -> bool:
+    message = str(exc).casefold()
+    return any(
+        signal in message
+        for signal in (
+            "insufficient_quota",
+            "plan credits exceeded",
+            "accountquotaexceeded",
+            "usage quota",
+        )
+    )
+
+
+_QUOTA_RESET_RE = re.compile(
+    r"reset\s+at\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+[+-]\d{4})",
+    re.IGNORECASE,
+)
+_ALPHA25_QUOTA_LOCK = Lock()
+_ALPHA25_QUOTA_RESUME_EPOCH = 0.0
+_ALPHA25_PROVIDER_CONDITION = Condition()
+_ALPHA25_ACTIVE_REQUESTS = 0
+_ALPHA25_REQUEST_TIMING = local()
+_ALPHA25_TASK_POOL_LOCK = Lock()
+_ALPHA25_TASK_POOLS: dict[int, ThreadPoolExecutor] = {}
+
+
+def _alpha25_global_concurrency() -> int:
+    """Return the configured process-wide provider request ceiling."""
+
+    return max(
+        1,
+        int(os.getenv("KNOWMAT2_ALPHA25_GLOBAL_CONCURRENCY", "6")),
+    )
+
+
+def _alpha25_shared_task_pool_enabled() -> bool:
+    """Whether papers submit evidence tasks to one work-conserving pool."""
+
+    return os.getenv(
+        "KNOWMAT2_ALPHA25_SHARED_TASK_POOL", "1"
+    ).strip().casefold() not in {"0", "false", "no", "off"}
+
+
+def _alpha25_shared_task_pool() -> ThreadPoolExecutor:
+    """Return a process-wide task pool sized to the provider ceiling.
+
+    A pool is retained per configured limit so tests and long-lived processes can
+    change explicit endpoint capacity without resizing an executor that still has
+    in-flight work. The provider condition remains the final safety boundary.
+    """
+
+    limit = _alpha25_global_concurrency()
+    with _ALPHA25_TASK_POOL_LOCK:
+        pool = _ALPHA25_TASK_POOLS.get(limit)
+        if pool is None:
+            pool = ThreadPoolExecutor(
+                max_workers=limit,
+                thread_name_prefix=f"alpha25-provider-{limit}",
+            )
+            _ALPHA25_TASK_POOLS[limit] = pool
+        return pool
+
+
+def _reset_alpha25_request_timing() -> None:
+    """Reset per-thread queue/provider timing before one logical task call."""
+
+    _ALPHA25_REQUEST_TIMING.queue_seconds = 0.0
+    _ALPHA25_REQUEST_TIMING.call_seconds = 0.0
+
+
+def _record_alpha25_request_timing(
+    *, queue_seconds: float = 0.0, call_seconds: float = 0.0
+) -> None:
+    """Accumulate timing across transparent capability/retry attempts."""
+
+    _ALPHA25_REQUEST_TIMING.queue_seconds = float(
+        getattr(_ALPHA25_REQUEST_TIMING, "queue_seconds", 0.0)
+    ) + max(0.0, float(queue_seconds))
+    _ALPHA25_REQUEST_TIMING.call_seconds = float(
+        getattr(_ALPHA25_REQUEST_TIMING, "call_seconds", 0.0)
+    ) + max(0.0, float(call_seconds))
+
+
+def _take_alpha25_request_timing() -> tuple[float, float]:
+    """Return and clear timing accumulated by the current worker thread."""
+
+    queue_seconds = float(
+        getattr(_ALPHA25_REQUEST_TIMING, "queue_seconds", 0.0)
+    )
+    call_seconds = float(
+        getattr(_ALPHA25_REQUEST_TIMING, "call_seconds", 0.0)
+    )
+    _reset_alpha25_request_timing()
+    return queue_seconds, call_seconds
+
+
+def _quota_reset_epoch(exc: Exception) -> float | None:
+    """Parse a provider-supplied absolute quota reset time, if present."""
+
+    match = _QUOTA_RESET_RE.search(str(exc))
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y-%m-%d %H:%M:%S %z").timestamp()
+    except ValueError:
+        return None
+
+
+def _register_alpha25_quota_window(resume_epoch: float) -> None:
+    global _ALPHA25_QUOTA_RESUME_EPOCH
+    with _ALPHA25_QUOTA_LOCK:
+        _ALPHA25_QUOTA_RESUME_EPOCH = max(
+            _ALPHA25_QUOTA_RESUME_EPOCH, float(resume_epoch)
+        )
+
+
+def _wait_for_alpha25_quota_window() -> None:
+    """Hold concurrent Alpha25 requests behind one provider reset deadline."""
+
+    with _ALPHA25_QUOTA_LOCK:
+        resume_epoch = _ALPHA25_QUOTA_RESUME_EPOCH
+    delay = resume_epoch - time.time()
+    if delay > 0:
+        time.sleep(delay)
+
+
+def _acquire_alpha25_provider_slot() -> None:
+    """Bound all Alpha25 provider calls across papers in this process."""
+
+    global _ALPHA25_ACTIVE_REQUESTS
+    limit = _alpha25_global_concurrency()
+    with _ALPHA25_PROVIDER_CONDITION:
+        _ALPHA25_PROVIDER_CONDITION.wait_for(
+            lambda: _ALPHA25_ACTIVE_REQUESTS < limit
+        )
+        _ALPHA25_ACTIVE_REQUESTS += 1
+
+
+def _release_alpha25_provider_slot() -> None:
+    """Release one process-wide Alpha25 provider slot."""
+
+    global _ALPHA25_ACTIVE_REQUESTS
+    with _ALPHA25_PROVIDER_CONDITION:
+        _ALPHA25_ACTIVE_REQUESTS = max(0, _ALPHA25_ACTIVE_REQUESTS - 1)
+        _ALPHA25_PROVIDER_CONDITION.notify_all()
 
 
 def _persist_paper_text(path_str: Any, paper_text: str) -> None:
@@ -54,6 +335,69 @@ def _flatten_message_content(content: Any) -> str:
     return str(content or "")
 
 
+def _v11_json_mode_for_model(model: str) -> Dict[str, str] | None:
+    """Return the configured structured-response capability for v11 calls."""
+    del model
+    configured = os.getenv(
+        "KNOWMAT2_EXTRACTION_RESPONSE_FORMAT", "provider_default"
+    ).strip().casefold()
+    if configured in {"json", "json_object", "object"}:
+        return {"type": "json_object"}
+    return None
+
+
+def _v11_single_item_strategy_for_model(model: str) -> bool:
+    """Return whether the opt-in legacy discover-then-single-item path is active."""
+    del model  # Strategy is explicit so provider upgrades cannot silently fan out calls.
+    strategy = os.getenv("KNOWMAT2_EXTRACTION_ITEM_STRATEGY", "multi_item")
+    normalized = re.sub(r"[^a-z0-9]+", "_", strategy.casefold()).strip("_")
+    if normalized in {"discover_then_single_item", "single_item", "single"}:
+        return True
+    if normalized not in {"multi_item", "multi"}:
+        logger.warning(
+            "Unknown KNOWMAT2_EXTRACTION_ITEM_STRATEGY=%r; using multi_item",
+            strategy,
+        )
+    return False
+
+
+def _endpoint_identity(base_url: str) -> str:
+    """Keep endpoint routing information while stripping credentials and query data."""
+    raw = str(base_url or "").strip()
+    if not raw:
+        return ""
+    parsed = urlsplit(raw)
+    if not parsed.scheme or not parsed.hostname:
+        return raw.split("?", 1)[0]
+    host = parsed.hostname
+    if parsed.port:
+        host = f"{host}:{parsed.port}"
+    return urlunsplit((parsed.scheme, host, parsed.path.rstrip("/"), "", ""))
+
+
+def _v11_cache_identity() -> Dict[str, Any]:
+    """Return all LLM settings that can materially change a cached candidate."""
+    model = settings.extraction_model
+    response_mode = _v11_json_mode_for_model(model)
+    return {
+        "model": model,
+        "endpoint": _endpoint_identity(
+            os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or ""
+        ),
+        "response_mode": response_mode["type"] if response_mode else "text",
+        "item_strategy": (
+            "discover_then_single_item"
+            if _v11_single_item_strategy_for_model(model)
+            else "multi_item"
+        ),
+        "max_tokens": int(os.getenv("KNOWMAT2_EXTRACTION_MAX_TOKENS", "8192")),
+        "target_max_tokens": int(
+            os.getenv("KNOWMAT2_EXTRACTION_TARGET_MAX_TOKENS", "512")
+        ),
+        "thinking_mode": extraction_thinking_mode(model),
+    }
+
+
 def _extract_json_object_text(text: str) -> str:
     """Extract the first valid JSON object from free-form model output."""
     payload = str(text or "").strip()
@@ -75,6 +419,1455 @@ def _extract_json_object_text(text: str) -> str:
         if isinstance(obj, dict):
             return json.dumps(obj, ensure_ascii=False)
     raise ValueError("Could not locate a valid JSON object in fallback response.")
+
+
+def _decode_v11_json_response(response: Any) -> Dict[str, Any]:
+    """Decode a v11 response and classify empty, truncated, and invalid output."""
+    metadata = getattr(response, "response_metadata", None) or {}
+    finish_reason = str(metadata.get("finish_reason") or "")
+    content = _flatten_message_content(getattr(response, "content", response))
+    if not content.strip():
+        raise V11RawResponseError(
+            "empty_content",
+            finish_reason=finish_reason,
+            content=content,
+            response_metadata=metadata,
+        )
+    if finish_reason.casefold() in {"length", "max_tokens", "max_output_tokens"}:
+        try:
+            complete_value = json.loads(content.strip())
+        except json.JSONDecodeError as exc:
+            raise V11RawResponseError(
+                "output_truncated",
+                finish_reason=finish_reason,
+                content=content,
+                response_metadata=metadata,
+            ) from exc
+        if isinstance(complete_value, dict):
+            return complete_value
+    try:
+        return json.loads(_extract_json_object_text(content))
+    except (ValueError, json.JSONDecodeError) as exc:
+        code = (
+            "output_truncated"
+            if finish_reason.casefold() in {"length", "max_tokens", "max_output_tokens"}
+            else "invalid_json"
+        )
+        raise V11RawResponseError(
+            code,
+            finish_reason=finish_reason,
+            content=content,
+            response_metadata=metadata,
+        ) from exc
+
+
+def _classify_v11_invoke_error(exc: Exception) -> V11RawResponseError | None:
+    """Convert SDK-level output-limit failures into the normal retry signal."""
+    if exc.__class__.__name__ != "LengthFinishReasonError":
+        return None
+    completion = getattr(exc, "completion", None)
+    choices = getattr(completion, "choices", None) or []
+    choice = choices[0] if choices else None
+    message = getattr(choice, "message", None)
+    content = _flatten_message_content(getattr(message, "content", ""))
+    usage = getattr(completion, "usage", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    metadata: Dict[str, Any] = {
+        "finish_reason": getattr(choice, "finish_reason", None) or "length",
+        "model_name": getattr(completion, "model", None) or settings.extraction_model,
+    }
+    if completion_tokens is not None:
+        metadata["token_usage"] = {"completion_tokens": completion_tokens}
+    return V11RawResponseError(
+        "output_truncated",
+        finish_reason=str(metadata["finish_reason"]),
+        content=content,
+        response_metadata=metadata,
+    )
+
+
+def _is_provider_option_error(exc: Exception, *option_names: str) -> bool:
+    """Detect a rejected optional request capability without model-name rules."""
+
+    message = str(exc).casefold()
+    if not any(str(name).casefold() in message for name in option_names):
+        return False
+    return any(
+        signal in message
+        for signal in (
+            "invalidparameter",
+            "invalid parameter",
+            "not supported",
+            "unsupported",
+            "unknown field",
+            "extra inputs are not permitted",
+        )
+    )
+
+
+def _is_transient_alpha25_error(exc: Exception) -> bool:
+    """Return true for transport/service failures that must not split evidence."""
+
+    if _is_quota_error(exc):
+        return False
+    message = str(exc).casefold()
+    return bool(re.search(r"\b(?:429|500|502|503|504)\b", message)) or any(
+        signal in message
+        for signal in (
+            "accountratelimitexceeded",
+            "requests are too frequent",
+            "rate limit",
+            "timeout",
+            "timed out",
+            "connection reset",
+            "connection error",
+            "internalserviceerror",
+            "internal server error",
+        )
+    )
+
+
+def _is_alpha25_content_failure(exc: Exception) -> bool:
+    """Only malformed/oversized model content is eligible for evidence splitting."""
+
+    return isinstance(exc, V11RawResponseError) and exc.code in {
+        "output_truncated",
+        "empty_content",
+        "invalid_json",
+        "invalid_contract",
+    }
+
+
+def _alpha25_llm_identity(
+    output_token_budget: int, *, extraction_model: str | None = None
+) -> Dict[str, Any]:
+    """Return the provider identity that can change one alpha25 task result."""
+
+    model = str(extraction_model or settings.extraction_model).strip()
+    response_mode = _v11_json_mode_for_model(model)
+    return {
+        "model": model,
+        "endpoint": _endpoint_identity(
+            os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL") or ""
+        ),
+        "response_mode": response_mode["type"] if response_mode else "text",
+        "output_token_budget": int(output_token_budget),
+        "thinking_mode": extraction_thinking_mode(model),
+    }
+
+
+def _invoke_alpha25_task_json(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    axis: str,
+    output_token_budget: int,
+    extraction_model: str | None = None,
+) -> Any:
+    """Invoke one compact alpha25 task and validate its axis response contract."""
+
+    _reset_alpha25_request_timing()
+    model = str(extraction_model or settings.extraction_model).strip()
+    thinking_mode = extraction_thinking_mode(model)
+    response_mode = _v11_json_mode_for_model(model)
+
+    def bound_llm() -> Any:
+        llm = get_llm(
+            agent_type="extraction",
+            thinking_mode_override=thinking_mode,
+            model_override=model,
+        )
+        bind_options: Dict[str, Any] = {"max_tokens": int(output_token_budget)}
+        if response_mode:
+            bind_options["response_format"] = response_mode
+        return llm.bind(**bind_options)
+
+    llm = bound_llm()
+    quota_waits = 0
+    max_quota_waits = max(
+        0, int(os.getenv("KNOWMAT2_ALPHA25_QUOTA_MAX_RESETS_PER_CALL", "4"))
+    )
+    max_quota_wait_seconds = max(
+        0, int(os.getenv("KNOWMAT2_ALPHA25_QUOTA_MAX_WAIT_SECONDS", "21600"))
+    )
+    quota_grace_seconds = max(
+        0, int(os.getenv("KNOWMAT2_ALPHA25_QUOTA_GRACE_SECONDS", "5"))
+    )
+    transient_retries = max(
+        0, int(os.getenv("KNOWMAT2_ALPHA25_TRANSIENT_RETRIES", "1"))
+    )
+    transient_backoff = max(
+        0.0, float(os.getenv("KNOWMAT2_ALPHA25_TRANSIENT_BACKOFF_SECONDS", "2"))
+    )
+    transient_attempts = 0
+    thinking_fallback_used = False
+    response_mode_fallback_used = False
+    while True:
+        _wait_for_alpha25_quota_window()
+        try:
+            queue_started = time.monotonic()
+            _acquire_alpha25_provider_slot()
+            _record_alpha25_request_timing(
+                queue_seconds=time.monotonic() - queue_started
+            )
+            call_started = time.monotonic()
+            try:
+                response = llm.invoke(
+                    [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ]
+                )
+            finally:
+                _record_alpha25_request_timing(
+                    call_seconds=time.monotonic() - call_started
+                )
+                _release_alpha25_provider_slot()
+            break
+        except Exception as exc:
+            reset_epoch = _quota_reset_epoch(exc) if _is_quota_error(exc) else None
+            wait_seconds = (
+                reset_epoch + quota_grace_seconds - time.time()
+                if reset_epoch is not None
+                else None
+            )
+            if (
+                wait_seconds is not None
+                and wait_seconds > 0
+                and wait_seconds <= max_quota_wait_seconds
+                and quota_waits < max_quota_waits
+            ):
+                quota_waits += 1
+                resume_epoch = reset_epoch + quota_grace_seconds
+                _register_alpha25_quota_window(resume_epoch)
+                logger.warning(
+                    "Alpha25 provider quota exhausted; waiting %.1fs until reset",
+                    wait_seconds,
+                )
+                continue
+            if (
+                thinking_mode != "provider_default"
+                and not thinking_fallback_used
+                and _is_provider_option_error(exc, "thinking", "coding plan")
+            ):
+                thinking_fallback_used = True
+                thinking_mode = "provider_default"
+                llm = bound_llm()
+                logger.warning(
+                    "Extraction provider rejected the configured thinking option; "
+                    "retrying with provider_default"
+                )
+                continue
+            if (
+                response_mode is not None
+                and not response_mode_fallback_used
+                and _is_provider_option_error(
+                    exc, "response_format", "json_object", "json mode"
+                )
+            ):
+                response_mode_fallback_used = True
+                response_mode = None
+                llm = bound_llm()
+                logger.warning(
+                    "Extraction provider rejected json_object response mode; "
+                    "retrying without the optional response_format"
+                )
+                continue
+            if (
+                _is_transient_alpha25_error(exc)
+                and transient_attempts < transient_retries
+            ):
+                jitter = (
+                    int(hashlib.sha256(user_prompt.encode("utf-8")).hexdigest()[:4], 16)
+                    % 1000
+                ) / 1000.0
+                delay = transient_backoff * (2**transient_attempts) + jitter
+                transient_attempts += 1
+                logger.warning(
+                    "Transient extraction provider failure; retrying same request "
+                    "in %.1fs (%d/%d): %s",
+                    delay,
+                    transient_attempts,
+                    transient_retries,
+                    exc,
+                )
+                time.sleep(delay)
+                continue
+            classified = _classify_v11_invoke_error(exc)
+            if classified is not None:
+                raise classified from exc
+            raise
+    value = _decode_v11_json_response(response)
+    try:
+        return parse_task_response(axis, value)
+    except Exception as exc:
+        if exc.__class__.__name__ == "ValidationError":
+            raise V11RawResponseError(
+                "invalid_contract",
+                content=json.dumps(value, ensure_ascii=False),
+                validation_error=str(exc),
+            ) from exc
+        raise
+
+
+def _alpha25_task_cache_path(
+    cache_dir: Path,
+    *,
+    task: AxisTask,
+    system_prompt: str,
+    user_prompt: str,
+    ocr_baseline_id: str,
+    extraction_model: str | None = None,
+) -> Path:
+    identity = _alpha25_task_cache_identity(
+        task=task,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        ocr_baseline_id=ocr_baseline_id,
+        extraction_model=extraction_model,
+    )
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    safe_axis = re.sub(r"[^a-z0-9]+", "_", str(task.axis).casefold()).strip("_")
+    return cache_dir / f"{safe_axis}_{digest}.json"
+
+
+def _alpha25_task_cache_identity(
+    *,
+    task: AxisTask,
+    system_prompt: str,
+    user_prompt: str,
+    ocr_baseline_id: str,
+    extraction_model: str | None = None,
+) -> Dict[str, Any]:
+    """Return the complete credential-free identity for one provider task."""
+
+    package = load_alpha25_package(settings.alpha25_package_root)
+    return {
+        "ocr_baseline_id": ocr_baseline_id,
+        "task_id": task.task_id,
+        "unit_id": task.unit_id,
+        "axis": task.axis,
+        "evidence_kind": task.kind,
+        "evidence_sha256": hashlib.sha256(
+            task.evidence_text.encode("utf-8")
+        ).hexdigest(),
+        "sample_anchors": task.sample_anchors,
+        "state_anchors": [
+            {
+                "sample_id_raw": anchor.sample_id_raw,
+                "state_raw": anchor.state_raw,
+                "source_evidence": anchor.source_evidence,
+            }
+            for anchor in task.state_anchors
+        ],
+        "prompt_sha256": prompt_hash(system_prompt, user_prompt),
+        "schema_version": package.schema_version,
+        "ruleset_digest": package.ruleset_digest,
+        "llm": _alpha25_llm_identity(
+            task.output_token_budget, extraction_model=extraction_model
+        ),
+    }
+
+
+def _alpha25_task_identity_path(cache_path: Path) -> Path:
+    """Return the non-response audit sidecar for one cached provider task."""
+
+    return cache_path.with_name(cache_path.name + ".identity")
+
+
+def _alpha25_task_recovery_path(cache_path: Path) -> Path:
+    """Return the deterministic content-failure marker beside a task cache."""
+
+    return cache_path.with_suffix(".recovery.json")
+
+
+_REFERENCE_TABLE_OWNER_HEADERS = {
+    "alloy",
+    "designation",
+    "material",
+    "sample",
+    "specimen",
+}
+
+
+def _reference_table_rows(value: Any) -> list[list[str]]:
+    """Return owner/citation rows only from literal Reference tables."""
+
+    text = str(value or "")
+    tables: list[list[list[str]]] = []
+    markdown_block: list[list[str]] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if "|" not in stripped:
+            if markdown_block:
+                tables.append(markdown_block)
+                markdown_block = []
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if len(cells) < 2:
+            if markdown_block:
+                tables.append(markdown_block)
+                markdown_block = []
+            continue
+        if all(re.fullmatch(r":?-{3,}:?", cell or "") for cell in cells):
+            continue
+        markdown_block.append(cells)
+    if markdown_block:
+        tables.append(markdown_block)
+
+    soup = BeautifulSoup(text, "lxml")
+    for table in soup.find_all("table"):
+        rows = [
+            [cell.get_text(" ", strip=True) for cell in row.find_all(["th", "td"])]
+            for row in table.find_all("tr")
+        ]
+        rows = [row for row in rows if row]
+        if rows:
+            tables.append(rows)
+
+    result: list[list[str]] = []
+    for rows in tables:
+        header_index = next(
+            (
+                index
+                for index, row in enumerate(rows)
+                if any(
+                    re.fullmatch(r"(?i)references?", cell.strip())
+                    for cell in row
+                )
+            ),
+            None,
+        )
+        if header_index is None:
+            continue
+        header = rows[header_index]
+        reference_column = next(
+            index
+            for index, cell in enumerate(header)
+            if re.fullmatch(r"(?i)references?", cell.strip())
+        )
+        owner_column = next(
+            (
+                index
+                for index, cell in enumerate(header)
+                if re.sub(r"[^a-z]+", " ", cell.casefold()).strip()
+                in _REFERENCE_TABLE_OWNER_HEADERS
+            ),
+            None,
+        )
+        if owner_column is None:
+            continue
+        for row in rows[header_index + 1 :]:
+            if max(reference_column, owner_column) >= len(row):
+                continue
+            owner = row[owner_column].strip()
+            citations = re.findall(
+                r"\[\s*(\d{1,4})\s*\]", row[reference_column]
+            )
+            if owner and citations:
+                result.append([owner, citations[0], " | ".join(row)])
+    return result
+
+
+def _deterministic_reference_table_anchors(unit: Any) -> list[InventoryAnchor]:
+    """Create cited Reference siblings without trusting model-assigned roles."""
+
+    source_rows = _reference_table_rows(getattr(unit, "source_text", ""))
+    labels = {
+        re.sub(r"\s+", " ", str(label or "")).strip().casefold(): str(label).strip()
+        for label in getattr(unit, "sample_anchors", ())
+        if str(label or "").strip()
+    }
+    anchors: list[InventoryAnchor] = []
+    seen: set[tuple[str, str]] = set()
+    for owner, citation, evidence in source_rows:
+        owner_key = re.sub(r"\s+", " ", owner).strip().casefold()
+        label = labels.get(owner_key)
+        if not label or (owner_key, citation) in seen:
+            continue
+        seen.add((owner_key, citation))
+        anchors.append(
+            InventoryAnchor(
+                sample_id_raw=f"{label} [{citation}] [reference]",
+                material_name_raw=label,
+                state_raw="literature-reported",
+                role="Reference",
+                data_nature="Literature_Experimental",
+                source_evidence=[evidence],
+                confidence=0.95,
+            )
+        )
+    return anchors
+
+
+def _deterministic_table_anchors(unit: Any) -> list[InventoryAnchor]:
+    anchors: list[InventoryAnchor] = _deterministic_reference_table_anchors(unit)
+    for label in unit.sample_anchors:
+        if not str(label).strip():
+            continue
+        anchors.append(
+            InventoryAnchor(
+                sample_id_raw=str(label).strip(),
+                material_name_raw=None,
+                state_raw=None,
+                role="Target",
+                data_nature="Experimental",
+                source_evidence=[str(label).strip()],
+                confidence=0.8,
+            )
+        )
+    for anchor in getattr(unit, "state_anchors", ()):
+        if not isinstance(anchor, TableStateAnchor):
+            continue
+        if not anchor.sample_id_raw.strip() or not anchor.state_raw.strip():
+            continue
+        anchors.append(
+            InventoryAnchor(
+                sample_id_raw=anchor.sample_id_raw.strip(),
+                material_name_raw=None,
+                state_raw=anchor.state_raw.strip(),
+                role="Target",
+                data_nature="Experimental",
+                source_evidence=list(anchor.source_evidence),
+                confidence=0.85,
+            )
+        )
+    return anchors
+
+
+def _extract_alpha25_tasks(
+    system_prompt: str,
+    paper_text: str,
+    paper_routing: Dict[str, Any],
+    *,
+    paper_text_path: str | Path | None = None,
+    paper_metadata: Dict[str, Any] | None = None,
+    cache_dir: Path | None = None,
+    ocr_baseline_id: str = "",
+    extraction_model: str | None = None,
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Run bounded source-only alpha25 tasks with lossless coverage accounting."""
+
+    started = time.monotonic()
+    units = build_evidence_units(
+        paper_text,
+        max_prose_chars=int(os.getenv("KNOWMAT2_ALPHA25_PROSE_CHARS", "8000")),
+        table_columns=int(os.getenv("KNOWMAT2_ALPHA25_TABLE_COLUMNS", "8")),
+        table_rows=int(os.getenv("KNOWMAT2_ALPHA25_TABLE_ROWS", "12")),
+        table_context_chars=int(
+            os.getenv("KNOWMAT2_ALPHA25_TABLE_CONTEXT_CHARS", "600")
+        ),
+        structure_table_cells=max(
+            1,
+            int(os.getenv("KNOWMAT2_ALPHA25_STRUCTURE_TABLE_CELLS", "16")),
+        ),
+        table_cells=max(
+            1, int(os.getenv("KNOWMAT2_ALPHA25_TABLE_CELLS", "36"))
+        ),
+        table_min_columns=max(
+            1, int(os.getenv("KNOWMAT2_ALPHA25_TABLE_MIN_COLUMNS", "4"))
+        ),
+        table_max_chars=max(
+            1000,
+            int(os.getenv("KNOWMAT2_ALPHA25_TABLE_MAX_CHARS", "8000")),
+        ),
+    )
+    if not units:
+        raise ValueError("Alpha25 extraction planner produced no evidence units")
+
+    task_chars = max(1000, int(os.getenv("KNOWMAT2_ALPHA25_TASK_CHARS", "8000")))
+    task_strategy = os.getenv(
+        "KNOWMAT2_ALPHA25_TASK_STRATEGY", "combined_axes"
+    ).strip().casefold()
+    unified_inventory = os.getenv(
+        "KNOWMAT2_ALPHA25_UNIFIED_INVENTORY", "1"
+    ).strip().casefold() not in {"0", "false", "no", "off"}
+    inventory_chars = max(
+        1000, int(os.getenv("KNOWMAT2_ALPHA25_INVENTORY_CHARS", "8000"))
+    )
+    inventory_tasks = (
+        []
+        if task_strategy == "combined_axes" and unified_inventory
+        else plan_inventory_tasks(units, max_chars=inventory_chars)
+    )
+    if task_strategy == "combined_axes":
+        axis_tasks = plan_combined_axis_tasks(
+            units,
+            max_chars=task_chars,
+            max_units_per_task=max(
+                1,
+                int(os.getenv("KNOWMAT2_ALPHA25_MAX_UNITS_PER_TASK", "8")),
+            ),
+            dense_table_cell_threshold=max(
+                1,
+                int(
+                    os.getenv(
+                        "KNOWMAT2_ALPHA25_DENSE_TABLE_CELL_THRESHOLD", "16"
+                    )
+                ),
+            ),
+            dense_table_output_tokens=max(
+                8192,
+                int(
+                    os.getenv(
+                        "KNOWMAT2_ALPHA25_DENSE_TABLE_OUTPUT_TOKENS", "12288"
+                    )
+                ),
+            ),
+            long_combined_chars=max(
+                1000,
+                int(os.getenv("KNOWMAT2_ALPHA25_LONG_TASK_CHARS", "4000")),
+            ),
+            long_combined_output_tokens=max(
+                8192,
+                int(
+                    os.getenv(
+                        "KNOWMAT2_ALPHA25_LONG_TASK_OUTPUT_TOKENS", "12288"
+                    )
+                ),
+            ),
+            long_combined_fact_signals=max(
+                1,
+                int(
+                    os.getenv(
+                        "KNOWMAT2_ALPHA25_LONG_TASK_FACT_SIGNALS", "18"
+                    )
+                ),
+            ),
+            dense_fact_signals=max(
+                1,
+                int(os.getenv("KNOWMAT2_ALPHA25_DENSE_FACT_SIGNALS", "60")),
+            ),
+            dense_max_chars=max(
+                1000,
+                int(os.getenv("KNOWMAT2_ALPHA25_DENSE_TASK_CHARS", "6000")),
+            ),
+            sparse_fact_signals=max(
+                0,
+                int(os.getenv("KNOWMAT2_ALPHA25_SPARSE_FACT_SIGNALS", "4")),
+            ),
+            sparse_max_chars=max(
+                task_chars,
+                int(os.getenv("KNOWMAT2_ALPHA25_SPARSE_TASK_CHARS", "8000")),
+            ),
+        )
+    elif task_strategy == "axis_scoped":
+        axis_tasks = plan_axis_tasks(
+            units,
+            max_chars=task_chars,
+            axis_max_chars={
+                "composition": int(
+                    os.getenv("KNOWMAT2_ALPHA25_COMPOSITION_CHARS", "5000")
+                ),
+                "processing": int(
+                    os.getenv("KNOWMAT2_ALPHA25_PROCESSING_CHARS", "6000")
+                ),
+                "structure": int(
+                    os.getenv("KNOWMAT2_ALPHA25_STRUCTURE_CHARS", "1600")
+                ),
+                "properties": int(
+                    os.getenv("KNOWMAT2_ALPHA25_PROPERTIES_CHARS", "2500")
+                ),
+            },
+        )
+    else:
+        raise V11ChunkPlanError(
+            "KNOWMAT2_ALPHA25_TASK_STRATEGY must be combined_axes or axis_scoped, "
+            f"got {task_strategy!r}."
+        )
+    max_tasks = max(1, int(os.getenv("KNOWMAT2_ALPHA25_MAX_TASKS", "64")))
+    if len(inventory_tasks) + len(axis_tasks) > max_tasks:
+        raise V11ChunkPlanError(
+            "Alpha25 evidence planning requires "
+            f"{len(inventory_tasks) + len(axis_tasks)} tasks, exceeding "
+            f"KNOWMAT2_ALPHA25_MAX_TASKS={max_tasks}."
+        )
+    max_initial_evidence_chars = max(
+        len(task.evidence_text) for task in [*inventory_tasks, *axis_tasks]
+    )
+    initial_signal_scores = [fact_signal_score(task.evidence_text) for task in axis_tasks]
+    dense_signal_threshold = max(
+        1, int(os.getenv("KNOWMAT2_ALPHA25_DENSE_FACT_SIGNALS", "60"))
+    )
+    sparse_signal_threshold = max(
+        0, int(os.getenv("KNOWMAT2_ALPHA25_SPARSE_FACT_SIGNALS", "4"))
+    )
+    model = str(extraction_model or settings.extraction_model).strip()
+    configured_thinking_mode = extraction_thinking_mode(model)
+    if cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+    ledger = CoverageLedger()
+    ledger.register_many([*inventory_tasks, *axis_tasks])
+    anchors_by_unit: dict[str, list[InventoryAnchor]] = {
+        unit.unit_id: _deterministic_table_anchors(unit)
+        for unit in units
+        if unit.sample_anchors or unit.state_anchors
+    }
+    accepted_anchors: list[InventoryAnchor] = [
+        anchor for rows in anchors_by_unit.values() for anchor in rows
+    ]
+    deterministic_anchor_labels = list(
+        dict.fromkeys(anchor.sample_id_raw for anchor in accepted_anchors)
+    )
+    accepted_facts: list[AxisFact] = []
+    accepted_fact_task_ids: list[str] = []
+    evidence_issues: list[Dict[str, Any]] = []
+    workers = max(
+        1,
+        int(
+            os.getenv(
+                "KNOWMAT2_ALPHA25_WORKERS",
+                os.getenv(
+                    "KNOWMAT2_ALPHA25_GLOBAL_CONCURRENCY",
+                    os.getenv("KNOWMAT2_EXTRACTION_CHUNK_WORKERS", "6"),
+                ),
+            )
+        ),
+    )
+    failure_split_depth = max(
+        1, int(os.getenv("KNOWMAT2_ALPHA25_FAILURE_SPLIT_DEPTH", "3"))
+    )
+    failure_split_min_chars = max(
+        200, int(os.getenv("KNOWMAT2_ALPHA25_FAILURE_SPLIT_MIN_CHARS", "200"))
+    )
+    gate_split_min_chars = max(
+        200, int(os.getenv("KNOWMAT2_ALPHA25_GATE_SPLIT_MIN_CHARS", "600"))
+    )
+    retry_gate_rejections = os.getenv(
+        "KNOWMAT2_ALPHA25_RETRY_GATE_REJECTIONS", "0"
+    ).strip().casefold() in {"1", "true", "yes", "on"}
+    retry_output_tokens = max(
+        4096, int(os.getenv("KNOWMAT2_ALPHA25_RETRY_OUTPUT_TOKENS", "12288"))
+    )
+    max_retry_tasks = max(
+        0, int(os.getenv("KNOWMAT2_ALPHA25_MAX_RETRY_TASKS", "32"))
+    )
+    retry_tasks_created = 0
+    response_bytes_by_task: dict[str, int] = {}
+    progress_every = max(
+        0, int(os.getenv("KNOWMAT2_ALPHA25_PROGRESS_EVERY", "4"))
+    )
+
+    def output_budget_retry(task: AxisTask, exc: Exception) -> AxisTask | None:
+        """Retry a provider-truncated/empty task once before multiplying calls."""
+
+        if not isinstance(exc, V11RawResponseError):
+            return None
+        if exc.code not in {"empty_content", "output_truncated"}:
+            return None
+        if task.output_token_budget >= retry_output_tokens:
+            return None
+        return replace(
+            task,
+            task_id=f"{task.task_id}-budget{retry_output_tokens}",
+            output_token_budget=retry_output_tokens,
+            parent_task_id=task.task_id,
+        )
+
+    def task_anchor_payload(task: AxisTask) -> list[Dict[str, Any]]:
+        # Only deterministic table-header labels enter another task's prompt.
+        # Generated inventory anchors remain materialization inputs; feeding them
+        # into every axis prompt would make cache keys nondeterministic.
+        labels = list(task.sample_anchors)
+        if task.axis == "inventory":
+            evidence = task.evidence_text.casefold()
+            labels.extend(
+                label
+                for label in deterministic_anchor_labels
+                if re.search(
+                    rf"(?<![A-Za-z0-9]){re.escape(label.casefold())}(?![A-Za-z0-9])",
+                    evidence,
+                )
+            )
+        payload: list[Dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for anchor in task.state_anchors:
+            key = (anchor.sample_id_raw.strip(), anchor.state_raw.strip())
+            if not all(key) or key in seen:
+                continue
+            seen.add(key)
+            payload.append(
+                {
+                    "sample_id_raw": key[0],
+                    "state_raw": key[1],
+                    "role": "Target",
+                    "data_nature": "Experimental",
+                    "source_evidence": list(anchor.source_evidence),
+                    "confidence": 0.85,
+                }
+            )
+        for label in dict.fromkeys(labels):
+            cleaned = str(label).strip()
+            key = (cleaned, "")
+            if not cleaned or key in seen:
+                continue
+            seen.add(key)
+            payload.append(
+                {
+                    "sample_id_raw": cleaned,
+                    "role": "Target",
+                    "data_nature": "Experimental",
+                }
+            )
+        return payload[:32]
+
+    def run_task(
+        task: AxisTask,
+        submitted_at: float | None = None,
+    ) -> tuple[Any, Any, bool, float, int, float, float]:
+        # Include shared-executor wait in task elapsed time. Provider queue and
+        # call time remain separate, so logs expose scheduler delay instead of
+        # making a queued task look like an inexplicably slow provider call.
+        task_started = submitted_at if submitted_at is not None else time.monotonic()
+        user_prompt = generate_axis_task_prompt(
+            task.evidence_text,
+            axis=task.axis,
+            routing=paper_routing,
+            sample_anchors=task_anchor_payload(task),
+            unit_id=task.unit_id,
+            evidence_kind=task.kind,
+        )
+        cache_path = None
+        recovery_path = None
+        cache_only = os.getenv(
+            "KNOWMAT2_ALPHA25_CACHE_ONLY", "0"
+        ).strip().casefold() in {"1", "true", "yes", "on"}
+        if cache_dir is not None:
+            cache_path = _alpha25_task_cache_path(
+                cache_dir,
+                task=task,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                ocr_baseline_id=ocr_baseline_id,
+                extraction_model=model,
+            )
+            recovery_path = _alpha25_task_recovery_path(cache_path)
+            if cache_path.is_file():
+                cached_payload = cache_path.read_text(encoding="utf-8")
+                cached_value = json.loads(cached_payload)
+                response = parse_task_response(task.axis, cached_value)
+                gate = gate_task_response(
+                    response,
+                    evidence_unit_id=task.unit_id,
+                    evidence_text=task.evidence_text,
+                    structured_source_text=paper_text,
+                )
+                return (
+                    response,
+                    gate,
+                    True,
+                    time.monotonic() - task_started,
+                    len(cached_payload.encode("utf-8")),
+                    0.0,
+                    0.0,
+                )
+            if cache_only and recovery_path.is_file():
+                marker = json.loads(recovery_path.read_text(encoding="utf-8"))
+                code = str(marker.get("code") or "")
+                if code not in {
+                    "output_truncated",
+                    "empty_content",
+                    "invalid_json",
+                    "invalid_contract",
+                }:
+                    raise V11TaskCacheMissError(
+                        "Alpha25 cache-only replay found an invalid recovery "
+                        f"marker: {recovery_path}"
+                    )
+                raise V11RawResponseError(
+                    code,
+                    finish_reason=str(marker.get("finish_reason") or "cached_failure"),
+                )
+        if cache_only:
+            location = str(cache_path) if cache_path is not None else "<no cache directory>"
+            raise V11TaskCacheMissError(
+                f"Alpha25 cache-only replay missing task response: {location}"
+            )
+        _reset_alpha25_request_timing()
+        try:
+            invoke_options: Dict[str, Any] = {
+                "axis": task.axis,
+                "output_token_budget": task.output_token_budget,
+            }
+            # Preserve the original callable shape for direct/default callers
+            # and test doubles.  Live extraction passes an explicit model from
+            # state, while the compact task helper already reads settings when
+            # no override is supplied.
+            if extraction_model is not None:
+                invoke_options["extraction_model"] = model
+            response = _invoke_alpha25_task_json(
+                system_prompt,
+                user_prompt,
+                **invoke_options,
+            )
+        except Exception as exc:
+            if recovery_path is not None and _is_alpha25_content_failure(exc):
+                marker_payload = {
+                    "cache_record_type": "alpha25_content_failure",
+                    "version": 1,
+                    "code": str(getattr(exc, "code", "invalid_json")),
+                }
+                temporary = recovery_path.with_suffix(".tmp")
+                temporary.write_text(
+                    json.dumps(marker_payload, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                temporary.replace(recovery_path)
+            raise
+        provider_queue_seconds, provider_call_seconds = (
+            _take_alpha25_request_timing()
+        )
+        gate = gate_task_response(
+            response,
+            evidence_unit_id=task.unit_id,
+            evidence_text=task.evidence_text,
+            structured_source_text=paper_text,
+        )
+        if cache_path is not None:
+            response_payload = response.model_dump_json(exclude_none=True, indent=2) + "\n"
+            temporary = cache_path.with_suffix(".tmp")
+            temporary.write_text(response_payload, encoding="utf-8")
+            temporary.replace(cache_path)
+            identity_payload = {
+                "cache_record_type": "alpha25_task_identity",
+                "version": 1,
+                "task_identity": _alpha25_task_cache_identity(
+                    task=task,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    ocr_baseline_id=ocr_baseline_id,
+                    extraction_model=model,
+                ),
+                "response_sha256": hashlib.sha256(
+                    response_payload.encode("utf-8")
+                ).hexdigest(),
+            }
+            identity_path = _alpha25_task_identity_path(cache_path)
+            identity_temporary = identity_path.with_suffix(".tmp")
+            identity_temporary.write_text(
+                json.dumps(identity_payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            identity_temporary.replace(identity_path)
+            if recovery_path is not None:
+                recovery_path.unlink(missing_ok=True)
+        else:
+            response_payload = response.model_dump_json(exclude_none=True)
+        return (
+            response,
+            gate,
+            False,
+            time.monotonic() - task_started,
+            len(response_payload.encode("utf-8")),
+            provider_queue_seconds,
+            provider_call_seconds,
+        )
+
+    def collect_records(task: AxisTask, records: list[Any]) -> None:
+        """Collect both unified anchors and facts after one evidence gate."""
+
+        anchors = [row for row in records if isinstance(row, InventoryAnchor)]
+        facts = [row for row in records if hasattr(row, "fact_type")]
+        if anchors:
+            anchors_by_unit.setdefault(task.unit_id, []).extend(anchors)
+            accepted_anchors.extend(anchors)
+        accepted_facts.extend(facts)
+        accepted_fact_task_ids.extend(task.task_id for _ in facts)
+
+    def execute_phase(tasks: list[AxisTask]) -> None:
+        nonlocal retry_tasks_created
+        pending = list(tasks)
+        wave_index = 0
+        while pending:
+            wave_index += 1
+            for task in pending:
+                ledger.start(task.task_id)
+            outcomes: dict[
+                str, tuple[Any, Any, bool, float, int, float, float]
+            ] = {}
+            failures: dict[str, Exception] = {}
+            completed = 0
+            successful_elapsed: list[float] = []
+            successful_provider_elapsed: list[float] = []
+
+            def collect_from_pool(pool: ThreadPoolExecutor) -> None:
+                nonlocal completed
+                futures = {
+                    pool.submit(run_task, task, time.monotonic()): task
+                    for task in pending
+                }
+                for future in as_completed(futures):
+                    task = futures[future]
+                    try:
+                        outcomes[task.task_id] = future.result()
+                        successful_elapsed.append(outcomes[task.task_id][3])
+                        successful_provider_elapsed.append(outcomes[task.task_id][6])
+                    except Exception as exc:
+                        failures[task.task_id] = exc
+                    completed += 1
+                    if progress_every and (
+                        completed == 1
+                        or completed == len(pending)
+                        or completed % progress_every == 0
+                    ):
+                        ordered_elapsed = sorted(successful_elapsed)
+                        ordered_provider_elapsed = sorted(
+                            successful_provider_elapsed
+                        )
+                        p95 = (
+                            ordered_elapsed[(len(ordered_elapsed) * 95 - 1) // 100]
+                            if ordered_elapsed
+                            else 0.0
+                        )
+                        provider_p95 = (
+                            ordered_provider_elapsed[
+                                (len(ordered_provider_elapsed) * 95 - 1) // 100
+                            ]
+                            if ordered_provider_elapsed
+                            else 0.0
+                        )
+                        logger.warning(
+                            "Alpha25 task progress: wave=%d completed=%d/%d "
+                            "failed=%d latest=%s task_p95=%.1fs provider_p95=%.1fs",
+                            wave_index,
+                            completed,
+                            len(pending),
+                            len(failures),
+                            task.task_id,
+                            p95,
+                            provider_p95,
+                        )
+
+            if _alpha25_shared_task_pool_enabled():
+                # All admitted papers feed the same bounded executor. This keeps
+                # provider slots occupied when one paper has fewer than its old
+                # per-paper worker allocation or finishes a wave early.
+                collect_from_pool(_alpha25_shared_task_pool())
+            else:
+                # Explicit rollback for endpoint comparisons and debugging.
+                with ThreadPoolExecutor(
+                    max_workers=min(workers, len(pending))
+                ) as local_pool:
+                    collect_from_pool(local_pool)
+            retry_children: list[AxisTask] = []
+            for task in pending:
+                outcome = outcomes.get(task.task_id)
+                if outcome is not None:
+                    (
+                        response,
+                        gate,
+                        cached,
+                        elapsed,
+                        response_bytes,
+                        provider_queue_seconds,
+                        provider_call_seconds,
+                    ) = outcome
+                    response_bytes_by_task[task.task_id] = response_bytes
+                    contract_rejections = list(
+                        getattr(response, "contract_rejections", []) or []
+                    )
+                    if contract_rejections:
+                        evidence_issues.extend(
+                            {
+                                **rejection.model_dump(),
+                                "evidence_unit_id": task.unit_id,
+                                "evidence_index": -1,
+                                "evidence": (
+                                    rejection.source_evidence[0]
+                                    if rejection.source_evidence
+                                    else ""
+                                ),
+                            }
+                            for rejection in contract_rejections
+                        )
+                        logger.warning(
+                            "Alpha25 leaf filtered invalid contract rows: %s rejected=%d",
+                            task.task_id,
+                            len(contract_rejections),
+                        )
+                    evidence_issues.extend(
+                        issue.to_dict() for issue in gate.audit_issues
+                    )
+                    if gate.complete:
+                        ledger.succeed(
+                            task.task_id,
+                            accepted_facts=len(gate.accepted),
+                            rejected_facts=len(contract_rejections),
+                            elapsed_seconds=elapsed,
+                            provider_queue_seconds=provider_queue_seconds,
+                            provider_call_seconds=provider_call_seconds,
+                            cached=cached,
+                        )
+                        collect_records(task, gate.accepted)
+                        continue
+                    evidence_issues.extend(issue.to_dict() for issue in gate.issues)
+                    exc = ValueError(
+                        f"alpha25 evidence gate rejected {len(gate.rejected)} fact(s)"
+                    )
+                else:
+                    exc = failures[task.task_id]
+                    if isinstance(exc, V11TaskCacheMissError):
+                        raise exc
+                    if _is_quota_error(exc):
+                        raise V11QuotaError(f"LLM extraction quota exhausted: {exc}") from exc
+
+                budget_child = (
+                    output_budget_retry(task, exc) if outcome is None else None
+                )
+                content_can_split = (
+                    outcome is None
+                    and _is_alpha25_content_failure(exc)
+                    and task.split_depth < failure_split_depth
+                    and len(task.evidence_text) >= failure_split_min_chars
+                )
+                # Preserve the three-level source split as a last-resort content
+                # recovery path. A truncated/empty response first retries the
+                # exact same evidence with a larger output budget; transport,
+                # quota, and rate-limit failures never multiply chunk requests.
+                children = [budget_child] if budget_child is not None else (
+                    split_task_once(
+                        task,
+                        max_depth=(1 if outcome is not None else failure_split_depth),
+                        min_chars=(
+                            gate_split_min_chars
+                            if outcome is not None
+                            else failure_split_min_chars
+                        ),
+                    )
+                    if content_can_split or (outcome is not None and retry_gate_rejections)
+                    else []
+                )
+                if children and retry_tasks_created + len(children) > max_retry_tasks:
+                    logger.error(
+                        "Alpha25 retry-task ceiling reached; refusing request fan-out "
+                        "for %s (created=%d requested=%d ceiling=%d)",
+                        task.task_id,
+                        retry_tasks_created,
+                        len(children),
+                        max_retry_tasks,
+                    )
+                    children = []
+                if children:
+                    logger.warning(
+                        "Alpha25 task recovery scheduled: task=%s kind=%s "
+                        "error=%s children=%d",
+                        task.task_id,
+                        task.kind,
+                        exc,
+                        len(children),
+                    )
+                    if outcome is not None:
+                        ledger.fail(
+                            task.task_id,
+                            str(exc),
+                            accepted_facts=len(gate.accepted),
+                            rejected_facts=(
+                                len(gate.rejected) + len(contract_rejections)
+                            ),
+                        )
+                    else:
+                        ledger.fail(task.task_id, str(exc))
+                    ledger.register_many(children)
+                    ledger.mark_split(task.task_id)
+                    retry_tasks_created += len(children)
+                    retry_children.extend(children)
+                elif outcome is not None:
+                    # The leaf response was schema-valid and every emitted row was
+                    # adjudicated. Preserve grounded rows, reject the others with a
+                    # visible review issue, and complete coverage for this source leaf.
+                    ledger.succeed(
+                        task.task_id,
+                        accepted_facts=len(gate.accepted),
+                        rejected_facts=len(gate.rejected) + len(contract_rejections),
+                        elapsed_seconds=elapsed,
+                        provider_queue_seconds=provider_queue_seconds,
+                        provider_call_seconds=provider_call_seconds,
+                        cached=cached,
+                    )
+                    collect_records(task, gate.accepted)
+                    logger.warning(
+                        "Alpha25 leaf filtered unsupported facts: %s accepted=%d rejected=%d",
+                        task.task_id,
+                        len(gate.accepted),
+                        len(gate.rejected),
+                    )
+                else:
+                    ledger.fail(task.task_id, str(exc))
+                    logger.warning("Alpha25 task unrecovered: %s: %s", task.task_id, exc)
+            pending = retry_children
+
+    logger.warning(
+        "Alpha25 extraction plan: strategy=%s units=%d inventory_tasks=%d "
+        "fact_tasks=%d total_initial_tasks=%d max_evidence_chars=%d "
+        "dense_tasks=%d sparse_tasks=%d workers=%d shared_pool=%s "
+        "global_concurrency=%d thinking=%s",
+        task_strategy,
+        len(units),
+        len(inventory_tasks),
+        len(axis_tasks),
+        len(inventory_tasks) + len(axis_tasks),
+        max_initial_evidence_chars,
+        sum(score >= dense_signal_threshold for score in initial_signal_scores),
+        sum(score <= sparse_signal_threshold for score in initial_signal_scores),
+        workers,
+        _alpha25_shared_task_pool_enabled(),
+        _alpha25_global_concurrency(),
+        configured_thinking_mode,
+    )
+    execute_phase(inventory_tasks)
+    execute_phase(axis_tasks)
+    try:
+        ledger.assert_complete()
+    except IncompleteCoverageError as exc:
+        raise V11IncompleteCoverageError(str(exc)) from exc
+
+    promotion_enabled = os.getenv(
+        "KNOWMAT2_ALPHA25_PROMOTION_ENABLED", "1"
+    ).strip().casefold() in {"1", "true", "yes", "on"}
+    promotion_started = time.monotonic()
+    promotion_issues: list[Dict[str, Any]] = []
+    promoted_fact_count = len(accepted_facts)
+    if promotion_enabled:
+        promotion = promote_axis_facts(
+            accepted_anchors,
+            accepted_facts,
+            source_text=paper_text,
+            task_ids=accepted_fact_task_ids,
+        )
+        promoted_facts = list(promotion.accepted)
+        promoted_fact_count = len(promoted_facts)
+        promotion_issues = [issue.to_dict() for issue in promotion.issues]
+    else:
+        promoted_facts = accepted_facts
+    promotion_elapsed = time.monotonic() - promotion_started
+
+    materialized = materialize_candidate(
+        accepted_anchors,
+        promoted_facts,
+        paper_metadata=paper_metadata,
+        paper_routing=paper_routing,
+        source_text=paper_text,
+        source_dir=(Path(paper_text_path).parent if paper_text_path else None),
+    )
+    coverage = ledger.summary()
+    provider_task_elapsed = sorted(
+        float(record.elapsed_seconds)
+        for record in ledger.records.values()
+        if record.elapsed_seconds is not None and record.state != "cached"
+    )
+    provider_queue_elapsed = sorted(
+        float(record.provider_queue_seconds)
+        for record in ledger.records.values()
+        if record.provider_queue_seconds is not None and record.state != "cached"
+    )
+    provider_call_elapsed = sorted(
+        float(record.provider_call_seconds)
+        for record in ledger.records.values()
+        if record.provider_call_seconds is not None and record.state != "cached"
+    )
+
+    def percentile(values: list[float], percent: int) -> float | None:
+        if not values:
+            return None
+        return values[(len(values) * percent - 1) // 100]
+
+    v203_gates = {
+        "tensile_protocol_ledger": tensile_protocol_ledger_v203_enabled(),
+        "dense_tensile_table_completion": (
+            dense_tensile_table_completion_v203_enabled()
+        ),
+        "property_coordinate_quarantine": (
+            property_coordinate_quarantine_v203_enabled()
+        ),
+    }
+    coverage.update(
+        {
+            "evidence_issues": evidence_issues,
+            "materialization_issues": [
+                *evidence_issues,
+                *promotion_issues,
+                *(issue.to_dict() for issue in materialized.issues),
+            ],
+            "promotion_enabled": promotion_enabled,
+            "promotion_input_fact_count": len(accepted_facts),
+            "promotion_accepted_fact_count": promoted_fact_count,
+            "promotion_issue_count": len(promotion_issues),
+            **({"v203_gates": v203_gates} if any(v203_gates.values()) else {}),
+            "promotion_elapsed_seconds": promotion_elapsed,
+            "elapsed_seconds": time.monotonic() - started,
+            "ocr_baseline_id": ocr_baseline_id,
+            "task_strategy": task_strategy,
+            "unified_inventory": unified_inventory,
+            "initial_task_count": len(inventory_tasks) + len(axis_tasks),
+            "initial_inventory_task_count": len(inventory_tasks),
+            "initial_fact_task_count": len(axis_tasks),
+            "retry_task_count": retry_tasks_created,
+            "max_evidence_chars": max_initial_evidence_chars,
+            "dense_initial_task_count": sum(
+                score >= dense_signal_threshold for score in initial_signal_scores
+            ),
+            "sparse_initial_task_count": sum(
+                score <= sparse_signal_threshold for score in initial_signal_scores
+            ),
+            "response_bytes": sum(response_bytes_by_task.values()),
+            "provider_task_elapsed_p50": percentile(provider_task_elapsed, 50),
+            "provider_task_elapsed_p95": percentile(provider_task_elapsed, 95),
+            "provider_task_elapsed_max": (
+                provider_task_elapsed[-1] if provider_task_elapsed else None
+            ),
+            "provider_queue_elapsed_sum": sum(provider_queue_elapsed),
+            "provider_queue_elapsed_p50": percentile(provider_queue_elapsed, 50),
+            "provider_queue_elapsed_p95": percentile(provider_queue_elapsed, 95),
+            "provider_queue_elapsed_max": (
+                provider_queue_elapsed[-1] if provider_queue_elapsed else None
+            ),
+            "provider_call_elapsed_sum": sum(provider_call_elapsed),
+            "provider_call_elapsed_p50": percentile(provider_call_elapsed, 50),
+            "provider_call_elapsed_p95": percentile(provider_call_elapsed, 95),
+            "provider_call_elapsed_max": (
+                provider_call_elapsed[-1] if provider_call_elapsed else None
+            ),
+            "workers": workers,
+            "thinking_mode": configured_thinking_mode,
+        }
+    )
+    logger.warning(
+        "Alpha25 coverage complete: tasks=%d accepted=%d rejected=%d cached=%d "
+        "elapsed=%.1fs provider_p95=%s queue_sum=%.1fs",
+        coverage["task_count"],
+        coverage["accepted_facts"],
+        coverage["rejected_facts"],
+        coverage["states"].get("cached", 0),
+        coverage["elapsed_seconds"],
+        (
+            f"{coverage['provider_call_elapsed_p95']:.1f}s"
+            if coverage["provider_call_elapsed_p95"] is not None
+            else "n/a"
+        ),
+        coverage["provider_queue_elapsed_sum"],
+    )
+    return materialized.document, coverage
+
+
+def _normalize_v11_targets(value: Any) -> list[Dict[str, str]]:
+    """Normalize the compact sample-discovery response and remove duplicates."""
+    if not isinstance(value, dict):
+        return []
+    raw_targets = value.get("targets") or value.get("items") or []
+    if not isinstance(raw_targets, list):
+        return []
+    allowed_roles = {"Target", "Reference"}
+    allowed_natures = {
+        "Experimental",
+        "Computed",
+        "Literature_Experimental",
+        "Literature_Computed",
+    }
+    targets: list[Dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    limit = int(os.getenv("KNOWMAT2_EXTRACTION_TARGETS_PER_CHUNK", "12"))
+    for row in raw_targets:
+        if not isinstance(row, dict):
+            continue
+        sample_id = str(row.get("Sample_ID") or row.get("sample_id") or "").strip()
+        if not sample_id:
+            continue
+        role = str(row.get("Role") or row.get("role") or "Target").strip()
+        nature = str(
+            row.get("Data_Nature") or row.get("data_nature") or "Experimental"
+        ).strip()
+        if role not in allowed_roles:
+            role = "Reference" if "ref" in role.casefold() else "Target"
+        if nature not in allowed_natures:
+            nature = "Literature_Experimental" if role == "Reference" else "Experimental"
+        key = (sample_id.casefold(), role, nature)
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(
+            {"Sample_ID": sample_id, "Role": role, "Data_Nature": nature}
+        )
+        if len(targets) >= limit:
+            break
+    return targets
+
+
+def _build_glm_v11_user_prompt(
+    chunk_text: str,
+    paper_routing: Dict[str, Any],
+    target: Dict[str, str] | None = None,
+) -> str:
+    """Build a compact execution prompt while keeping the official system rules."""
+    target_clause = "Extract the material items directly evidenced in this chunk."
+    if target:
+        target_clause = (
+            "Extract exactly one item for Sample_ID "
+            + target["Sample_ID"]
+            + f" with Role {target['Role']} and Data_Nature {target['Data_Nature']}; "
+            "do not emit any other sample or reference."
+        )
+    return (
+        "GLM execution request for one evidence chunk. "
+        + target_clause
+        + " Use the four alpha.6 axes Composition, Processing, Structure, and"
+        " Properties. Preserve raw values, units, methods, conditions,"
+        " source_evidence, and origin; never infer or normalize. Omit absent optional"
+        " fields and keep evidence quotes short. Return one legal JSON object with"
+        " keys Paper_Metadata, Paper_Routing, and items. Every item must contain"
+        " Item_ID, Sample_ID, Role, Data_Nature, base_material, application,"
+        " research_paradigm, and Extracted_Data with the four axes. Return JSON only;"
+        " do not output markdown, reasoning, or Rule_Metadata.\n\n"
+        f"Routing: {paper_routing.get('base_material', '')} / "
+        f"{paper_routing.get('application', '')} / "
+        f"{paper_routing.get('research_paradigm', '')}\n\n"
+        f"Evidence:\n{chunk_text}"
+    )
+
+
+def _invoke_v11_target_discovery(
+    chunk_text: str,
+    paper_routing: Dict[str, Any],
+) -> list[Dict[str, str]]:
+    """Find bounded sample/item identities before GLM emits full v11 records."""
+    llm = get_llm(agent_type="extraction")
+    response_mode = _v11_json_mode_for_model(settings.extraction_model)
+    bind_kwargs: Dict[str, Any] = {
+        "max_tokens": int(os.getenv("KNOWMAT2_EXTRACTION_TARGET_MAX_TOKENS", "512"))
+    }
+    if response_mode:
+        bind_kwargs["response_format"] = response_mode
+    llm = llm.bind(**bind_kwargs)
+    target_limit = int(os.getenv("KNOWMAT2_EXTRACTION_TARGETS_PER_CHUNK", "12"))
+    prompt = (
+        "Identify only distinct material sample/item identities directly supported by "
+        "the evidence below. Return JSON as {\"targets\":[{\"Sample_ID\":str,"
+        "\"Role\":\"Target|Reference\",\"Data_Nature\":"
+        "\"Experimental|Computed|Literature_Experimental|Literature_Computed\"}]}. "
+        "Use source sample labels. Include a Reference only for a cited quantitative "
+        "material/process/structure/property fact. Do not list authors, methods, "
+        "algorithms, unnamed search candidates, or generic alloy families. Return an "
+        f"empty targets list when no material item is evidenced. Return at most {target_limit} "
+        "targets and no keys other than targets; every target object must contain only "
+        "Sample_ID, Role, and Data_Nature.\n\n"
+        f"Paper routing: {json.dumps(paper_routing, ensure_ascii=False)}\n\n"
+        f"Evidence:\n{chunk_text}"
+    )
+    try:
+        response = llm.invoke(
+            [
+                {"role": "system", "content": "Return one compact JSON object only."},
+                {"role": "user", "content": prompt},
+            ]
+        )
+    except Exception as exc:
+        classified = _classify_v11_invoke_error(exc)
+        if classified is not None:
+            raise classified from exc
+        raise
+    return _normalize_v11_targets(_decode_v11_json_response(response))
 
 
 _COMPACT_FALLBACK_SYSTEM = (
@@ -152,8 +1945,54 @@ def _invoke_plain_json_fallback(full_prompt: str, compact_user: str | None = Non
         response = llm.invoke(fallback_prompt)
     content = _flatten_message_content(getattr(response, "content", response))
     payload = _extract_json_object_text(content)
-    model = CompositionList.model_validate_json(payload)
+    extracted = _coerce_compositions_payload(payload)
+    model = CompositionList.model_validate(extracted)
     return json.loads(model.model_dump_json())
+
+
+def _coerce_compositions_payload(payload: str) -> Dict[str, Any]:
+    """Normalize a raw-JSON fallback payload into a CompositionList-shaped dict.
+
+    Long-input runs on MiniMax sometimes truncate after the Paper_Metadata
+    block and return a metadata-only object (``Paper_Title``/``DOI`` at the top
+    level, NO ``compositions`` and NO ``items``).  Validating that directly
+    raises "compositions Field required" and aborts the whole paper.  Here we
+    salvage what the model did emit instead of crashing:
+
+      - accept the list under ``compositions`` or ``items``;
+      - if the list lives inside a nested object, lift it out;
+      - if there is genuinely no list, default ``compositions`` to ``[]`` so the
+        downstream 0-property quality gate can trigger the compact fallback
+        rather than the run dying here.
+
+    Raises ``ValueError`` only when the payload is not a JSON object at all.
+    """
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"Fallback payload is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"Fallback payload is not a JSON object: {type(data).__name__}")
+
+    # Already has the list (validator handles items->compositions + str decode).
+    if isinstance(data.get("compositions"), (list, str)) or isinstance(data.get("items"), list):
+        return data
+
+    # Look one level down for a stray compositions/items list.
+    for value in data.values():
+        if isinstance(value, dict):
+            nested = value.get("compositions") or value.get("items")
+            if isinstance(nested, list):
+                return {**data, "compositions": nested}
+
+    # Metadata-only (or otherwise list-less) payload: degrade to empty list so
+    # the paper is not lost; the 0-property gate will retry via compact fallback.
+    logger.warning(
+        "Fallback payload had no compositions/items list (keys=%s); "
+        "defaulting to empty compositions.",
+        sorted(data.keys()),
+    )
+    return {**data, "compositions": []}
 
 
 def _count_extracted_props(extracted: Dict[str, Any]) -> int:
@@ -207,6 +2046,19 @@ def _slim_paper_text_for_fallback(paper_text: str) -> str:
     return slimmed
 
 
+_REFERENCES_HEADING_RE = re.compile(
+    r"(?im)^#{1,4}\s+(?:references|bibliography|参考文献)\s*$"
+)
+
+
+def _paper_text_for_extraction(paper_text: str) -> str:
+    """Drop the terminal bibliography while retaining all evidentiary body sections."""
+    match = _REFERENCES_HEADING_RE.search(paper_text or "")
+    if match and match.start() > len(paper_text) * 0.35:
+        return paper_text[: match.start()].rstrip()
+    return paper_text
+
+
 def _log_extraction_diag(path: str, extracted: Dict[str, Any]) -> None:
     """Log which extraction path produced the result and its property counts.
 
@@ -231,6 +2083,1348 @@ def _log_extraction_diag(path: str, extracted: Dict[str, Any]) -> None:
         logger.debug("extraction diag failed: %s", exc)
 
 
+def _v11_candidate_stats(candidate: Dict[str, Any]) -> tuple[int, int, int, int]:
+    """Return item, property, composition-observation and structure-observation counts."""
+    items = candidate.get("items") if isinstance(candidate, dict) else []
+    if not isinstance(items, list):
+        return 0, 0, 0, 0
+    properties = composition_obs = structure_obs = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        extracted = item.get("Extracted_Data") or {}
+        properties += len(extracted.get("Properties") or [])
+        composition_obs += len(
+            (extracted.get("Composition") or {}).get("Composition_Observations") or []
+        )
+        structure_obs += len(
+            (extracted.get("Structure") or {}).get("Structure_Observations") or []
+        )
+    return len(items), properties, composition_obs, structure_obs
+
+
+def _repair_compact_v11_candidate(value: Any) -> Any:
+    """Fill schema containers omitted by compact GLM output without adding facts."""
+    if not isinstance(value, dict):
+        return value
+    repaired = deepcopy(value)
+    repaired.setdefault("Paper_Metadata", {})
+    routing = repaired.setdefault("Paper_Routing", {})
+    items = repaired.get("items")
+    if not isinstance(items, list):
+        return repaired
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        item.setdefault("Item_ID", f"item_{index:03d}")
+        role = str(item.get("Role") or "Target")
+        if role not in {"Target", "Reference"}:
+            role = "Reference" if "ref" in role.casefold() else "Target"
+        item["Role"] = role
+        raw_nature = str(item.get("Data_Nature") or "").strip()
+        if raw_nature.casefold() == "hybrid":
+            paradigm = str(
+                item.get("research_paradigm")
+                or routing.get("research_paradigm")
+                or "Experimental"
+            ).strip()
+            computed = paradigm.casefold() == "pure_simulation"
+            if role == "Reference":
+                item["Data_Nature"] = (
+                    "Literature_Computed" if computed else "Literature_Experimental"
+                )
+            else:
+                item["Data_Nature"] = "Computed" if computed else "Experimental"
+        elif not raw_nature:
+            item["Data_Nature"] = (
+                "Literature_Experimental" if role == "Reference" else "Experimental"
+            )
+        for key, fallback in (
+            ("base_material", "Metals"),
+            ("application", "Structural"),
+            ("research_paradigm", "Experimental"),
+        ):
+            item.setdefault(key, routing.get(key) or fallback)
+        extracted = item.setdefault("Extracted_Data", {})
+        composition = extracted.setdefault("Composition", {})
+        if composition.get("Composition_Text") is None:
+            composition["Composition_Text"] = {}
+        composition.setdefault("Composition_Text", {})
+        composition_observations = composition.setdefault("Composition_Observations", [])
+        if isinstance(composition_observations, list):
+            for observation in composition_observations:
+                if not isinstance(observation, dict):
+                    continue
+                components = observation.get("components") or []
+                if not isinstance(components, list):
+                    continue
+                for component in components:
+                    if not isinstance(component, dict):
+                        continue
+                    value_kind = str(component.get("value_kind") or "").casefold()
+                    if value_kind in {"nominal", "exact", "point", "single"}:
+                        component["value_kind"] = (
+                            "scalar" if component.get("value") is not None else "categorical"
+                        )
+                    elif value_kind in {
+                        "qualitative",
+                        "label",
+                        "addition",
+                        "phase_identified",
+                        "relative_change",
+                    }:
+                        component["value_kind"] = "categorical"
+        processing = extracted.setdefault("Processing", {})
+        if processing.get("Process_Text") is None:
+            processing["Process_Text"] = {}
+        processing.setdefault("Process_Text", {})
+        process_route = processing.setdefault("Process_Route", {})
+        process_route.setdefault("candidate_stages", [])
+        structure = extracted.setdefault("Structure", {})
+        if structure.get("Structure_Text") is None:
+            structure["Structure_Text"] = {}
+        structure.setdefault("Structure_Text", {})
+        structure.setdefault("structure_status", "not_reported")
+        structure_observations = structure.setdefault("Structure_Observations", [])
+        structure_status = str(structure.get("structure_status") or "").casefold()
+        structure_status_aliases = {
+            "characterized": "reported",
+            "characterised": "reported",
+            "observed": "reported",
+            "present": "reported",
+            "qualitative_only": "reported",
+        }
+        if structure_status in {"computed", "inferred"}:
+            structure["structure_status"] = (
+                "reported" if structure_observations else "unknown"
+            )
+        elif structure_status in structure_status_aliases:
+            structure["structure_status"] = structure_status_aliases[structure_status]
+        properties = extracted.setdefault("Properties", [])
+        if isinstance(properties, list):
+            for prop_index, prop in enumerate(properties, start=1):
+                if not isinstance(prop, dict):
+                    continue
+                prop.setdefault("property_id_candidate", f"prop_{prop_index:03d}")
+                prop.setdefault("property_name_raw", "")
+                prop.setdefault("value_raw", "")
+                prop.setdefault("unit_raw", "")
+                prop.setdefault("test_method_raw", "")
+                prop.setdefault("test_standard_raw", "")
+                prop.setdefault("test_condition_raw", "")
+                prop.setdefault("test_specimen_raw", "")
+                prop.setdefault("raw_note", "")
+                prop.setdefault("data_source", "text")
+                prop.setdefault("source_evidence", [])
+                prop.setdefault("confidence", 0.5)
+        stages = process_route.get("candidate_stages") or []
+        for stage_index, stage in enumerate(stages, start=1):
+            if not isinstance(stage, dict):
+                continue
+            stage.setdefault("candidate_stage_id", f"cand_{stage_index:03d}")
+            stage.setdefault("stage_index_candidate", stage_index)
+            stage.setdefault("process_name_raw", "")
+            stage.setdefault("process_code_candidate", "")
+            stage.setdefault("process_role_candidate", "unspecified")
+            stage.setdefault("parameters_raw", [])
+            stage.setdefault("source_evidence", [])
+            stage.setdefault("confidence", 0.5)
+    return repaired
+
+
+def _coerce_v11_candidate(value: Any) -> Dict[str, Any]:
+    """Validate and serialize a v11 candidate returned by a tool or raw JSON call."""
+    if isinstance(value, V11CandidateDocument):
+        model = value
+    else:
+        if isinstance(value, str):
+            value = json.loads(_extract_json_object_text(value))
+        value = _repair_compact_v11_candidate(value)
+        model = V11CandidateDocument.model_validate(value)
+    return json.loads(model.model_dump_json(exclude_none=True))
+
+
+def _invoke_v11_raw_json(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    allow_empty_items: bool = False,
+    single_item_target: Dict[str, str] | None = None,
+) -> Dict[str, Any]:
+    """Raw-JSON fallback that keeps the same alpha.6 candidate contract."""
+    llm = get_llm(agent_type="extraction")
+    response_mode = _v11_json_mode_for_model(settings.extraction_model)
+    if response_mode:
+        llm = llm.bind(response_format=response_mode)
+    if _v11_single_item_strategy_for_model(settings.extraction_model):
+        final_instruction = (
+            "Return JSON only. Follow the bounded GLM v11 execution shape and exact "
+            "item identity specified in the preceding user message. Do not add prose, "
+            "markdown, reasoning, Rule_Metadata, or extra items."
+        )
+    else:
+        final_instruction = _V11_COMPACT_OUTPUT_INSTRUCTION
+    if single_item_target and not _v11_single_item_strategy_for_model(
+        settings.extraction_model
+    ):
+        final_instruction += (
+            " Return exactly ONE item and no others. Its identity must match: "
+            + json.dumps(single_item_target, ensure_ascii=False, sort_keys=True)
+            + ". Do not emit comparator or reference items in this call unless that exact "
+            "identity is the requested item."
+        )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+    if not _v11_single_item_strategy_for_model(settings.extraction_model):
+        messages.append({"role": "user", "content": final_instruction})
+    try:
+        response = llm.invoke(
+            messages
+        )
+    except Exception as exc:
+        classified = _classify_v11_invoke_error(exc)
+        if classified is not None:
+            raise classified from exc
+        raise
+    value = _decode_v11_json_response(response)
+    if single_item_target and isinstance(value, dict):
+        expected = single_item_target["Sample_ID"].strip().casefold()
+        emitted_items = [
+            item for item in value.get("items", []) or [] if isinstance(item, dict)
+        ]
+        matching = [
+            item
+            for item in emitted_items
+            if str(item.get("Sample_ID") or "").strip().casefold() == expected
+        ]
+        if not matching and len(emitted_items) == 1:
+            rebound = deepcopy(emitted_items[0])
+            rebound["Sample_ID"] = single_item_target["Sample_ID"]
+            rebound["Role"] = single_item_target["Role"]
+            rebound["Data_Nature"] = single_item_target["Data_Nature"]
+            matching = [rebound]
+        if not matching:
+            raise V11RawResponseError(
+                "target_item_missing",
+                finish_reason="stop",
+                content=json.dumps(value, ensure_ascii=False)[:640],
+                response_metadata={"model_name": settings.extraction_model},
+            )
+        value = {**value, "items": [matching[0]]}
+    if allow_empty_items and isinstance(value, dict):
+        if value.get("items") == []:
+            return value
+        if "items" not in value and set(value).issubset(
+            {"Paper_Title", "DOI", "title", "doi", "Paper_Metadata"}
+        ):
+            return {
+                "Paper_Metadata": value.get("Paper_Metadata")
+                or {"Paper_Title": value.get("Paper_Title") or value.get("title"), "DOI": value.get("DOI") or value.get("doi")},
+                "Paper_Routing": {},
+                "items": [],
+            }
+    return _coerce_v11_candidate(value)
+
+
+def _split_extraction_text(
+    paper_text: str,
+    max_chars: int = 12000,
+    overlap_chars: int = 1800,
+) -> list[str]:
+    """Split long OCR text on paragraph boundaries with bounded overlap."""
+    if len(paper_text) <= max_chars:
+        return [paper_text]
+    chunks: list[str] = []
+    start = 0
+    text_len = len(paper_text)
+    while start < text_len:
+        target = min(start + max_chars, text_len)
+        if target < text_len:
+            boundary = paper_text.rfind("\n\n", start + max_chars // 2, target)
+            if boundary > start:
+                target = boundary
+        chunk = paper_text[start:target].strip()
+        if chunk:
+            chunks.append(chunk)
+        if target >= text_len:
+            break
+        start = max(target - overlap_chars, start + 1)
+    return chunks
+
+
+def _bounded_extraction_chunks(
+    paper_text: str,
+    max_chars: int,
+    overlap_chars: int,
+    max_chunks: int,
+) -> tuple[list[str], int, int]:
+    """Split text without inflating chunks beyond the requested output-safe size."""
+    max_chunks = max(1, max_chunks)
+    effective_chars = max(1000, max_chars)
+    effective_overlap = max(0, overlap_chars)
+    if effective_overlap >= effective_chars:
+        effective_overlap = effective_chars // 4
+        logger.warning(
+            "Extraction overlap %d is not smaller than chunk size %d; clamped to %d",
+            overlap_chars,
+            effective_chars,
+            effective_overlap,
+        )
+    elif effective_overlap > effective_chars // 3:
+        effective_overlap = effective_chars // 3
+        logger.warning(
+            "Extraction overlap %d is too large for chunk size %d; clamped to %d",
+            overlap_chars,
+            effective_chars,
+            effective_overlap,
+        )
+
+    chunks = _split_extraction_text(paper_text, effective_chars, effective_overlap)
+    if len(chunks) > max_chunks:
+        raise V11ChunkPlanError(
+            "V11 extraction requires "
+            f"{len(chunks)} chunks at the requested {effective_chars}-character limit, "
+            f"exceeding KNOWMAT2_EXTRACTION_MAX_CHUNKS={max_chunks}. "
+            "Increase the chunk-count limit instead of enlarging chunks, which risks "
+            "truncated LLM output."
+        )
+
+    return chunks, effective_chars, effective_overlap
+
+
+def _split_retry_chunk(
+    chunk: str,
+    overlap_chars: int,
+    min_chars: int,
+) -> list[str]:
+    """Split one failed leaf near a paragraph boundary into two retry leaves."""
+    if len(chunk) <= max(1, min_chars):
+        return [chunk]
+    lower = len(chunk) // 3
+    upper = 2 * len(chunk) // 3
+    boundary = chunk.rfind("\n\n", lower, upper)
+    if boundary <= 0:
+        boundary = len(chunk) // 2
+    right_start = max(0, boundary - max(0, overlap_chars))
+    return [part for part in (chunk[:boundary].strip(), chunk[right_start:].strip()) if part]
+
+
+@dataclass(frozen=True)
+class _V11EvidenceTask:
+    """One independently coverable evidence unit planned from an OCR chunk."""
+
+    text: str
+    kind: str = "chunk"
+    sample_columns: int = 0
+    table_ordinal: int = 0
+    column_start: int = 0
+    sample_ids: tuple[str, ...] = ()
+
+
+def _parse_markdown_row(line: str) -> list[str] | None:
+    """Parse one pipe-delimited Markdown row while preserving escaped pipes."""
+    raw = line.strip()
+    if "|" not in raw:
+        return None
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in raw:
+        if char == "|" and not escaped:
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+        if char == "\\" and not escaped:
+            escaped = True
+        else:
+            escaped = False
+    cells.append("".join(current).strip())
+    if raw.startswith("|") and cells and cells[0] == "":
+        cells.pop(0)
+    if raw.endswith("|") and cells and cells[-1] == "":
+        cells.pop()
+    return cells if len(cells) >= 2 else None
+
+
+def _is_markdown_separator(cells: list[str]) -> bool:
+    return bool(cells) and all(
+        re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in cells
+    )
+
+
+def _format_markdown_row(cells: list[str]) -> str:
+    return "| " + " | ".join(cells) + " |"
+
+
+def _markdown_table_blocks(
+    text: str,
+    *,
+    minimum_sample_columns: int,
+) -> list[dict[str, Any]]:
+    """Return structurally valid wide table blocks without accepting ragged rows."""
+    lines = text.splitlines()
+    blocks: list[dict[str, Any]] = []
+    index = 0
+    while index + 2 < len(lines):
+        header = _parse_markdown_row(lines[index])
+        separator = _parse_markdown_row(lines[index + 1])
+        if (
+            not header
+            or not separator
+            or len(header) != len(separator)
+            or not _is_markdown_separator(separator)
+            or len(header) - 1 < minimum_sample_columns
+        ):
+            index += 1
+            continue
+        rows = [header, separator]
+        cursor = index + 2
+        ragged = False
+        while cursor < len(lines) and "|" in lines[cursor]:
+            row = _parse_markdown_row(lines[cursor])
+            if row is None or len(row) != len(header):
+                ragged = True
+                while cursor < len(lines) and "|" in lines[cursor]:
+                    cursor += 1
+                break
+            rows.append(row)
+            cursor += 1
+        if not ragged and len(rows) >= 3:
+            blocks.append({"start": index, "end": cursor, "rows": rows})
+        index = max(index + 1, cursor)
+    return blocks
+
+
+def _plan_v11_evidence_tasks(
+    chunk: str,
+    *,
+    columns_per_slice: int = 2,
+    context_chars: int = 1200,
+    minimum_sample_columns: int = 3,
+    short_table_max_rows: int = 4,
+) -> list[_V11EvidenceTask]:
+    """Split structurally wide Markdown tables by samples before LLM extraction."""
+    text = str(chunk or "").strip()
+    if not text:
+        return []
+    columns_per_slice = max(1, columns_per_slice)
+    context_chars = max(0, context_chars)
+    short_table_max_rows = max(1, short_table_max_rows)
+    lines = text.splitlines()
+    blocks = _markdown_table_blocks(
+        text,
+        minimum_sample_columns=max(1, minimum_sample_columns),
+    )
+    if not blocks:
+        return [_V11EvidenceTask(text=text)]
+
+    tasks: list[_V11EvidenceTask] = []
+    for table_ordinal, block in enumerate(blocks, start=1):
+        previous_end = blocks[table_ordinal - 2]["end"] if table_ordinal > 1 else 0
+        next_start = (
+            blocks[table_ordinal]["start"]
+            if table_ordinal < len(blocks)
+            else len(lines)
+        )
+        before = "\n".join(lines[previous_end : block["start"]]).strip()
+        after = "\n".join(lines[block["end"] : next_start]).strip()
+        before = before[-context_chars:] if context_chars else ""
+        after = after[:context_chars] if context_chars else ""
+        rows: list[list[str]] = block["rows"]
+        sample_count = len(rows[0]) - 1
+        data_row_count = len(rows) - 2
+        effective_columns = (
+            columns_per_slice
+            if data_row_count <= short_table_max_rows
+            else min(columns_per_slice, 2)
+        )
+        for column_start in range(0, sample_count, effective_columns):
+            chosen = list(
+                range(
+                    column_start + 1,
+                    min(sample_count, column_start + effective_columns) + 1,
+                )
+            )
+            sliced_rows = [
+                _format_markdown_row([row[0], *(row[column] for column in chosen)])
+                for row in rows
+            ]
+            parts = [part for part in (before, "\n".join(sliced_rows), after) if part]
+            tasks.append(
+                _V11EvidenceTask(
+                    text="\n\n".join(parts),
+                    kind="table",
+                    sample_columns=len(chosen),
+                    table_ordinal=table_ordinal,
+                    column_start=column_start + 1,
+                    sample_ids=tuple(rows[0][column] for column in chosen),
+                )
+            )
+
+    table_lines: set[int] = set()
+    for block in blocks:
+        table_lines.update(range(block["start"], block["end"]))
+    prose = "\n".join(
+        line for line_index, line in enumerate(lines) if line_index not in table_lines
+    ).strip()
+    if prose:
+        tasks.append(_V11EvidenceTask(text=prose, kind="prose"))
+    return tasks
+
+
+def _narrow_table_task(task_text: str) -> list[_V11EvidenceTask]:
+    """Turn one two-sample table task into stable one-sample children."""
+    return [
+        task
+        for task in _plan_v11_evidence_tasks(
+            task_text,
+            columns_per_slice=1,
+            context_chars=int(
+                os.getenv("KNOWMAT2_EXTRACTION_TABLE_CONTEXT_CHARS", "1200")
+            ),
+            minimum_sample_columns=2,
+        )
+        if task.kind == "table"
+    ]
+
+
+def _should_retry_v11_chunk(exc: Exception) -> bool:
+    """Retry bounded provider failures, but not deterministic schema validation."""
+    if isinstance(exc, V11RawResponseError):
+        return exc.code in {
+            "output_truncated",
+            "empty_content",
+            "invalid_json",
+            "target_item_missing",
+        }
+    if exc.__class__.__name__ in {"ValidationError", "JSONDecodeError"}:
+        return False
+    message = str(exc).casefold()
+    return bool(re.search(r"\b(?:429|500|502|503)\b", message)) or any(
+        signal in message
+        for signal in (
+            "timeout",
+            "timed out",
+            "connection",
+            "rate limit",
+            "internalserviceerror",
+            "internal server error",
+        )
+    )
+
+
+def _is_v11_content_failure(exc: Exception) -> bool:
+    """Return whether retrying should reduce the evidence leaf before another call."""
+    return isinstance(exc, V11RawResponseError) and exc.code in {
+        "output_truncated",
+        "empty_content",
+        "invalid_json",
+        "target_item_missing",
+    }
+
+
+def _shared_method_context(paper_text: str, max_chars: int = 7000) -> str:
+    """Collect compact methods/test sections that qualify facts in other chunks."""
+    heading_re = re.compile(r"(?m)^(#{1,4})\s+(.+?)\s*$")
+    matches = list(heading_re.finditer(paper_text or ""))
+    sections: list[tuple[int, str]] = []
+    for index, match in enumerate(matches):
+        title = match.group(2).strip().casefold()
+        if not re.search(
+            r"\b(method|experimental|fabrication|processing|characteri[sz]ation|test|testing)\b",
+            title,
+        ):
+            continue
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(paper_text)
+        section = paper_text[match.start():end].strip()
+        priority = 0 if re.search(r"\b(test|testing|fabrication)\b", title) else 1
+        sections.append((priority, section))
+    selected: list[str] = []
+    used = 0
+    for _, section in sorted(sections, key=lambda row: row[0]):
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        selected.append(section[:remaining])
+        used += min(len(section), remaining)
+    return "\n\n".join(selected)
+
+
+def _merge_unique_records(target: list[Any], incoming: list[Any]) -> None:
+    signatures = {json.dumps(row, ensure_ascii=False, sort_keys=True) for row in target}
+    for row in incoming:
+        signature = json.dumps(row, ensure_ascii=False, sort_keys=True)
+        if signature not in signatures:
+            target.append(deepcopy(row))
+            signatures.add(signature)
+
+
+def _merge_v11_candidates(candidates: list[Dict[str, Any]]) -> Dict[str, Any]:
+    """Reconcile aliases and merge facts emitted by independent evidence chunks."""
+    before = sum(len(candidate.get("items", []) or []) for candidate in candidates)
+    merged = reconcile_v11_candidates(candidates)
+    logger.info(
+        "V11 cross-chunk reconciliation: source_items=%d reconciled_items=%d",
+        before,
+        len(merged.get("items", []) or []),
+    )
+    return _coerce_v11_candidate(merged)
+
+
+def _extract_v11_chunks(
+    system_prompt: str,
+    paper_text: str,
+    paper_routing: Dict[str, Any],
+    cache_dir: Path | None = None,
+) -> Dict[str, Any]:
+    extraction_started = time.monotonic()
+    requested_chunk_chars = int(os.getenv("KNOWMAT2_EXTRACTION_CHUNK_CHARS", "6000"))
+    requested_overlap = int(os.getenv("KNOWMAT2_EXTRACTION_CHUNK_OVERLAP", "1200"))
+    max_chunks = int(os.getenv("KNOWMAT2_EXTRACTION_MAX_CHUNKS", "24"))
+    outer_chunks, effective_chunk_chars, effective_overlap = _bounded_extraction_chunks(
+        paper_text,
+        requested_chunk_chars,
+        requested_overlap,
+        max_chunks,
+    )
+    if not outer_chunks:
+        raise ValueError("V11 extraction input is empty")
+    adaptive_tables = os.getenv(
+        "KNOWMAT2_EXTRACTION_ADAPTIVE_TABLES", "true"
+    ).strip().casefold() not in {"0", "false", "no", "off"}
+    table_columns = max(
+        1, int(os.getenv("KNOWMAT2_EXTRACTION_TABLE_COLUMNS", "3"))
+    )
+    table_context_chars = max(
+        0, int(os.getenv("KNOWMAT2_EXTRACTION_TABLE_CONTEXT_CHARS", "1200"))
+    )
+    short_table_max_rows = max(
+        1, int(os.getenv("KNOWMAT2_EXTRACTION_SHORT_TABLE_MAX_ROWS", "4"))
+    )
+    evidence_tasks: list[_V11EvidenceTask] = []
+    evidence_roots: list[int] = []
+    for outer_index, outer_chunk in enumerate(outer_chunks):
+        planned = (
+            _plan_v11_evidence_tasks(
+                outer_chunk,
+                columns_per_slice=table_columns,
+                context_chars=table_context_chars,
+                short_table_max_rows=short_table_max_rows,
+            )
+            if adaptive_tables
+            else [_V11EvidenceTask(text=outer_chunk)]
+        )
+        evidence_tasks.extend(planned)
+        evidence_roots.extend([outer_index] * len(planned))
+    chunks = [task.text for task in evidence_tasks]
+    if not chunks:
+        raise ValueError("V11 extraction planner produced no evidence tasks")
+    max_evidence_tasks = max(
+        1, int(os.getenv("KNOWMAT2_EXTRACTION_MAX_EVIDENCE_TASKS", "96"))
+    )
+    if len(chunks) > max_evidence_tasks:
+        raise V11ChunkPlanError(
+            "V11 adaptive table planning requires "
+            f"{len(chunks)} evidence tasks, exceeding "
+            f"KNOWMAT2_EXTRACTION_MAX_EVIDENCE_TASKS={max_evidence_tasks}."
+        )
+    shared_context = _shared_method_context(
+        paper_text,
+        max_chars=int(os.getenv("KNOWMAT2_EXTRACTION_SHARED_CONTEXT_CHARS", "7000")),
+    )
+    if cache_dir is not None:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    max_workers = min(
+        max(1, int(os.getenv("KNOWMAT2_EXTRACTION_CHUNK_WORKERS", "4"))),
+        len(chunks),
+    )
+    call_limiter = BoundedSemaphore(max_workers)
+    single_item_strategy = _v11_single_item_strategy_for_model(settings.extraction_model)
+    item_strategy = "discover_then_single_item" if single_item_strategy else "multi_item"
+    glm_compact_prompt = _v11_json_mode_for_model(settings.extraction_model) is not None
+    logger.warning(
+        "V11 extraction plan: strategy=%s roots=%d/%d tasks=%d tables=%d "
+        "chunk_chars=%d requested_chars=%d overlap=%d workers=%d max_tokens=%d thinking=%s",
+        item_strategy,
+        len(outer_chunks),
+        max(1, max_chunks),
+        len(chunks),
+        sum(task.kind == "table" for task in evidence_tasks),
+        effective_chunk_chars,
+        requested_chunk_chars,
+        effective_overlap,
+        max_workers,
+        int(os.getenv("KNOWMAT2_EXTRACTION_MAX_TOKENS", "8192")),
+        extraction_thinking_mode(settings.extraction_model),
+    )
+
+    def extract_one(
+        sort_key: tuple[int, ...],
+        label: str,
+        chunk: str,
+        strategy: str = "multi_item",
+        require_targets: bool = False,
+        expected_sample_ids: tuple[str, ...] = (),
+    ) -> tuple[tuple[int, ...], Dict[str, Any]]:
+        task_started = time.monotonic()
+        if glm_compact_prompt:
+            chunk_text = chunk
+        else:
+            context_block = (
+                "\n\n[Shared methods/test context for condition binding across chunks]\n"
+                + shared_context
+                if shared_context
+                else ""
+            )
+            chunk_text = (
+                f"[Chunk execution note: {label}. This is part of one paper. Extract only facts "
+                "directly evidenced in this chunk. Use the paper's source sample labels as stable "
+                "Sample_ID values and never append chunk numbers. Dataset sizes, algorithm steps, "
+                "unlabeled search-space candidates, and generic process discussion are not material "
+                "items. Create a Reference item only when this chunk gives a cited quantitative "
+                "material, process, structure, or property fact.]\n\n"
+                + chunk
+                + context_block
+            )
+        if glm_compact_prompt:
+            user = _build_glm_v11_user_prompt(chunk_text, paper_routing)
+        else:
+            user = generate_user_prompt(
+                chunk_text,
+                target_base_material=paper_routing.get("base_material", ""),
+                target_application=paper_routing.get("application", ""),
+                target_research_paradigm=paper_routing.get("research_paradigm", ""),
+                target_patch_tags=", ".join(
+                    [
+                        *(paper_routing.get("patch_tags", []) or []),
+                        *(paper_routing.get("domain_overlays", []) or []),
+                    ]
+                ),
+            )
+        cache_path = None
+        if cache_dir is not None:
+            retry_path = "_".join(f"{part:02d}" for part in sort_key[1:]) or "00"
+            digest = hashlib.sha256(
+                json.dumps(
+                    {
+                        "system": system_prompt,
+                        "user": user,
+                        "strategy": strategy,
+                        "expected_sample_ids": expected_sample_ids,
+                        "routing": paper_routing,
+                        "llm": _v11_cache_identity(),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+            cache_path = cache_dir / (
+                f"chunk_{sort_key[0] + 1:03d}_{retry_path}_{digest}.json"
+            )
+            if cache_path.is_file():
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                logger.info("V11 %s cache hit in %.1fs", label, time.monotonic() - task_started)
+                return sort_key, cached
+        use_single_item = single_item_strategy or strategy == "single_item"
+        if use_single_item:
+            with call_limiter:
+                targets = _invoke_v11_target_discovery(chunk_text, paper_routing)
+            if require_targets and expected_sample_ids:
+                expected_aliases = {
+                    re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+                    for value in expected_sample_ids
+                    if value.strip()
+                }
+
+                def matches_expected(target: Dict[str, str]) -> bool:
+                    target_alias = re.sub(
+                        r"[^a-z0-9]+",
+                        "_",
+                        target["Sample_ID"].casefold(),
+                    ).strip("_")
+                    return any(
+                        target_alias == expected
+                        or target_alias.endswith("_" + expected)
+                        or expected.endswith("_" + target_alias)
+                        for expected in expected_aliases
+                    )
+
+                targets = [target for target in targets if matches_expected(target)]
+            if targets:
+                def extract_target(target: Dict[str, str]) -> Dict[str, Any]:
+                    target_user = _build_glm_v11_user_prompt(
+                        chunk_text,
+                        paper_routing,
+                        target,
+                    )
+                    target_cache_path = None
+                    if cache_dir is not None:
+                        target_digest = hashlib.sha256(
+                            json.dumps(
+                                {
+                                    "system": system_prompt,
+                                    "user": target_user,
+                                    "target": target,
+                                    "routing": paper_routing,
+                                    "llm": _v11_cache_identity(),
+                                },
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ).encode("utf-8")
+                        ).hexdigest()[:16]
+                        target_cache_path = cache_dir / (
+                            f"target_{sort_key[0] + 1:03d}_{retry_path}_"
+                            f"{target_digest}.json"
+                        )
+                        if target_cache_path.is_file():
+                            return json.loads(
+                                target_cache_path.read_text(encoding="utf-8")
+                            )
+                    for attempt in range(2):
+                        try:
+                            with call_limiter:
+                                target_candidate = _invoke_v11_raw_json(
+                                    system_prompt,
+                                    target_user,
+                                    allow_empty_items=False,
+                                    single_item_target=target,
+                                )
+                            break
+                        except V11RawResponseError as exc:
+                            if exc.code != "target_item_missing" or attempt == 1:
+                                raise
+                            logger.warning(
+                                "V11 exact item %r returned no target; retrying once",
+                                target.get("Sample_ID"),
+                            )
+                    if target_cache_path is not None:
+                        temporary = target_cache_path.with_suffix(".tmp")
+                        temporary.write_text(
+                            json.dumps(
+                                target_candidate,
+                                ensure_ascii=False,
+                                indent=2,
+                            )
+                            + "\n",
+                            encoding="utf-8",
+                        )
+                        temporary.replace(target_cache_path)
+                    return target_candidate
+
+                target_workers = min(
+                    max(
+                        1,
+                        int(os.getenv("KNOWMAT2_EXTRACTION_TARGET_WORKERS", "2")),
+                    ),
+                    len(targets),
+                )
+                with ThreadPoolExecutor(max_workers=target_workers) as target_pool:
+                    target_candidates = list(target_pool.map(extract_target, targets))
+                candidate = _merge_v11_candidates(target_candidates)
+            elif require_targets:
+                raise V11RawResponseError(
+                    "target_item_missing",
+                    finish_reason="stop",
+                    content="target discovery returned no items for a truncated leaf",
+                    response_metadata={"model_name": settings.extraction_model},
+                )
+            else:
+                candidate = {
+                    "Paper_Metadata": {},
+                    "Paper_Routing": paper_routing,
+                    "items": [],
+                }
+        else:
+            with call_limiter:
+                candidate = _invoke_v11_raw_json(
+                    system_prompt,
+                    user,
+                    allow_empty_items=True,
+                )
+        if cache_path is not None:
+            temporary = cache_path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps(candidate, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(cache_path)
+        item_count, prop_count, _, _ = _v11_candidate_stats(candidate)
+        logger.warning(
+            "V11 %s completed in %.1fs: items=%d properties=%d",
+            label,
+            time.monotonic() - task_started,
+            item_count,
+            prop_count,
+        )
+        return sort_key, candidate
+
+    results: list[tuple[tuple[int, ...], Dict[str, Any]]] = []
+    errors: list[str] = []
+    failed_chunks: list[tuple[int, str, Exception, _V11EvidenceTask]] = []
+    quota_error: Exception | None = None
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(
+                extract_one,
+                (index, 0),
+                (
+                    f"OCR root {evidence_roots[index] + 1}/{len(outer_chunks)} "
+                    f"{evidence_tasks[index].kind} task {index + 1}/{len(chunks)}"
+                ),
+                chunk,
+            ): index
+            for index, chunk in enumerate(chunks)
+        }
+        for future in as_completed(futures):
+            index = futures[future]
+            try:
+                results.append(future.result())
+            except Exception as exc:
+                if _is_quota_error(exc):
+                    quota_error = exc
+                    for pending in futures:
+                        if pending is not future:
+                            pending.cancel()
+                errors.append(f"chunk {index + 1}: {exc}")
+                failed_chunks.append((index, chunks[index], exc, evidence_tasks[index]))
+                logger.warning("V11 chunk %d/%d failed: %s", index + 1, len(chunks), exc)
+    if quota_error is not None:
+        raise V11QuotaError(
+            f"LLM extraction quota exhausted: {quota_error}"
+        ) from quota_error
+
+    retry_success_count = 0
+    if failed_chunks:
+        retry_overlap = int(os.getenv("KNOWMAT2_EXTRACTION_RETRY_CHUNK_OVERLAP", "600"))
+        retry_min_chars = int(
+            os.getenv("KNOWMAT2_EXTRACTION_RETRY_MIN_CHARS", "800")
+        )
+        retry_depth_cap = max(
+            0, int(os.getenv("KNOWMAT2_EXTRACTION_MAX_RETRY_DEPTH", "3"))
+        )
+        retry_root_cap = max(
+            0,
+            int(
+                os.getenv(
+                    "KNOWMAT2_EXTRACTION_MAX_RETRY_TASKS_PER_CHUNK",
+                    "8",
+                )
+            ),
+        )
+        retry_paper_cap = max(
+            0, int(os.getenv("KNOWMAT2_EXTRACTION_MAX_RETRY_TASKS", "64"))
+        )
+        retry_queues: dict[int, deque[dict[str, Any]]] = defaultdict(deque)
+        open_leaves: dict[int, set[tuple[int, ...]]] = {}
+        failure_reasons: dict[tuple[int, tuple[int, ...]], str] = {}
+        retry_calls_by_root: dict[int, int] = defaultdict(int)
+        retry_call_count = 0
+        target_fallback_chars = max(
+            1,
+            int(os.getenv("KNOWMAT2_EXTRACTION_TARGET_FALLBACK_CHARS", "2400")),
+        )
+
+        def leaf_label(path: tuple[int, ...]) -> str:
+            return ".".join(str(part) for part in path)
+
+        def mark_unrecoverable(
+            root: int,
+            path: tuple[int, ...],
+            exc: Exception,
+            reason: str,
+        ) -> None:
+            failure_reasons[(root, path)] = f"{reason}: {exc}"
+            logger.warning(
+                "V11 coverage leaf unrecoverable: root=%d/%d path=%s reason=%s",
+                root + 1,
+                len(chunks),
+                leaf_label(path),
+                reason,
+            )
+
+        def split_or_mark(
+            root: int,
+            path: tuple[int, ...],
+            depth: int,
+            text: str,
+            exc: Exception,
+            task_info: dict[str, Any],
+        ) -> None:
+            is_truncation = (
+                isinstance(exc, V11RawResponseError)
+                and exc.code == "output_truncated"
+            )
+            if task_info.get("strategy") == "single_item":
+                is_target_missing = (
+                    isinstance(exc, V11RawResponseError)
+                    and exc.code == "target_item_missing"
+                )
+                if not is_target_missing:
+                    mark_unrecoverable(
+                        root,
+                        path,
+                        exc,
+                        "exact-item fallback failed",
+                    )
+                    return
+                if depth >= retry_depth_cap:
+                    mark_unrecoverable(
+                        root,
+                        path,
+                        exc,
+                        "exact-item target missing at retry depth limit",
+                    )
+                    return
+                subchunks = _split_retry_chunk(text, retry_overlap, retry_min_chars)
+                if len(subchunks) != 2:
+                    mark_unrecoverable(
+                        root,
+                        path,
+                        exc,
+                        "exact-item target missing and leaf cannot be split safely",
+                    )
+                    return
+                leaves = open_leaves[root]
+                leaves.discard(path)
+                child_paths = (
+                    (path + (1,), path + (2,))
+                    if path != (0,)
+                    else ((1,), (2,))
+                )
+                for child_path, subchunk in zip(child_paths, subchunks):
+                    leaves.add(child_path)
+                    retry_queues[root].append(
+                        {
+                            "root": root,
+                            "path": child_path,
+                            "depth": depth + 1,
+                            "chunk": subchunk,
+                            "transient_retried": False,
+                            "strategy": "multi_item",
+                            "table_columns": 0,
+                            "sample_ids": (),
+                        }
+                    )
+                logger.warning(
+                    "V11 exact-item target remained missing after one retry; "
+                    "splitting leaf: root=%d/%d path=%s depth=%d -> %s,%s",
+                    root + 1,
+                    len(chunks),
+                    leaf_label(path),
+                    depth,
+                    leaf_label(child_paths[0]),
+                    leaf_label(child_paths[1]),
+                )
+                return
+
+            table_column_count = int(task_info.get("table_columns") or 0)
+            if is_truncation and table_column_count > 1:
+                narrowed = _narrow_table_task(text)
+                if len(narrowed) >= 2:
+                    leaves = open_leaves[root]
+                    leaves.discard(path)
+                    child_paths = (
+                        (path + (1,), path + (2,))
+                        if path != (0,)
+                        else ((1,), (2,))
+                    )
+                    for child_path, child in zip(child_paths, narrowed):
+                        leaves.add(child_path)
+                        retry_queues[root].append(
+                            {
+                                "root": root,
+                                "path": child_path,
+                                "depth": depth + 1,
+                                "chunk": child.text,
+                                "transient_retried": False,
+                                "strategy": "multi_item",
+                                "table_columns": 1,
+                                "sample_ids": child.sample_ids,
+                            }
+                        )
+                    logger.warning(
+                        "V11 narrowed dense table leaf: root=%d/%d path=%s "
+                        "columns=%d -> one-column leaves %s,%s",
+                        root + 1,
+                        len(chunks),
+                        leaf_label(path),
+                        table_column_count,
+                        leaf_label(child_paths[0]),
+                        leaf_label(child_paths[1]),
+                    )
+                    return
+
+            if is_truncation and (
+                table_column_count == 1
+                or depth >= 1
+                or len(text) <= target_fallback_chars
+            ):
+                retry_queues[root].append(
+                    {
+                        "root": root,
+                        "path": path,
+                        "depth": depth,
+                        "chunk": text,
+                        "transient_retried": False,
+                        "strategy": "single_item",
+                        "table_columns": table_column_count,
+                        "sample_ids": tuple(task_info.get("sample_ids") or ()),
+                    }
+                )
+                logger.warning(
+                    "V11 switching dense leaf to exact-item fallback: "
+                    "root=%d/%d path=%s depth=%d chars=%d table_columns=%d",
+                    root + 1,
+                    len(chunks),
+                    leaf_label(path),
+                    depth,
+                    len(text),
+                    table_column_count,
+                )
+                return
+
+            if depth >= retry_depth_cap:
+                mark_unrecoverable(root, path, exc, "retry depth exhausted")
+                return
+            subchunks = _split_retry_chunk(text, retry_overlap, retry_min_chars)
+            if len(subchunks) != 2:
+                mark_unrecoverable(root, path, exc, "retry leaf cannot be split safely")
+                return
+            leaves = open_leaves[root]
+            leaves.discard(path)
+            child_paths = (path + (1,), path + (2,)) if path != (0,) else ((1,), (2,))
+            for child_path, subchunk in zip(child_paths, subchunks):
+                leaves.add(child_path)
+                retry_queues[root].append(
+                    {
+                        "root": root,
+                        "path": child_path,
+                        "depth": depth + 1,
+                        "chunk": subchunk,
+                        "transient_retried": False,
+                        "strategy": task_info.get("strategy", "multi_item"),
+                        "table_columns": 0,
+                        "sample_ids": (),
+                    }
+                )
+            logger.warning(
+                "V11 split failed coverage leaf: root=%d/%d path=%s depth=%d -> %s,%s",
+                root + 1,
+                len(chunks),
+                leaf_label(path),
+                depth,
+                leaf_label(child_paths[0]),
+                leaf_label(child_paths[1]),
+            )
+
+        for index, chunk, exc, evidence_task in sorted(
+            failed_chunks, key=lambda row: row[0]
+        ):
+            root_path = (0,)
+            open_leaves[index] = {root_path}
+            failure_reasons[(index, root_path)] = str(exc)
+            task_info = {
+                "root": index,
+                "path": root_path,
+                "depth": 0,
+                "chunk": chunk,
+                "transient_retried": False,
+                "strategy": "multi_item",
+                "table_columns": evidence_task.sample_columns,
+                "sample_ids": evidence_task.sample_ids,
+            }
+            if not _should_retry_v11_chunk(exc):
+                mark_unrecoverable(index, root_path, exc, "non-retryable failure")
+            elif _is_v11_content_failure(exc):
+                split_or_mark(index, root_path, 0, chunk, exc, task_info)
+            else:
+                # The initial request already consumed the first transient attempt.
+                retry_queues[index].append(
+                    {
+                        **task_info,
+                        "transient_retried": True,
+                    }
+                )
+
+        logger.warning(
+            "Recovering %d failed v11 chunks with depth=%d per_root_cap=%d paper_cap=%d",
+            len(failed_chunks),
+            retry_depth_cap,
+            retry_root_cap,
+            retry_paper_cap,
+        )
+
+        while any(retry_queues.values()) and retry_call_count < retry_paper_cap:
+            # One leaf per root per wave prevents an early dense chunk from starving
+            # later failed roots of their recovery budget.
+            retry_wave: list[dict[str, Any]] = []
+            for root in sorted(retry_queues):
+                queue = retry_queues[root]
+                if not queue:
+                    continue
+                if retry_calls_by_root[root] >= retry_root_cap:
+                    while queue:
+                        task = queue.popleft()
+                        mark_unrecoverable(
+                            root,
+                            task["path"],
+                            RuntimeError("per-root retry request cap reached"),
+                            "retry request budget exhausted",
+                        )
+                    continue
+                if retry_call_count + len(retry_wave) >= retry_paper_cap:
+                    break
+                task = queue.popleft()
+                retry_wave.append(task)
+                retry_calls_by_root[root] += 1
+
+            # When only one or two roots failed, fill the remaining worker slots
+            # round-robin so sibling leaves still run concurrently.
+            made_progress = True
+            while (
+                retry_wave
+                and len(retry_wave) < max_workers
+                and made_progress
+                and retry_call_count + len(retry_wave) < retry_paper_cap
+            ):
+                made_progress = False
+                for root in sorted(retry_queues):
+                    queue = retry_queues[root]
+                    if not queue or retry_calls_by_root[root] >= retry_root_cap:
+                        continue
+                    if retry_call_count + len(retry_wave) >= retry_paper_cap:
+                        break
+                    retry_wave.append(queue.popleft())
+                    retry_calls_by_root[root] += 1
+                    made_progress = True
+                    if len(retry_wave) >= max_workers:
+                        break
+
+            if not retry_wave:
+                break
+            retry_call_count += len(retry_wave)
+            retry_workers = min(max_workers, len(retry_wave))
+            with ThreadPoolExecutor(max_workers=retry_workers) as pool:
+                futures = {
+                    pool.submit(
+                        extract_one,
+                        (task["root"], *task["path"]),
+                        (
+                            f"retry root {task['root'] + 1}/{len(chunks)} "
+                            f"leaf {leaf_label(task['path'])} depth {task['depth']}"
+                        ),
+                        task["chunk"],
+                        task.get("strategy", "multi_item"),
+                        task.get("strategy") == "single_item",
+                        tuple(task.get("sample_ids") or ()),
+                    ): task
+                    for task in retry_wave
+                }
+                for future in as_completed(futures):
+                    task = futures[future]
+                    root = task["root"]
+                    path = task["path"]
+                    try:
+                        results.append(future.result())
+                        open_leaves[root].discard(path)
+                        retry_success_count += 1
+                    except Exception as exc:
+                        if _is_quota_error(exc):
+                            quota_error = exc
+                            for pending in futures:
+                                if pending is not future:
+                                    pending.cancel()
+                            continue
+                        errors.append(
+                            f"chunk {root + 1} retry {leaf_label(path)}: {exc}"
+                        )
+                        failure_reasons[(root, path)] = str(exc)
+                        logger.warning(
+                            "V11 chunk %d retry leaf %s failed: %s",
+                            root + 1,
+                            leaf_label(path),
+                            exc,
+                        )
+                        if not _should_retry_v11_chunk(exc):
+                            mark_unrecoverable(
+                                root, path, exc, "non-retryable retry failure"
+                            )
+                        elif _is_v11_content_failure(exc):
+                            split_or_mark(
+                                root,
+                                path,
+                                task["depth"],
+                                task["chunk"],
+                                exc,
+                                task,
+                            )
+                        elif not task["transient_retried"]:
+                            retry_queues[root].append(
+                                {**task, "transient_retried": True}
+                            )
+                        else:
+                            split_or_mark(
+                                root,
+                                path,
+                                task["depth"],
+                                task["chunk"],
+                                exc,
+                                task,
+                            )
+        if quota_error is not None:
+            raise V11QuotaError(
+                f"LLM extraction quota exhausted: {quota_error}"
+            ) from quota_error
+
+        incomplete_roots = {
+            root: sorted(leaves)
+            for root, leaves in open_leaves.items()
+            if leaves
+        }
+        if incomplete_roots:
+            details: list[str] = []
+            for root, leaves in sorted(incomplete_roots.items()):
+                leaf_details = []
+                for path in leaves:
+                    reason = failure_reasons.get(
+                        (root, path), "retry request budget exhausted before attempt"
+                    )
+                    leaf_details.append(f"{leaf_label(path)} ({reason})")
+                details.append(f"root {root + 1}: " + ", ".join(leaf_details))
+            raise V11IncompleteCoverageError(
+                "incomplete_v11_chunk_coverage: " + " | ".join(details)
+            )
+
+        logger.warning(
+            "V11 recovered all failed chunk roots: roots=%d retry_calls=%d retry_successes=%d",
+            len(failed_chunks),
+            retry_call_count,
+            retry_success_count,
+        )
+
+    logger.warning(
+        "V11 chunk coverage complete: roots=%d/%d initial_successes=%d "
+        "retry_calls=%d retry_successes=%d elapsed=%.1fs",
+        len(chunks),
+        len(chunks),
+        len(chunks) - len(failed_chunks),
+        retry_call_count if failed_chunks else 0,
+        retry_success_count,
+        time.monotonic() - extraction_started,
+    )
+    ordered = [
+        candidate
+        for _, candidate in sorted(results, key=lambda row: row[0])
+        if candidate.get("items")
+    ]
+    if not ordered:
+        raise RuntimeError("All successful v11 chunks returned zero material items")
+    return _merge_v11_candidates(ordered)
+
+
 def extract_data(state: KnowMatState) -> Dict[str, Any]:
     """Perform the main LLM extraction and return the structured data."""
     import time as _time
@@ -241,9 +3435,23 @@ def extract_data(state: KnowMatState) -> Dict[str, Any]:
     routing_supplements = state.get("routing_supplements", "")
     paper_routing = state.get("paper_routing") or {}
 
+    ocr_manifest_path = str(state.get("ocr_manifest_path") or "").strip()
+    if ocr_manifest_path:
+        manifest = load_ocr_manifest(Path(ocr_manifest_path))
+        expected_baseline = str(state.get("ocr_baseline_id") or "").strip()
+        if expected_baseline and manifest.get("baseline_id") != expected_baseline:
+            raise RuntimeError("Selected OCR baseline identity changed before extraction")
+        source_ocr_path = state.get("pdf_path")
+        if not source_ocr_path:
+            raise RuntimeError("Frozen OCR extraction requires the source input path")
+        # ``paper_text_path`` points at a mutable parser copy under output_dir.
+        # Verify the original frozen Markdown again immediately before extraction
+        # so mutations between the run preflight and this node are still caught.
+        verify_ocr_record(manifest, Path(str(source_ocr_path)))
+
     # Stage 2: inject multimodal figure descriptions into paper_text before extraction
     # Uses Approach C: CLIP alignment + VLM with context
-    if settings.figure_description_enabled:
+    if _figure_enrichment_enabled(state):
         ocr_items = state.get("ocr_items") or []
         if ocr_items:
             from knowmat.pdf.figure_describer import inject_figure_descriptions
@@ -256,152 +3464,97 @@ def extract_data(state: KnowMatState) -> Dict[str, Any]:
                 _paper_id = ""
                 if _output_dir:
                     _paper_id = Path(_output_dir).name
+                # Digitized CSVs are written beside the final md (txt_parse dir)
+                # so the md's `data_csv:` reference is a plain relative filename.
+                _csv_dir = (
+                    str(Path(paper_text_path).parent) if paper_text_path else _output_dir
+                )
                 paper_text = inject_figure_descriptions(
                     paper_text, ocr_items,
                     paper_id=_paper_id, output_dir=_output_dir,
+                    csv_dir=_csv_dir,
+                    source_pdf=str(state.get("pdf_path") or ""),
+                    include_prose_fallback=_figure_prose_fallback_enabled(state),
                 )
                 elapsed = _time.time() - t0
                 logger.info("✓ Figure descriptions injected in %.1fs.", elapsed)
                 print(f"   Figure descriptions: {elapsed:.1f}s")
             except Exception as exc:
                 logger.warning("Figure description injection failed: %s", exc, exc_info=True)
+    elif settings.figure_description_enabled and ocr_manifest_path:
+        logger.info(
+            "Skipping generative figure enrichment for deterministic frozen OCR extraction"
+        )
 
     if paper_text != original_paper_text:
         _persist_paper_text(paper_text_path, paper_text)
 
-    system_prompt = generate_system_prompt(routing_supplements=routing_supplements)
-
-    user_prompt = generate_user_prompt(
-        paper_text,
-        target_base_material=paper_routing.get("base_material", ""),
-        target_application=paper_routing.get("application", ""),
-        target_research_paradigm=paper_routing.get("research_paradigm", ""),
-        target_patch_tags=", ".join(paper_routing.get("patch_tags", [])),
-    )
-    input_chars = len(system_prompt) + len(user_prompt)
-    print(f"   Extraction input: ~{input_chars // 3} tokens")
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-        {"role": "user", "content": "Provide your response using the tool."},
-    ]
-    full_prompt = system_prompt + "\n\n" + user_prompt + "\n\n" + (
-        "Provide your response using the tool."
+    system_prompt = generate_system_prompt(
+        routing_supplements=routing_supplements,
+        # A frozen OCR baseline is the reproducibility boundary. Evaluation text
+        # from an earlier run must not mutate prompts or invalidate task caches.
+        prompt_update=("" if ocr_manifest_path else state.get("updated_prompt", "")),
     )
 
-    structured_error: Exception | None = None
+    extraction_paper_text = _paper_text_for_extraction(paper_text)
+    if len(extraction_paper_text) != len(paper_text):
+        logger.info(
+            "Trimmed terminal bibliography from extraction input: %d -> %d chars",
+            len(paper_text),
+            len(extraction_paper_text),
+        )
+    print(
+        "   Alpha25 source input: "
+        f"~{(len(system_prompt) + len(extraction_paper_text)) // 3} tokens before task planning"
+    )
+    document_metadata = state.get("document_metadata") or {}
+    paper_metadata = {
+        "title": document_metadata.get("title"),
+        "doi": state.get("doi") or document_metadata.get("doi"),
+    }
+    paper_metadata = {
+        key: value for key, value in paper_metadata.items() if value not in (None, "")
+    } or {"title": None}
+    ocr_baseline_id = str(state.get("ocr_baseline_id") or "").strip()
+    if not ocr_baseline_id:
+        ocr_baseline_id = "unfrozen:" + hashlib.sha256(
+            extraction_paper_text.encode("utf-8")
+        ).hexdigest()
     t_extract = _time.time()
-    try:
-        result = extraction_extractor.invoke({"messages": messages})
-    except Exception as exc:
-        structured_error = exc
-        _is_int_overflow = "integer exceeds 64-bit range" in str(exc).lower()
-        if _is_int_overflow:
-            logger.warning(
-                "Structured extraction hit integer overflow; "
-                "skipping structured retries, jumping to raw-JSON fallback. Error: %s",
-                exc,
-            )
-            result = None
-        else:
-            logger.warning(
-                "Structured extraction with role-separated messages failed; "
-                "falling back to legacy prompt. Error: %s",
-                exc,
-            )
-            try:
-                result = extraction_extractor.invoke(full_prompt)
-            except Exception as exc2:
-                logger.warning("Legacy structured extraction also failed: %s", exc2)
-                result = None
-
-    responses = (result or {}).get("responses") or []
-    if not responses and not (structured_error and "integer exceeds 64-bit range" in str(structured_error).lower()):
-        print(f"   Extraction attempt 1: {_time.time() - t_extract:.1f}s (no responses, retrying)")
-        try:
-            fallback_result = extraction_extractor.invoke(full_prompt)
-        except Exception as exc:
-            if structured_error is None:
-                structured_error = exc
-            else:
-                logger.warning("Structured fallback returned no responses: %s", exc)
-            fallback_result = None
-        responses = (fallback_result or {}).get("responses") or []
+    extracted_dict, coverage = _extract_alpha25_tasks(
+        system_prompt,
+        extraction_paper_text,
+        paper_routing,
+        paper_text_path=paper_text_path,
+        paper_metadata=paper_metadata,
+        cache_dir=(
+            Path(state.get("output_dir") or ".") / "v11" / "02_alpha25_tasks"
+        ),
+        ocr_baseline_id=ocr_baseline_id,
+        extraction_model=str(
+            state.get("extraction_model") or settings.extraction_model
+        ).strip(),
+    )
     extraction_elapsed = _time.time() - t_extract
-    print(f"   Extraction LLM call: {extraction_elapsed:.1f}s")
+    print(f"   Alpha25 LLM extraction: {extraction_elapsed:.1f}s")
 
-    if not responses:
-        logger.warning(
-            "Tool-based extraction returned no structured responses; "
-            "attempting raw-JSON fallback."
-        )
-        # Build a compact user message: routing hints + the (already
-        # figure-enriched) paper text, WITHOUT the ~22k-token step-by-step
-        # template.  This frees generation budget so long papers can actually
-        # emit the compositions list instead of stopping after Paper_Metadata.
-        _rt = paper_routing or {}
-        compact_user = (
-            "Routing hints (may be empty): "
-            f"base_material={_rt.get('base_material','')}, "
-            f"application={_rt.get('application','')}, "
-            f"research_paradigm={_rt.get('research_paradigm','')}\n\n"
-            "=== PAPER TEXT START ===\n"
-            f"{_slim_paper_text_for_fallback(paper_text)}\n"
-            "=== PAPER TEXT END ==="
-        )
-        try:
-            extracted_dict = _invoke_plain_json_fallback(full_prompt, compact_user=compact_user)
-            _log_extraction_diag("compact-fallback", extracted_dict)
-            return {"latest_extracted_data": extracted_dict, "paper_text": paper_text}
-        except Exception as compact_exc:
-            logger.warning("Compact fallback failed (%s); trying full-prompt fallback.", compact_exc)
-            try:
-                extracted_dict = _invoke_plain_json_fallback(full_prompt)
-                _log_extraction_diag("full-fallback", extracted_dict)
-                return {"latest_extracted_data": extracted_dict, "paper_text": paper_text}
-            except Exception as fallback_exc:
-                if structured_error is not None:
-                    raise RuntimeError(
-                        "Extraction failed in both structured and raw-JSON modes: "
-                        f"{structured_error}; fallback={fallback_exc}"
-                    ) from fallback_exc
-                raise
-
-    response = responses[0]
-    if isinstance(response, CompositionList):
-        extracted_dict = json.loads(response.model_dump_json())
-    else:
-        extracted_dict = response
-
-    # Quality gate: MiniMax tool-calling sometimes returns a syntactically valid
-    # but content-empty result (e.g. 1 composition, 0 properties) which trustcall
-    # accepts as a non-empty response — so the no-responses fallback above never
-    # fires.  If the primary result has zero properties yet the paper clearly
-    # reports measurable quantities, treat it as incomplete and run the compact
-    # fallback (which reliably extracts properties on these papers).
-    _primary_props = _count_extracted_props(extracted_dict)
-    if _primary_props == 0 and _paper_has_property_signals(paper_text):
-        logger.warning(
-            "Primary extraction returned 0 properties but paper has property "
-            "signals; retrying via compact fallback."
-        )
-        _rt = paper_routing or {}
-        compact_user = (
-            "Routing hints (may be empty): "
-            f"base_material={_rt.get('base_material','')}, "
-            f"application={_rt.get('application','')}, "
-            f"research_paradigm={_rt.get('research_paradigm','')}\n\n"
-            "=== PAPER TEXT START ===\n"
-            f"{_slim_paper_text_for_fallback(paper_text)}\n"
-            "=== PAPER TEXT END ==="
-        )
-        try:
-            salvaged = _invoke_plain_json_fallback(full_prompt, compact_user=compact_user)
-            if _count_extracted_props(salvaged) > 0:
-                _log_extraction_diag("primary->compact-salvage", salvaged)
-                return {"latest_extracted_data": salvaged, "paper_text": paper_text}
-        except Exception as exc:
-            logger.warning("Property-salvage compact fallback failed: %s", exc)
-
-    _log_extraction_diag("tool-primary", extracted_dict)
-    return {"latest_extracted_data": extracted_dict, "paper_text": paper_text}
+    item_count, prop_count, comp_obs_count, structure_obs_count = _v11_candidate_stats(
+        extracted_dict
+    )
+    logger.warning(
+        "[V11-EXTRACT] items=%d properties=%d composition_obs=%d structure_obs=%d",
+        item_count,
+        prop_count,
+        comp_obs_count,
+        structure_obs_count,
+    )
+    if item_count == 0:
+        raise ValueError("V11 extraction returned no items")
+    if prop_count == 0 and _paper_has_property_signals(paper_text):
+        logger.warning("V11 candidate contains no properties despite numeric property signals")
+    return {
+        "latest_extracted_data": extracted_dict,
+        "paper_text": paper_text,
+        "alpha25_coverage": coverage,
+        "ocr_baseline_id": ocr_baseline_id,
+    }

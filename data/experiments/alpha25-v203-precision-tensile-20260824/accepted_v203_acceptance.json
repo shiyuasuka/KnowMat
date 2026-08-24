@@ -1,0 +1,131 @@
+{
+  "schema_version": "knowmat_alpha25_v203_acceptance_v1",
+  "status": "accepted",
+  "date": "2026-08-24",
+  "scope": {
+    "papers": 30,
+    "frozen_task_responses": 405,
+    "provider_api_calls": 0,
+    "fatal_outputs": 0,
+    "prompt_changed_by_v203": false,
+    "schema_changed_by_v203": false,
+    "final_json_shape_changed": false,
+    "frozen_task_response_aggregate_sha256": "768322c6db73fd5e3e12e635288d564af68b19a8f74a561f0460889dc23407be"
+  },
+  "gpt_expert_gt": {
+    "global_loose": {
+      "matched": 736,
+      "system": 1592,
+      "expert": 3093,
+      "precision": 0.462312,
+      "recall": 0.237957,
+      "f1": 0.314194
+    },
+    "global_strict": {
+      "matched": 457,
+      "system": 1592,
+      "expert": 3093,
+      "precision": 0.287060,
+      "recall": 0.147753,
+      "f1": 0.195091
+    },
+    "target_core_tensile_loose": {
+      "matched": 128,
+      "system": 141,
+      "expert": 213,
+      "precision": 0.907801,
+      "recall": 0.600939,
+      "f1": 0.723164
+    },
+    "target_core_tensile_strict": {
+      "matched": 99,
+      "system": 141,
+      "expert": 213,
+      "precision": 0.702128,
+      "recall": 0.464789,
+      "f1": 0.559322
+    },
+    "issue_queue": {
+      "wrong_owner": 225,
+      "condition_conflict": 52,
+      "value_conflict": 114,
+      "unit_conflict": 32,
+      "system_missing": 2497,
+      "expert_gt_missing_or_unsupported": 712
+    }
+  },
+  "direct_business_gt": {
+    "global_loose": {
+      "matched": 769,
+      "system": 1592,
+      "expert": 2813,
+      "precision": 0.483040,
+      "recall": 0.273374,
+      "f1": 0.349149
+    },
+    "global_strict": {
+      "matched": 406,
+      "system": 1592,
+      "expert": 2813,
+      "precision": 0.255025,
+      "recall": 0.144330,
+      "f1": 0.184336
+    },
+    "target_core_tensile_loose": {
+      "matched": 122,
+      "system": 141,
+      "expert": 189,
+      "precision": 0.865248,
+      "recall": 0.645503,
+      "f1": 0.739394
+    },
+    "target_core_tensile_strict": {
+      "matched": 82,
+      "system": 141,
+      "expert": 189,
+      "precision": 0.581560,
+      "recall": 0.433862,
+      "f1": 0.496970
+    }
+  },
+  "determinism": {
+    "final_json_byte_matches": 30,
+    "quality_audit_json_byte_matches": 30,
+    "summary_byte_match": true
+  },
+  "composition": {
+    "stable_papers": 30,
+    "shared_item_payloads_checked": 264,
+    "shared_item_payload_changes": 0,
+    "new_property_only_items": 1,
+    "new_items_with_nonempty_composition": 0
+  },
+  "switches_off_v202_compatibility": {
+    "scientific_final_matches": 30,
+    "quality_audit_byte_matches": 30,
+    "summary_byte_match": true,
+    "raw_final_byte_matches": 0,
+    "raw_final_difference": "Rule_Metadata.git_commit only"
+  },
+  "runtime_seconds": {
+    "accepted_replay_1": 140.45,
+    "accepted_replay_2": 141.06,
+    "mean": 140.755,
+    "v202_mean": 140.43,
+    "regression_percent": 0.2314
+  },
+  "tests": {
+    "focused_materialize_protocol_source": "372 passed",
+    "alpha25": "988 passed",
+    "repository": "1202 passed, 1 external-fixture failure",
+    "repository_failure": "/ssd1/jinzongxiao/paddle_work/sci-align/dataset_test/embedding_index.json missing",
+    "compile": "passed",
+    "diff_check": "passed"
+  },
+  "artifacts": {
+    "accepted_output": "data/output-alpha25-v203-precision-tensile-accepted-final30-20260824",
+    "deterministic_replay": "data/output-alpha25-v203-precision-tensile-accepted-replay30-20260824",
+    "switches_off_output": "data/output-alpha25-v203-accepted-switch-off-v202-compat-final30-20260824",
+    "three_way_report": "data/experiments/alpha25-v203-precision-tensile-20260824/accepted_v203_vs_gpt_expert_and_business.json"
+  }
+}
