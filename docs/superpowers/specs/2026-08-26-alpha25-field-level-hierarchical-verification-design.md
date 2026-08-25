@@ -3,10 +3,12 @@
 ## Status
 
 The user selected the GLM-5.2/5.3 hierarchical-verification direction and
-reconfirmed the precision-first objective on 2026-08-26. This document is the
-written review gate before implementation planning. It refines the existing
-hierarchical verifier; it does not change the professionally reviewed Alpha25
-candidate-extraction prompt.
+reconfirmed the precision-first objective on 2026-08-26. The first field-level
+implementation was exercised as real-provider pilot r65 on the frozen five
+papers. That pilot improved the already-pruned candidate replay but failed the
+r58 quality and latency gates. This revision specifies the corrective design
+before the next implementation pass. It does not change the professionally
+reviewed Alpha25 candidate-extraction prompt.
 
 ## Goal
 
@@ -59,6 +61,44 @@ not a deletion list. Source review shows that many
 expert ledger, and many `wrong_owner` rows are compatible aliases rather than
 scientific misattributions.
 
+### r65 real-provider evidence
+
+Pilot r65 used GLM-5.3 field-level primary review and GLM-5.2 singleton
+field-level independent review. All five papers completed, but the result is
+not eligible for a 30-paper run:
+
+| Five-paper metric against GPT expert ledger | precisionfix replay | r58 same papers | r65 |
+| --- | ---: | ---: | ---: |
+| Overall unique loose precision | 0.4779 | 0.5110 | 0.5126 |
+| Overall unique loose recall | 0.3476 | 0.4947 | 0.3797 |
+| Overall unique loose F1 | 0.4025 | 0.5027 | 0.4363 |
+| Properties unique loose precision | 0.5439 | 0.7143 | 0.6731 |
+| Properties unique loose recall | 0.4921 | 0.6349 | 0.5556 |
+| Core-tensile unique loose precision | 0.6486 | 0.8548 | 0.7879 |
+| Core-tensile unique loose recall | 0.9057 | 1.0000 | 0.9811 |
+
+r65 therefore improved precisionfix overall precision by 3.47 points,
+Properties precision by 12.92 points, and core-tensile precision by 13.92
+points. It did not improve over r58 in the target Properties or core-tensile
+precision measures, and its overall recall was 11.50 points below r58.
+
+The five-paper wall time was 1,451.9 seconds. Per-paper verification wall time
+ranged from 211.6 to 1,435.1 seconds. The fallback role repeatedly generated
+4,097-token truncated responses for singleton requests whose validated JSON
+should be small. Across the five papers, 48 hard assertions caused one
+independent field response per assertion, including assertions that the
+primary role had already failed or rejected. This work could not change the
+final decision and amplified provider-slot contention.
+
+The audit also exposed deterministic false failures in direct tensile facts.
+For example, a candidate value `1222 ± 56` was rejected against literal source
+text `1222 \\pm 56` because the verifier token normalizer did not share the
+existing evidence normalizer's `\\pm` equivalence. Compact source-coordinate
+location also stopped at the final digit of `23% \\pm 1%`, omitting the trailing
+percent sign from the verifier evidence span. These are presentation-coordinate
+bugs, not scientific disagreements, and must be fixed before interpreting
+model verdict quality.
+
 ## Non-Negotiable Boundaries
 
 - Do not change the professional Alpha25 extraction prompt, extraction schema,
@@ -78,15 +118,35 @@ scientific misattributions.
 
 ## Alternatives Considered
 
-### Selected: deterministic risk routing plus field-level independent review
+### Selected after r65: gated field primary plus compact independent review
 
 Route only narrowly defined high-risk assertions. GLM-5.3 judges each asserted
-scientific field separately. GLM-5.2 independently reviews every hard-risk
-assertion and confirms any destructive soft-risk decision. A deterministic
-applicator uses only grounded, contract-valid field verdicts.
+scientific field separately. Only hard-risk assertions that receive a complete,
+grounded, all-fields-supported primary decision proceed to GLM-5.2. GLM-5.2
+independently checks the same immutable fields but returns a compact
+whole-assertion confirmation rather than repeating the full field object graph.
+A deterministic applicator accepts a hard assertion only after both positive
+reviews.
 
 This directly targets owner/condition projection and unsupported expansion,
-while allowing source-literal, low-risk facts to avoid provider latency.
+while allowing source-literal, low-risk facts to avoid provider latency. It
+also removes independent-review calls that cannot possibly produce formal
+acceptance.
+
+### Rejected after r65: singleton full-field independent review
+
+The full field schema remains valuable for the GLM-5.3 primary because it
+identifies the unsupported coordinate. Repeating that schema for every hard
+assertion caused 4,097-token truncations, 117 provider calls across five papers,
+and long-tail paper latency above 20 minutes. Raising the token limit would
+make malformed behavior slower and more expensive without adding decision
+authority.
+
+### Rejected: primary-only destructive decisions
+
+Accepting a hard assertion after one model would be faster, but it removes the
+independent positive-consensus boundary selected for precision. The compact
+review reduces response size without weakening that boundary.
 
 ### Rejected: retain whole-assertion verification
 
@@ -152,9 +212,9 @@ owner/value/unit/condition coordinates continue unchanged.
 
 The primary verifier receives a bounded bundle containing one related
 assertion group, exact evidence spans, compatible inventory entities, and the
-risk reasons. Initial limits are at most three assertions and 3,500 source
-characters. Limits are configuration and cache identity, never model-name
-branches.
+risk reasons. Revised pilot limits are at most six assertions, 6,000 source
+characters, and a 3,072-token response budget. Limits are configuration and
+cache identity, never model-name branches.
 
 For every assertion, the response contains a verdict for each required field:
 
@@ -176,21 +236,59 @@ The deterministic response validator requires one verdict for every asserted
 field, validates every identifier, and rejects invented text or coordinates.
 A malformed field does not partially mutate an assertion.
 
-### 4. GLM-5.2 independent review
+Before provider verdict validation, every immutable coordinate uses one shared
+presentation-only normalizer. It must preserve scientific symbols and source
+positions while treating the following forms as identical:
+
+- `±` and `\\pm`;
+- `°` and `^\\circ`;
+- `µ`/`μ` and `\\mu`; and
+- a literal trailing `%` retained by compact source-span location.
+
+This layer may remove TeX presentation syntax. It may not drop or infer a
+number, percent sign, unit, owner token, condition, or semantic word. A
+paraphrase such as removing `which were` from a categorical structure value
+remains nonliteral and cannot be repaired by normalization.
+
+### 4. Gated GLM-5.2 compact independent review
 
 The fallback role receives the original assertion and evidence, not the
 GLM-5.3 answer or rationale.
 
-GLM-5.2 independently reviews:
+GLM-5.2 independently reviews only:
 
-- every hard-risk assertion, because hard-risk output requires positive
-  cross-model support; and
-- every soft-risk assertion for which GLM-5.3 proposes quarantine or
-  reassignment.
+- hard-risk assertions for which every required GLM-5.3 field verdict is
+  grounded, contract-valid, and `supported`.
 
-The review uses the same field-level schema and grounding validator. Technical
-fallback after a failed GLM-5.3 request remains distinct from scientific
-second review and is reported separately.
+If the primary contradicts, cannot prove, or technically fails any field, the
+hard assertion is already unable to form positive consensus. It is isolated
+immediately and the audit records `secondary_skipped_primary_nonpositive`.
+This does not weaken fail-closed behavior; it removes a request that could not
+change the result.
+
+The compact response protocol returns exactly one decision per assertion:
+
+- `all_fields_supported`;
+- `contradicted`; or
+- `not_proven`.
+
+Each decision contains existing evidence IDs, an optional list of failed field
+names for a non-positive verdict, and a short reason code. It contains no free
+rationale and no copied assertion, field payload, evidence text, primary
+answer, or correction target. The deterministic validator independently
+checks every required candidate literal against the cited evidence before an
+`all_fields_supported` result is usable.
+
+Primary-positive hard assertions are packed in blinded compact bundles of at
+most six assertions and 6,000 source characters. The initial compact output
+budget is 1,024 tokens. A truncated multi-assertion compact review may split
+once into smaller compact bundles; a truncated singleton is a technical
+failure and is not retried with a larger unconstrained generation.
+
+Soft-risk assertions are never destructively changed in this precision pass.
+A non-positive primary soft review preserves the unchanged assertion with a
+review issue. This avoids spending a second model call on a deletion that the
+selected policy would preserve on disagreement or technical failure anyway.
 
 ### 5. Deterministic decision applicator
 
@@ -199,19 +297,17 @@ For low-risk bypassed assertions, output remains unchanged.
 For soft-risk assertions:
 
 - a fully grounded GLM-5.3 `supported` result preserves the assertion;
-- quarantine or reassignment requires a compatible independent GLM-5.2
-  decision;
-- destructive disagreement or a confirmation failure preserves the unchanged
-  assertion with a review issue; and
-- reassignment is allowed only when both roles select the same supplied
-  literal entity/coordinate.
+- a contradiction, `not_proven`, malformed response, grounding failure, or
+  provider failure also preserves the unchanged assertion with a review issue;
+  and
+- no soft-risk quarantine or reassignment is applied in this precision pass.
 
 For hard-risk assertions, precision takes priority:
 
 - the assertion enters formal output only when both roles support every
   required field;
-- it is reassigned only when both roles select the same supplied literal
-  entity/coordinate and support all other required fields;
+- no hard-risk reassignment is performed in this pass; a wrong or ambiguous
+  owner/condition is isolated with its complete source record;
 - a contradiction, `not_proven`, scientific disagreement, provider failure,
   truncation, malformed response, or grounding failure isolates it from formal
   output; and
@@ -242,6 +338,10 @@ version and reasons, exact assertion/evidence/entity payload, bundle limits,
 credential-free endpoint identity, model-role configuration, effective
 capabilities, and output-token budget.
 
+Primary-field and compact-independent protocols have distinct versioned cache
+identities. A full-field response can never satisfy a compact-review cache key
+or vice versa.
+
 Unsupported optional provider extensions fall back through declared or
 observed capabilities. No model prefix is inspected.
 
@@ -262,7 +362,6 @@ Compact issue codes include:
 
 - `VERIFIER_FIELD_CONTRADICTION`;
 - `VERIFIER_FIELD_NOT_PROVEN`;
-- `VERIFIER_OWNER_REASSIGNED`;
 - `VERIFIER_HARD_RISK_ISOLATED`;
 - `VERIFIER_ROLE_DISAGREEMENT`;
 - `VERIFIER_TECHNICAL_FAILURE_ISOLATED`; and
@@ -280,9 +379,12 @@ Unit tests must prove:
 - field completeness and rejection of invented IDs, values, units, owners,
   conditions, and evidence;
 - independent-review blindness to the primary answer;
-- exact same-target consensus for reassignment;
+- secondary skipping for every primary non-positive hard assertion;
+- compact all-fields support validation against every required immutable
+  coordinate;
+- compact bundle partitioning without sibling poisoning;
 - hard-risk isolation on disagreement and every technical failure class;
-- soft-risk preservation on failed destructive confirmation;
+- soft-risk preservation on every primary non-positive or technical result;
 - input-order and concurrent-completion determinism;
 - complete audit/issue cross-links;
 - unchanged `final.json` schema; and
@@ -293,9 +395,11 @@ The Alpha25 focused suite and independent-GT evaluator regression must pass.
 
 ## Five-Paper Real-API Pilot
 
-The already frozen five-paper ambiguity pilot is replayed from the same cached
-GLM-5.2 candidates. Candidate extraction remains cache-only so all output
-differences come from the new verifier.
+The already frozen five-paper ambiguity pilot is replayed from the r58 accepted
+candidate ledger, not from the lower-recall precisionfix materialization. The
+precisionfix replay remains a diagnostic comparison only. Candidate extraction
+remains cache-only so provider calls and output differences come from the new
+verifier and the explicitly versioned deterministic coordinate fixes.
 
 The pilot uses real GLM-5.3 and GLM-5.2 calls and records the configured and
 effective capabilities. Every changed assertion is source-reviewed before
@@ -315,8 +419,9 @@ Promotion to 30 papers requires all of the following:
 6. Core-tensile unique loose precision does not decrease, recall declines by at
    most one percentage point, and no direct source-literal tensile table row or
    complete source-sentence fact is lost.
-7. Average verifier provider calls are at most four per paper and median added
-   verification wall time is at most three minutes per paper.
+7. Average verifier provider calls are at most seven per paper, median added
+   verification wall time is at most three minutes per paper, no paper exceeds
+   six minutes, and no singleton compact response reaches its output limit.
 8. No verifier failure reruns candidate extraction or the whole paper.
 
 If a score gate conflicts with source adjudication because a GT omits a literal
