@@ -97,8 +97,11 @@ chunk. It also makes regressions harder to attribute.
 
 ## Architecture
 
-The new subsystem sits between task response collection and the existing
-promotion/materialization stages. It consists of six isolated components.
+The new subsystem sits after deterministic promotion and before
+materialization. It consists of six isolated components. Promotion runs first
+so the verifier judges the same atomic assertions that could otherwise enter
+the public output; it must not spend provider calls on rows already removed by
+deterministic precision gates.
 
 ### 1. Source inventory builder
 
@@ -186,15 +189,20 @@ without explicit source scoping.
 
 ### 6. Decision applicator
 
-The applicator is deterministic and runs before the existing
-`promote_axis_facts` and `materialize_candidate` path:
+The applicator is deterministic and runs after `promote_axis_facts` and before
+`materialize_candidate`:
 
 - `accept` passes the unchanged candidate;
 - `merge` passes one survivor with a provenance union and quarantines the other
   full records;
 - `reassign` passes the candidate with only validated ownership fields changed
   and audits the complete before/after pair;
-- `quarantine` and `unresolved` do not enter formal output; and
+- `quarantine` and a verifier's explicit scientific `unresolved` decision do
+  not enter formal output;
+- provider, transport, truncation, response-contract, or grounding-validator
+  double failure preserves the unchanged promoted candidate in formal output,
+  marks it `unresolved` for review, and records
+  `verifier_unresolved_preserved`; and
 - independently verified recovery produces a normal candidate carrying its
   source and recovery lineage.
 
@@ -233,11 +241,14 @@ JSON response, schema violation, or source-grounding violation triggers at
 most the configured per-bundle retry, then sends only that bundle to the
 fallback verifier. It never restarts the whole paper.
 
-If both verifiers fail, every affected assertion becomes `unresolved`. The
-system does not silently accept unverified candidates, silently emit an empty
-success, or manufacture a default decision. The paper can complete with a
-review flag and full unresolved audit unless an existing output contract itself
-cannot be produced, in which case the run reports a fatal error.
+If both verifier roles fail because of provider, transport, truncation,
+response-contract, or grounding-validation errors, every affected assertion
+is preserved unchanged and becomes an audited `unresolved` review item. A
+technical inability to verify is not scientific evidence that the candidate
+is false. A verifier's explicit scientific `unresolved` decision and a
+deterministic `SOURCE_EVIDENCE_NOT_LOCATED` failure remain isolated from formal
+output. The system never silently emits an empty success or manufactures a
+default scientific decision.
 
 A bundle is applied atomically. A candidate-local exception cannot partially
 change output. Decisions and audit ordering are deterministic under task and
