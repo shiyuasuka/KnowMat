@@ -1,0 +1,122 @@
+{
+  "schema_version": "knowmat_alpha25_hierarchical_verification_pilot_v1",
+  "frozen_at": "2026-08-25T00:00:00+08:00",
+  "paper_count": 5,
+  "selection_frozen_before_new_verifier_calls": true,
+  "selection_basis": "Predeclared source and frozen-v205 error roles; no new verifier response or score was available when frozen.",
+  "implementation_head": "fcf7bdb7c8e650ec974365e30b6da6928b4bba02",
+  "dirty_worktree_diff_sha256": "6fa93d9195c5fd108493759df9f96bc9e119a81a4116137ce3389c435aaa6839",
+  "roles": {
+    "candidate_extraction": "configured_extraction_role",
+    "primary_verification": "configured_primary_verification_role",
+    "fallback_verification": "configured_fallback_verification_role"
+  },
+  "initial_experiment_models": {
+    "candidate_extraction": "glm-5.2",
+    "primary_verification": "glm-5.3",
+    "fallback_verification": "glm-5.2"
+  },
+  "gt_available_to_production": false,
+  "papers": [
+    {
+      "paper_id": "paper_006",
+      "paper_key": "Additive manufacturing Ti-22Al-25 Nb alloy with excellent high temperature tensile properties by electron beam powder bed fusion",
+      "selection_role": "cross_chunk_high_temperature_tensile",
+      "enhanced_markdown": {
+        "path": "data/output-alpha25-prompt-v5-final30-20260818/Additive_manufacturing_Ti-22Al-25_Nb_alloy_with_excellent_high_temperature_tensile_properties_by_electron_beam_powder_bed_fusion/txt_parse/Additive manufacturing Ti-22Al-25 Nb alloy with excellent high temperature tensile properties by electron beam powder bed fusion_final_output.md",
+        "sha256": "5698a6d4d61f72b7c06c0636adf412e3a956aaa20ef98e90e36acb8de4c74f86",
+        "size": 63364
+      },
+      "v205_final": {
+        "path": "data/output-alpha25-v205-residual-precision-accepted-final30-20260824/Additive_manufacturing_Ti-22Al-25_Nb_alloy_with_excellent_high_temperature_tensile_properties_by_electron_beam_powder_bed_fusion/final.json",
+        "sha256": "c3ddfce018647fd92fadb4de02a3cd1fe739993bf7689b88b622cc5d4c22f448",
+        "size": 102201
+      },
+      "v205_quality_audit": {
+        "path": "data/output-alpha25-v205-residual-precision-accepted-final30-20260824/Additive_manufacturing_Ti-22Al-25_Nb_alloy_with_excellent_high_temperature_tensile_properties_by_electron_beam_powder_bed_fusion/quality_audit.json",
+        "sha256": "170b4eab3ef9649b171c7e516d40ce6af25efc62d4ac8fa32ee1366599e457e1",
+        "size": 956936
+      }
+    },
+    {
+      "paper_id": "paper_007",
+      "paper_key": "Characterization of Inconel 625 fabricated using powder-bed-based additive manufacturing technologies",
+      "selection_role": "multi_owner_table_fanout_and_composition_control",
+      "enhanced_markdown": {
+        "path": "data/output-alpha25-prompt-v5-final30-20260818/Characterization_of_Inconel_625_fabricated_using_powder-bed-based_additive_manufacturing_technologies/txt_parse/Characterization of Inconel 625 fabricated using powder-bed-based additive manufacturing technologies_final_output.md",
+        "sha256": "4a29e8346c1e94cea6e106441478dfdd1c400f3e20c576f9482f03d8364ddd11",
+        "size": 59927
+      },
+      "v205_final": {
+        "path": "data/output-alpha25-v205-residual-precision-accepted-final30-20260824/Characterization_of_Inconel_625_fabricated_using_powder-bed-based_additive_manufacturing_technologies/final.json",
+        "sha256": "9861ee7ba80ed966a21cc3309dba82b310296091901d219ea924e1250146a5f5",
+        "size": 174129
+      },
+      "v205_quality_audit": {
+        "path": "data/output-alpha25-v205-residual-precision-accepted-final30-20260824/Characterization_of_Inconel_625_fabricated_using_powder-bed-based_additive_manufacturing_technologies/quality_audit.json",
+        "sha256": "0313b304ceda664213ec02ee7adea110ae5064f42d610597d4d42a026ed77c81",
+        "size": 922420
+      }
+    },
+    {
+      "paper_id": "paper_015",
+      "paper_key": "Improving ductility via grain structure control in Sc／Zr modified Al-Cu-Li alloys by pulsed-laser powder bed fusion",
+      "selection_role": "table_prose_duplicate_projection",
+      "enhanced_markdown": {
+        "path": "data/output-alpha25-prompt-v5-final30-20260818/Improving_ductility_via_grain_structure_control_in_Sc／Zr_modified_Al-Cu-Li_alloys_by_pulsed-laser_powder_bed_fusion/txt_parse/Improving ductility via grain structure control in Sc／Zr modified Al-Cu-Li alloys by pulsed-laser powder bed fusion_final_output.md",
+        "sha256": "ed4714a1eed29480fb185c027e020bb7f1163fec0676e8eaf22c2f9c58bdc124",
+        "size": 65001
+      },
+      "v205_final": {
+        "path": "data/output-alpha25-v205-residual-precision-accepted-final30-20260824/Improving_ductility_via_grain_structure_control_in_Sc／Zr_modified_Al-Cu-Li_alloys_by_pulsed-laser_powder_bed_fusion/final.json",
+        "sha256": "5707d6bdc76f1d4a7822ce907ea664d3185906b3214f3508c71b307066fffd72",
+        "size": 109081
+      },
+      "v205_quality_audit": {
+        "path": "data/output-alpha25-v205-residual-precision-accepted-final30-20260824/Improving_ductility_via_grain_structure_control_in_Sc／Zr_modified_Al-Cu-Li_alloys_by_pulsed-laser_powder_bed_fusion/quality_audit.json",
+        "sha256": "b41b3dd2ad9556999ef138380c61d7a4dbc8b2c5212044c151919c7b2f2384e8",
+        "size": 629043
+      }
+    },
+    {
+      "paper_id": "paper_016",
+      "paper_key": "Improving mechanical properties and machining surface quality in a Fe49Mn30Co10Cr10N1 high-entropy alloy sheet by laser-assisted grinding",
+      "selection_role": "global_tensile_protocol_and_condition_binding",
+      "enhanced_markdown": {
+        "path": "data/output-alpha25-prompt-v5-final30-20260818/Improving_mechanical_properties_and_machining_surface_quality_in_a_Fe49Mn30Co10Cr10N1_high-entropy_alloy_sheet_by_laser-assisted_grinding/txt_parse/Improving mechanical properties and machining surface quality in a Fe49Mn30Co10Cr10N1 high-entropy alloy sheet by laser-assisted grinding_final_output.md",
+        "sha256": "d87e2990a1fa71bb9f319c4feda0dab0d7fee62f1302799f281fdc13befca818",
+        "size": 51881
+      },
+      "v205_final": {
+        "path": "data/output-alpha25-v205-residual-precision-accepted-final30-20260824/Improving_mechanical_properties_and_machining_surface_quality_in_a_Fe49Mn30Co10Cr10N1_high-entropy_alloy_sheet_by_laser-assisted_grinding/final.json",
+        "sha256": "4185166f9341412d35c0313b4fbcb1c840d86904dc564298ee7b79f0f8be5fc4",
+        "size": 91230
+      },
+      "v205_quality_audit": {
+        "path": "data/output-alpha25-v205-residual-precision-accepted-final30-20260824/Improving_mechanical_properties_and_machining_surface_quality_in_a_Fe49Mn30Co10Cr10N1_high-entropy_alloy_sheet_by_laser-assisted_grinding/quality_audit.json",
+        "sha256": "7b489a0fce994027de3e32a2b29cc66cf6a45f81ec8d2e727050bc2a464bac85",
+        "size": 1280280
+      }
+    },
+    {
+      "paper_id": "paper_028",
+      "paper_key": "Tailoring thickness debit for high-temperature fatigue resistance of Inconel 718 superalloy fabricated by laser powder bed fusion",
+      "selection_role": "fatigue_tensile_scope_confounder_and_chart_context",
+      "enhanced_markdown": {
+        "path": "data/output-alpha25-prompt-v5-final30-20260818/Tailoring_thickness_debit_for_high-temperature_fatigue_resistance_of_Inconel_718_superalloy_fabricated_by_laser_powder_bed_fusion/txt_parse/Tailoring thickness debit for high-temperature fatigue resistance of Inconel 718 superalloy fabricated by laser powder bed fusion_final_output.md",
+        "sha256": "1f39f268bb1ec990b771280ba5044ad71f04129e054403b8c7d30f4573630a96",
+        "size": 89121
+      },
+      "v205_final": {
+        "path": "data/output-alpha25-v205-residual-precision-accepted-final30-20260824/Tailoring_thickness_debit_for_high-temperature_fatigue_resistance_of_Inconel_718_superalloy_fabricated_by_laser_powder_bed_fusion/final.json",
+        "sha256": "80c84ddf24e3d08f9308056c78eae75f8077ddaf22d134ae629e93a91d958eff",
+        "size": 49689
+      },
+      "v205_quality_audit": {
+        "path": "data/output-alpha25-v205-residual-precision-accepted-final30-20260824/Tailoring_thickness_debit_for_high-temperature_fatigue_resistance_of_Inconel_718_superalloy_fabricated_by_laser_powder_bed_fusion/quality_audit.json",
+        "sha256": "25239d11e60df73d3dd8779a730785a9965ac0707d7b6cb692934cd9a6edc7a9",
+        "size": 534851
+      }
+    }
+  ]
+}
