@@ -167,6 +167,38 @@ a complete member list and a survivor already present in the bundle.
 bundle. A verifier cannot change the property value or create a new fact under
 either decision.
 
+### 4a. Destructive-decision confirmation
+
+The primary verifier may identify a candidate as `quarantine`, but one model
+judgment is not sufficient to delete a promoted scientific assertion. Only the
+destructive subset of a bundle is sent to the independently configured
+fallback role for a second source-only judgment. The second role does not see
+the primary decision or rationale.
+
+A candidate is quarantined only when both roles independently return
+`quarantine` and both responses pass the same deterministic grounding
+validator. Any disagreement, explicit unresolved result, provider failure,
+contract failure, truncation, or grounding failure preserves the original
+candidate unchanged, marks it `unresolved` for review, and stores both roles'
+complete judgments in `quality_audit.json`. This confirmation is scientific
+consensus, distinct from the existing technical fallback used when the primary
+request itself fails.
+
+If the primary bundle request fails technically, the fallback role may still
+classify the bundle so supported candidates can proceed. Its destructive
+decisions are never sent back to the already failed primary role and never
+delete formal output: they are preserved unchanged and marked for review with
+the primary failure and fallback proposal in the audit record. This fail-closed
+route prevents repeated long or truncated primary calls while ensuring a
+technical failure cannot become deletion authority.
+
+The confirmation request contains only destructive assertions from the
+original bounded bundle. It may retain the already bounded evidence context
+but must receive a new content identity. Each confirmation is a singleton and
+uses a separately configurable short output-token budget; the cap is based on
+the confirmation role, not a model name. Composition and Properties remain
+bypassed and cannot enter confirmation.
+
 ### 5. Bounded omission recovery
 
 After candidate verification, the coverage checker selects source assertions
@@ -203,6 +235,9 @@ The applicator is deterministic and runs after `promote_axis_facts` and before
   double failure preserves the unchanged promoted candidate in formal output,
   marks it `unresolved` for review, and records
   `verifier_unresolved_preserved`; and
+- deterministic verifier-inventory placement failures such as
+  `SOURCE_EVIDENCE_NOT_LOCATED` or `EVIDENCE_EXCEEDS_BUNDLE_LIMIT` also preserve
+  a candidate that already passed the online evidence gate and promotion; and
 - independently verified recovery produces a normal candidate carrying its
   source and recovery lineage.
 
@@ -245,9 +280,10 @@ If both verifier roles fail because of provider, transport, truncation,
 response-contract, or grounding-validation errors, every affected assertion
 is preserved unchanged and becomes an audited `unresolved` review item. A
 technical inability to verify is not scientific evidence that the candidate
-is false. A verifier's explicit scientific `unresolved` decision and a
-deterministic `SOURCE_EVIDENCE_NOT_LOCATED` failure remain isolated from formal
-output. The system never silently emits an empty success or manufactures a
+is false. A verifier's explicit scientific `unresolved` decision may remain
+isolated from formal output, but deterministic inventory-location or bundle
+placement failures preserve candidates that already passed evidence gating and
+promotion. The system never silently emits an empty success or manufactures a
 default scientific decision.
 
 A bundle is applied atomically. A candidate-local exception cannot partially
@@ -287,6 +323,10 @@ fallback, timeout, truncation, malformed-response, and cache-hit counts; input
 and output tokens when exposed by the provider; and bundle throughput. Metrics
 are separated by role so slow verification cannot be mistaken for slow OCR or
 candidate extraction.
+
+Summaries additionally separate technical fallback calls from destructive
+confirmation calls and report proposed destructive assertions, consensus
+quarantines, preserved disagreements, and confirmation failures.
 
 ## Testing Strategy
 

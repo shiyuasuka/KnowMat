@@ -50,3 +50,33 @@
   verifier calls and latency.
 - If any five-paper gate fails, keep the 30-paper run blocked and use the same
   replay source for the next general risk-routing iteration.
+
+## Task 7: Require two-role consensus for deletion
+
+- Send only primary `quarantine` assertions to the independent fallback role.
+- Quarantine only when both grounded judgments agree; preserve disagreements
+  and technical failures unchanged with complete audit lineage.
+- Keep technical fallback and scientific confirmation metrics separate.
+- Add contract, client, pipeline, integration, audit, and production-safety
+  tests without changing the Alpha25 extraction prompt/schema or `final.json`.
+
+## Task 8: Re-run the same frozen five-paper candidates
+
+- Use the identical replay manifests from Task 5.
+- Make real verifier API calls with GLM-5.3 primary and GLM-5.2 confirmation.
+- Compare the new arm against the no-verifier control, the previous broad
+  verifier arm, business GT, and GPT expert GT.
+- Keep the 30-paper run blocked unless every original gate passes.
+
+## Task 9: Fail closed after primary technical failure
+
+- When the primary bundle request fails, allow the fallback role to accept or
+  non-destructively route assertions, but preserve every fallback quarantine
+  proposal unchanged for review.
+- Do not call the already failed primary role again for destructive
+  confirmation; record the skipped confirmation and original failure in
+  `quality_audit.json` and aggregate metrics.
+- Give normal singleton confirmations a model-neutral, separately configurable
+  short output-token budget.
+- Prove the route with focused tests, then replay `paper_007` before reopening
+  the frozen five-paper gate. The 30-paper run remains blocked.
