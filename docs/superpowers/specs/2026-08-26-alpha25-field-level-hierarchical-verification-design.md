@@ -280,13 +280,23 @@ checks every required candidate literal against the cited evidence before an
 `all_fields_supported` result is usable.
 
 Primary-positive hard assertions are packed in blinded compact bundles of at
-most six assertions and 6,000 source characters. The initial compact output
-budget is 2,048 tokens. This replaces the 1,024-token pilot setting after the
-five-paper r68/r69 run produced 11 compact truncations and isolated literal
-facts that the primary verifier had fully supported. A truncated
-multi-assertion compact review may split once into smaller compact bundles; a
-truncated singleton is still a technical failure and is not retried with a
-larger unconstrained generation.
+most six assertions and 6,000 source characters. The compact output budget
+remains 1,024 tokens pending a verifier-transport redesign. A controlled
+2,048-token r70 pilot was rejected: it still produced 14 compact truncations,
+each exactly at 2,049 completion tokens with zero reasoning tokens, while
+raising total verifier attempts to 46 across five papers. Strict JSON-schema
+output was rejected by the endpoint. Under Chat Completions, tool-call,
+single-label text, and explicit-thinking probes also reached their output
+limit without a usable decision. A direct OpenAI Responses API probe,
+however, returned a correct singleton `S` decision in 148 output tokens and
+4.4 seconds. The LangChain Responses adapter failed on the same endpoint, and
+the existing three-assertion compact JSON protocol did not produce parseable
+output within 1,024 tokens. The next design iteration should therefore test a
+provider-neutral per-role Responses transport plus a minimal assertion-label
+contract; raising the Chat Completions limit does not repair the behavior.
+A truncated multi-assertion compact review may split once into smaller compact
+bundles; a truncated singleton is a technical failure and is not retried with
+a larger unconstrained generation.
 
 Soft-risk assertions are never destructively changed in this precision pass.
 A non-positive primary soft review preserves the unchanged assertion with a

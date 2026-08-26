@@ -102,7 +102,7 @@ scientific output, OCR/VLM/chart behavior, or public `final.json` shape.
    include the primary answer or rationale.
 4. Pack at most six primary-positive hard assertions and 6,000 source
    characters per compact request. Partition decisions independently.
-5. Use a 2,048-token compact budget. Split a truncated multi-assertion compact
+5. Use a 1,024-token compact budget. Split a truncated multi-assertion compact
    bundle once; do not retry a truncated singleton with a larger budget.
 6. Remove the current one-full-field-response-per-hard-assertion fan-out.
 7. Keep all capability fallback provider-neutral and cache identities
