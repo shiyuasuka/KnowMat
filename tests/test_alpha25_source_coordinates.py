@@ -139,8 +139,40 @@ def test_structured_table_record_resolves_column_owner_and_rowspan_property():
     assert decision.logical_row == 2
     assert decision.logical_column == 1
     assert decision.header_path == ("yield strength (mpa)",)
+    assert decision.column_header_path == ("wrought",)
     assert decision.owner_path == ("wrought",)
     assert decision.value_cell["text"] == "880 [38]"
+
+
+def test_structured_table_record_recovers_second_header_row_from_html_spans():
+    source = r"""
+<table>
+<tr><td rowspan="2"></td><td colspan="3">H230AM</td><td colspan="3">H230</td></tr>
+<tr><td>HT</td><td>200 h</td><td>500 h</td><td>HT</td><td>200 h</td><td>500 h</td></tr>
+<tr><td>Tensile strength / MPa</td><td>220</td><td>204</td><td>200</td><td>186</td><td>183</td><td>178</td></tr>
+</table>
+"""
+    evidence = [
+        "Tensile strength / MPa | 220 | 204 | 200 | 186 | 183 | 178",
+        '<tr><td rowspan="2"></td><td colspan="3">H230AM</td><td colspan="3">H230</td></tr>',
+        "<tr><td>Tensile strength / MPa</td><td>220</td><td>204</td><td>200</td><td>186</td><td>183</td><td>178</td></tr>",
+    ]
+    fact = _property(
+        "H230AM", name="Tensile strength", value="204", unit="MPa"
+    ).model_copy(
+        update={
+            "source_evidence": evidence,
+            "data": {**_property().data, "property_name_raw": "Tensile strength", "value_raw": "204", "unit_raw": "MPa", "source_evidence": evidence},
+        }
+    )
+
+    tables = logical_tables(source)
+    assert tables[0].header_row_count == 2
+    decision = resolve_structured_table_record(fact, source)
+
+    assert decision.status == "matched"
+    assert decision.column_header_path == ("h230am", "200 h")
+    assert decision.logical_column == 2
 
 
 def test_structured_column_owner_requires_cell_local_citation():
@@ -195,6 +227,87 @@ def test_structured_table_record_supports_markdown_table_equivalent():
     assert decision.logical_column == 1
 
 
+def test_structured_table_record_matches_explicit_owner_row_condition_suffix():
+    source = (
+        "| Samples | Yield strength (MPa) | Elongation (%) |\n"
+        "| --- | --- | --- |\n"
+        "| AF-RT | 482 | 9 |\n"
+        "| AF-200 °C | 402 | 11 |"
+    )
+    fact = _property("AF", name="Elongation", value="11", unit="%").model_copy(
+        update={
+            "source_evidence": [
+                "| Samples | Yield strength (MPa) | Elongation (%) |",
+                "| AF-200 °C | 402 | 11 |",
+            ],
+            "data": {
+                **_property("AF", name="Elongation", value="11", unit="%").data,
+                "test_condition_raw": "200 °C",
+                "source_evidence": [
+                    "| Samples | Yield strength (MPa) | Elongation (%) |",
+                    "| AF-200 °C | 402 | 11 |",
+                ],
+            },
+        }
+    )
+
+    decision = resolve_structured_table_record(fact, source)
+
+    assert decision.status == "matched"
+    assert decision.owner_path == ("af-200 °c",)
+    assert decision.owner_cell["raw_text"] == "AF-200 °C"
+
+
+def test_structured_table_record_does_not_match_unrelated_owner_suffix():
+    source = (
+        "| Samples | Yield strength (MPa) | Elongation (%) |\n"
+        "| --- | --- | --- |\n"
+        "| AF-200 °C | 402 | 11 |"
+    )
+    fact = _property("AF", name="Elongation", value="11", unit="%").model_copy(
+        update={
+            "source_evidence": ["| AF-200 °C | 402 | 11 |"],
+            "data": {
+                **_property("AF", name="Elongation", value="11", unit="%").data,
+                "test_condition_raw": "250 °C",
+                "source_evidence": ["| AF-200 °C | 402 | 11 |"],
+            },
+        }
+    )
+
+    decision = resolve_structured_table_record(fact, source)
+
+    assert decision.status == "not_found"
+
+
+def test_structured_column_owner_record_matches_explicit_owner_condition_suffix():
+    source = (
+        "| Property | AF-RT | AF-200 °C |\n"
+        "| --- | --- | --- |\n"
+        "| Elongation (%) | 9 | 11 |"
+    )
+    evidence = [
+        "| Property | AF-RT | AF-200 °C |",
+        "| Elongation (%) | 9 | 11 |",
+    ]
+    fact = _property("AF", name="Elongation", value="11", unit="%").model_copy(
+        update={
+            "source_evidence": evidence,
+            "data": {
+                **_property("AF", name="Elongation", value="11", unit="%").data,
+                "test_condition_raw": "200 °C",
+                "source_evidence": evidence,
+            },
+        }
+    )
+
+    decision = resolve_structured_table_record(fact, source)
+
+    assert decision.status == "matched"
+    assert decision.owner_path == ("af-200 °c",)
+    assert decision.logical_column == 2
+
+
 def test_discrete_tensile_sidecar_parses_bounded_categorical_rows(tmp_path):
     sidecar = tmp_path / "figure_16_digitized.csv"
     sidecar.write_text(
@@ -223,6 +336,74 @@ def test_discrete_tensile_sidecar_parses_bounded_categorical_rows(tmp_path):
         ("Ultimate Tensile Strength", "1010", "MPa"),
         ("Elongation", "2.1", "%"),
     ]
+
+
+def test_discrete_tensile_sidecar_parses_material_direction_median_and_bounds(
+    tmp_path,
+):
+    sidecar = tmp_path / "figure_6_digitized.csv"
+    sidecar.write_text(
+        "Material,Direction,Yield_Stress_MPa_median,"
+        "Yield_Stress_MPa_lower,Yield_Stress_MPa_upper\n"
+        "Wrought,X,975,965,985\n"
+        "WAAM-AB,Z,750,735,765\n",
+        encoding="utf-8",
+    )
+    source = "data_csv: figure_6_digitized.csv"
+
+    decision = discrete_tensile_sidecars(source, tmp_path)[0]
+
+    assert decision.status == "eligible"
+    assert decision.reason == "bounded_categorical_core_tensile_sidecar"
+    assert decision.rows[0].material == "Wrought"
+    assert decision.rows[0].condition == ""
+    assert decision.rows[0].orientation == "X"
+    assert [
+        (
+            cell.property_name,
+            cell.value_raw,
+            cell.unit_raw,
+            cell.column_indexes,
+        )
+        for cell in decision.rows[0].properties
+    ] == [
+        ("Yield Stress median", "975", "MPa", (2,)),
+        ("Yield Stress lower-upper interval", "965–985", "MPa", (3, 4)),
+    ]
+
+
+def test_discrete_tensile_sidecar_rejects_incomplete_statistical_bounds(tmp_path):
+    (tmp_path / "incomplete.csv").write_text(
+        "Material,Direction,Yield_Stress_MPa_median,"
+        "Yield_Stress_MPa_lower\n"
+        "Wrought,X,975,965\n",
+        encoding="utf-8",
+    )
+
+    decision = discrete_tensile_sidecars(
+        "data_csv: incomplete.csv", tmp_path
+    )[0]
+
+    assert decision.status == "rejected"
+    assert decision.reason == "incomplete_tensile_statistical_columns"
+    assert decision.rows == ()
+
+
+def test_discrete_tensile_sidecar_rejects_median_outside_bounds(tmp_path):
+    (tmp_path / "invalid_bounds.csv").write_text(
+        "Material,Direction,Yield_Stress_MPa_median,"
+        "Yield_Stress_MPa_lower,Yield_Stress_MPa_upper\n"
+        "Wrought,X,995,965,985\n",
+        encoding="utf-8",
+    )
+
+    decision = discrete_tensile_sidecars(
+        "data_csv: invalid_bounds.csv", tmp_path
+    )[0]
+
+    assert decision.status == "rejected"
+    assert decision.reason == "median_outside_tensile_statistical_bounds"
+    assert decision.rows == ()
 
 
 def test_continuous_curve_sidecar_is_mandatory_noop(tmp_path):
@@ -344,7 +525,7 @@ def test_v203_dense_row_owner_must_precede_property_columns():
     assert decision.reason == "no_unique_target_owner"
 
 
-def test_v203_dense_orientation_header_requires_explicit_specimen_ledger():
+def test_v205_dense_orientation_header_uses_explicit_specimen_ledger():
     source = """
 <table>
   <tr><th rowspan="2">Property</th><th colspan="2">WAAM</th></tr>
@@ -359,6 +540,105 @@ def test_v203_dense_orientation_header_requires_explicit_specimen_ledger():
             "WAAM / X": ("WAAM / X",),
             "WAAM / Z": ("WAAM / Z",),
         },
+    )[0]
+
+    assert decision.status == "eligible"
+    assert len(decision.cells) == 2
+    assert {cell.owner for cell in decision.cells} == {"WAAM / X", "WAAM / Z"}
+
+
+def test_v205_dense_orientation_header_accepts_leading_percent_elongation():
+    source = """
+<table>
+  <tr><th rowspan="2">Property</th><th colspan="2">WAAM</th></tr>
+  <tr><th>X</th><th>Z</th></tr>
+  <tr><td>% Elongation (at break)</td><td>62.34 ± 1.98</td><td>56.3 ± 6.24</td></tr>
+</table>
+"""
+
+    decision = dense_tensile_table_decisions(
+        source,
+        {
+            "WAAM / X": ("WAAM / X",),
+            "WAAM / Z": ("WAAM / Z",),
+        },
+    )[0]
+
+    assert decision.status == "eligible"
+    assert [
+        (cell.owner, cell.property_name, cell.value_raw, cell.unit_raw)
+        for cell in decision.cells
+    ] == [
+        ("WAAM / X", "Fracture Elongation", "62.34 ± 1.98", "%"),
+        ("WAAM / Z", "Fracture Elongation", "56.3 ± 6.24", "%"),
+    ]
+
+
+def test_v205_dense_orientation_header_accepts_explicit_elastic_modulus():
+    source = """
+<table>
+  <tr><th rowspan="2">Property</th><th colspan="2">WAAM</th></tr>
+  <tr><th>X</th><th>Z</th></tr>
+  <tr><td>Modulus of elasticity (GPa)</td><td>0.524 ± 0.047</td><td>0.506 ± 0.051</td></tr>
+</table>
+"""
+
+    decision = dense_tensile_table_decisions(
+        source,
+        {
+            "WAAM / X": ("WAAM / X",),
+            "WAAM / Z": ("WAAM / Z",),
+        },
+    )[0]
+
+    assert decision.status == "eligible"
+    assert [
+        (
+            cell.owner,
+            cell.property_name,
+            cell.value_raw,
+            cell.unit_raw,
+            cell.orientation,
+        )
+        for cell in decision.cells
+    ] == [
+        ("WAAM / X", "Elastic Modulus", "0.524 ± 0.047", "GPa", "X"),
+        ("WAAM / Z", "Elastic Modulus", "0.506 ± 0.051", "GPa", "Z"),
+    ]
+
+
+def test_dense_table_rejects_modulus_strengthening_as_elastic_modulus():
+    source = r"""
+|  | $ \sigma_{modulus} $ (MPa) | $ \sigma_{coherency} $ (MPa) |
+| --- | --- | --- |
+| CL | 198.6 | 80.2 |
+| PL | 253.6 | 101.3 |
+"""
+
+    decisions = dense_tensile_table_decisions(
+        source,
+        {
+            "CL": ("CL",),
+            "PL": ("PL",),
+        },
+    )
+
+    assert len(decisions) == 1
+    assert decisions[0].status == "not_applicable"
+    assert decisions[0].cells == ()
+
+
+def test_v205_dense_orientation_header_rejects_base_owner_without_specimen_ledger():
+    source = """
+<table>
+  <tr><th rowspan="2">Property</th><th colspan="2">WAAM</th></tr>
+  <tr><th>X</th><th>Z</th></tr>
+  <tr><td>UTS (MPa)</td><td>951</td><td>898</td></tr>
+</table>
+"""
+
+    decision = dense_tensile_table_decisions(
+        source, {"WAAM": ("WAAM",)}
     )[0]
 
     assert decision.status == "rejected"
@@ -550,6 +830,97 @@ def test_v204_tensile_assertion_maps_property_value_respectively_sequence():
     assert uts_decision.coordinate.assertion_type == "ordered"
     assert yield_decision.coordinate.owner_key == "owner-ht"
     assert uts_decision.coordinate.owner_key == "owner-ht"
+
+
+def test_v204_tensile_assertion_expands_shared_strength_head_and_trailing_unit():
+    source = (
+        "The Cu-12%-ANP exhibits very high yield and tensile strengths of "
+        "729 ± 27 and 1036 ± 35 MPa, respectively."
+    )
+    owners = {"owner-anp": ("Cu-12%-ANP",)}
+
+    yield_decision = resolve_tensile_assertion_coordinate(
+        property_name="yield strength",
+        value_raw="729 ± 27",
+        unit_raw="MPa",
+        evidence=(
+            "Cu-12%-ANP exhibits very high yield and tensile strengths of "
+            "729 ± 27 and 1036 ± 35 MPa",
+        ),
+        source_text=source,
+        owner_aliases=owners,
+    )
+    tensile_decision = resolve_tensile_assertion_coordinate(
+        property_name="tensile strength",
+        value_raw="1036 ± 35",
+        unit_raw="MPa",
+        evidence=(
+            "Cu-12%-ANP exhibits very high yield and tensile strengths of "
+            "729 ± 27 and 1036 ± 35 MPa",
+        ),
+        source_text=source,
+        owner_aliases=owners,
+    )
+
+    assert yield_decision.status == "matched"
+    assert tensile_decision.status == "matched"
+    assert yield_decision.coordinate is not None
+    assert tensile_decision.coordinate is not None
+    assert yield_decision.coordinate.owner_key == "owner-anp"
+    assert yield_decision.coordinate.property_family == "yield_strength"
+    assert yield_decision.coordinate.value_raw == "729 ± 27"
+    assert yield_decision.coordinate.unit_raw == "MPa"
+    assert tensile_decision.coordinate.property_family == (
+        "ultimate_tensile_strength"
+    )
+
+
+def test_v206_shared_strength_head_switch_off_preserves_previous_no_match(
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_TENSILE_SHARED_STRENGTH_HEAD_V206", "0"
+    )
+    source = (
+        "The Cu-12%-ANP exhibits yield and tensile strengths of "
+        "729 ± 27 and 1036 ± 35 MPa, respectively."
+    )
+
+    decision = resolve_tensile_assertion_coordinate(
+        property_name="yield strength",
+        value_raw="729 ± 27",
+        unit_raw="MPa",
+        evidence=(
+            "Cu-12%-ANP exhibits yield and tensile strengths of "
+            "729 ± 27 and 1036 ± 35 MPa",
+        ),
+        source_text=source,
+        owner_aliases={"owner-anp": ("Cu-12%-ANP",)},
+    )
+
+    assert decision.status == "not_found"
+    assert decision.coordinate is None
+
+
+def test_v204_shared_strength_head_fails_closed_without_ordered_pair():
+    source = (
+        "The A1 and A2 alloys had yield and tensile strengths of "
+        "729 ± 27 and 1036 ± 35 MPa, respectively."
+    )
+
+    decision = resolve_tensile_assertion_coordinate(
+        property_name="yield strength",
+        value_raw="729 ± 27",
+        unit_raw="MPa",
+        evidence=(
+            "yield and tensile strengths of 729 ± 27 and 1036 ± 35 MPa",
+        ),
+        source_text=source,
+        owner_aliases={"owner-a1": ("A1",), "owner-a2": ("A2",)},
+    )
+
+    assert decision.status == "ambiguous"
+    assert decision.coordinate is None
 
 
 def test_v204_tensile_assertion_allows_only_adjacent_unique_continuation():

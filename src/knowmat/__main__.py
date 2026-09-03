@@ -26,9 +26,73 @@ from pathlib import Path
 from knowmat.nodes.paddleocrvl_parse_pdf import parse_pdf_with_paddleocrvl
 from knowmat.orchestrator import run
 from knowmat.app_config import settings
+from knowmat.ocr_manifest import (
+    OCRManifestError,
+    freeze_ocr_baseline,
+    manifest_path as resolve_manifest_path,
+    markdown_paths as baseline_markdown_paths,
+    verify_ocr_baseline,
+)
 
 # 进度打印间隔（秒）
 _PROGRESS_INTERVAL_SEC = 60
+
+
+def _alpha25_file_worker_budget(requested_workers: int) -> tuple[int, str | None]:
+    """Bound paper admission without statically partitioning provider slots.
+
+    With the shared Alpha25 task pool enabled, file workers only admit papers;
+    their evidence tasks use one process-wide work-conserving executor. Capping
+    admitted papers at the provider ceiling avoids unbounded orchestration while
+    preserving enough ready work to fill idle request slots. The legacy local
+    task pools retain the conservative static partitioning rule.
+    """
+
+    requested = max(1, int(requested_workers))
+    auto_balance = os.getenv(
+        "KNOWMAT2_ALPHA25_AUTO_BALANCE_FILE_WORKERS", "1"
+    ).strip().casefold() not in {"0", "false", "no", "off"}
+    if not auto_balance:
+        return requested, None
+
+    global_limit = max(
+        1, int(os.getenv("KNOWMAT2_ALPHA25_GLOBAL_CONCURRENCY", "6"))
+    )
+    shared_pool = os.getenv(
+        "KNOWMAT2_ALPHA25_SHARED_TASK_POOL", "1"
+    ).strip().casefold() not in {"0", "false", "no", "off"}
+    if shared_pool:
+        balanced = min(requested, global_limit)
+        if balanced == requested:
+            return balanced, None
+        return (
+            balanced,
+            "Alpha25 shared scheduler capped file workers "
+            f"{requested} -> {balanced} "
+            f"(global provider limit={global_limit}).",
+        )
+
+    per_paper_workers = max(
+        1,
+        int(
+            os.getenv(
+                "KNOWMAT2_ALPHA25_WORKERS",
+                os.getenv("KNOWMAT2_EXTRACTION_CHUNK_WORKERS", "6"),
+            )
+        ),
+    )
+    effective_per_paper = min(per_paper_workers, global_limit)
+    safe_file_workers = max(1, global_limit // effective_per_paper)
+    balanced = min(requested, safe_file_workers)
+    if balanced == requested:
+        return balanced, None
+    return (
+        balanced,
+        "Alpha25 concurrency auto-balance adjusted file workers "
+        f"{requested} -> {balanced} "
+        f"(global provider limit={global_limit}, "
+        f"per-paper task workers={per_paper_workers}).",
+    )
 
 def _ensure_utf8_output() -> None:
     """Best-effort: make stdout/stderr emit UTF-8."""
@@ -55,7 +119,10 @@ def _run_with_elapsed_progress(description: str, current_file: str, fn, *args, *
     th.start()
     start = time.time()
     while th.is_alive():
-        time.sleep(_PROGRESS_INTERVAL_SEC)
+        # Wait for completion with a reporting timeout. A fixed sleep here
+        # used to hold a finished paper for up to 60 seconds before releasing
+        # its batch worker, creating large artificial tail latency.
+        th.join(timeout=_PROGRESS_INTERVAL_SEC)
         if not th.is_alive():
             break
         mins = int((time.time() - start) / 60)
@@ -86,6 +153,11 @@ def main(argv: list[str] | None = None) -> None:
         help="Re-run OCR and extraction for all files (ignore existing .md and extraction JSON).",
     )
     parser.add_argument(
+        "--rerun-extraction",
+        action="store_true",
+        help="Re-run LLM extraction while preserving and reusing verified OCR artifacts.",
+    )
+    parser.add_argument(
         "--only",
         nargs="+",
         default=None,
@@ -95,6 +167,27 @@ def main(argv: list[str] | None = None) -> None:
         "--ocr-only",
         action="store_true",
         help="Only run OCR on PDFs (no LLM extraction). Writes <input>/<stem>/<stem>.md and <stem>.json. Run without --ocr-only to extract from these .md into data/output.",
+    )
+    parser.add_argument(
+        "--new-ocr-baseline",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Run a complete fresh OCR-only pass and freeze it as NAME. Requires "
+            "--ocr-only --force-rerun --skip-cached-ocr."
+        ),
+    )
+    parser.add_argument(
+        "--use-ocr-baseline",
+        default=None,
+        metavar="NAME_OR_JSON",
+        help="Verify and use a frozen OCR baseline for LLM-only extraction.",
+    )
+    parser.add_argument(
+        "--verify-ocr-baseline",
+        default=None,
+        metavar="NAME_OR_JSON",
+        help="Verify a frozen OCR baseline and exit without OCR or LLM calls.",
     )
 
     # Per-agent model overrides
@@ -225,6 +318,55 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Error: Path is not a directory: {input_folder}")
         return
 
+    if args.new_ocr_baseline:
+        if not (args.ocr_only and args.force_rerun and args.skip_cached_ocr):
+            print(
+                "Error: --new-ocr-baseline requires --ocr-only --force-rerun "
+                "--skip-cached-ocr so no prior OCR artifact/cache is reused."
+            )
+            return
+        if args.only:
+            print("Error: --new-ocr-baseline cannot be combined with --only.")
+            return
+        if args.use_ocr_baseline or args.verify_ocr_baseline:
+            print("Error: creating and using/verifying a baseline are separate commands.")
+            return
+    if args.use_ocr_baseline and (args.force_rerun or args.ocr_only):
+        print(
+            "Error: --use-ocr-baseline is LLM-only and cannot use --force-rerun/--ocr-only. "
+            "Use --rerun-extraction to ignore existing extraction JSON."
+        )
+        return
+    if args.verify_ocr_baseline and (args.new_ocr_baseline or args.use_ocr_baseline):
+        print("Error: --verify-ocr-baseline must be used by itself.")
+        return
+    if args.batch and (
+        args.new_ocr_baseline or args.use_ocr_baseline or args.verify_ocr_baseline
+    ):
+        print("Error: OCR baseline commands currently require non-batch mode.")
+        return
+
+    selected_manifest_path: Path | None = None
+    selected_manifest: dict | None = None
+    baseline_selector = args.verify_ocr_baseline or args.use_ocr_baseline
+    if baseline_selector:
+        selected_manifest_path = resolve_manifest_path(input_folder, baseline_selector)
+        try:
+            selected_manifest = verify_ocr_baseline(
+                selected_manifest_path, input_folder
+            )
+        except OCRManifestError as exc:
+            print(f"Error: {exc}")
+            return
+        print(
+            "Verified OCR baseline: "
+            f"{selected_manifest.get('baseline_name')} "
+            f"({selected_manifest.get('record_count')} papers, "
+            f"id={str(selected_manifest.get('baseline_id'))[:12]})"
+        )
+        if args.verify_ocr_baseline:
+            return
+
     if args.clear_ocr_cache:
         from knowmat.pdf.ocr_cache import clear_all_ocr_caches_under
 
@@ -349,6 +491,15 @@ def main(argv: list[str] | None = None) -> None:
             text_by_stem[stem] = p
 
     existing_txt_files = sorted(text_by_stem.values(), key=lambda x: x.name.lower())
+
+    if selected_manifest is not None:
+        pdf_files = [
+            input_folder.resolve() / record["pdf_path"]
+            for record in selected_manifest.get("records", [])
+        ]
+        existing_txt_files = baseline_markdown_paths(
+            selected_manifest, input_folder
+        )
 
     if not pdf_files and not existing_txt_files:
         print(f"Error: No supported files (.pdf/.txt/.md) found in: {input_folder}")
@@ -498,13 +649,20 @@ def main(argv: list[str] | None = None) -> None:
                 print("   → 请检查 .env：LLM_MODEL 需为千帆控制台创建的端点 ID（如 ep_xxxxx），且当前账号有该模型/端点访问权限。")
 
     root_output_dir = Path(extraction_output_dir)
+    selected_baseline_id = (
+        str(selected_manifest.get("baseline_id")) if selected_manifest else None
+    )
 
     def _process_one(file_path: Path) -> dict:
         try:
             base_name = file_path.stem
             paper_output_dir = root_output_dir / base_name
             extraction_path = paper_output_dir / f"{base_name}_extraction.json"
-            if extraction_path.exists() and not args.force_rerun:
+            if (
+                extraction_path.exists()
+                and not args.force_rerun
+                and not args.rerun_extraction
+            ):
                 try:
                     data = json.loads(extraction_path.read_text(encoding="utf-8"))
                     items = data.get("items") or data.get("Materials", [])
@@ -536,6 +694,10 @@ def main(argv: list[str] | None = None) -> None:
                 flagging_model=args.flagging_model,
                 full_pipeline=args.full_pipeline,
                 enable_property_standardization=args.enable_property_standardization,
+                ocr_baseline_id=selected_baseline_id,
+                ocr_manifest_path=(
+                    str(selected_manifest_path) if selected_manifest_path else None
+                ),
             )
 
             items = result.get("final_data", {}).get("items") or result.get("final_data", {}).get("Materials", [])
@@ -552,8 +714,16 @@ def main(argv: list[str] | None = None) -> None:
             return {"file": file_path.name, "success": False, "error": str(e)}
 
     results_summary = []
-    workers = max(1, args.workers)
+    fresh_pdf_paths: set[Path] = set()
+    workers, worker_balance_note = _alpha25_file_worker_budget(args.workers)
     ocr_workers = max(1, args.ocr_workers)
+
+    if worker_balance_note:
+        print(f"\n{worker_balance_note}")
+        print(
+            "Set KNOWMAT2_ALPHA25_AUTO_BALANCE_FILE_WORKERS=0 only for an "
+            "intentional paper-admission experiment."
+        )
     
     # Warn if ocr_workers > 1 on low-VRAM GPUs (< 16 GB), but allow it on high-VRAM cards.
     _GPU_SAFE_VRAM_GB = 16.0
@@ -612,6 +782,8 @@ def main(argv: list[str] | None = None) -> None:
                         print(f"[ERROR] OCR failed for {pdf.name}: {exc}")
                         results_summary.append({"file": pdf.name, "success": False, "error": f"OCR failed: {exc}"})
                         continue
+                    if txt_path is not None:
+                        fresh_pdf_paths.add(pdf.resolve())
                     if args.ocr_only:
                         results_summary.append({"file": pdf.name, "success": txt_path is not None})
                     elif txt_path:
@@ -626,6 +798,40 @@ def main(argv: list[str] | None = None) -> None:
                         summary = {"file": path.name, "success": False, "error": str(exc)}
                     results_summary.append(summary)
                     _log_summary(summary)
+
+    if args.new_ocr_baseline:
+        if args.paddleocr_api:
+            backend = {
+                "kind": "paddleocr_api",
+                "model": os.getenv("PADDLEOCR_API_MODEL", "PaddleOCR-VL-1.6"),
+            }
+        elif args.mineru_api:
+            backend = {
+                "kind": "mineru_api",
+                "model": os.getenv("MINERU_MODEL_VERSION", "vlm"),
+            }
+        else:
+            backend = {
+                "kind": "local_paddleocr_vl",
+                "version": os.getenv("PADDLEOCRVL_VERSION", "1.6"),
+                "model_dir": os.getenv("PADDLEOCRVL_MODEL_DIR", ""),
+            }
+        try:
+            frozen = freeze_ocr_baseline(
+                input_folder,
+                pdf_files,
+                baseline_name=args.new_ocr_baseline,
+                backend=backend,
+                fresh_pdf_paths=fresh_pdf_paths,
+            )
+        except OCRManifestError as exc:
+            print(f"Error: fresh OCR completed but baseline was not frozen: {exc}")
+            return
+        frozen_path = resolve_manifest_path(input_folder, args.new_ocr_baseline)
+        print(
+            f"Frozen OCR baseline: {frozen_path} "
+            f"({frozen['record_count']} papers, id={frozen['baseline_id'][:12]})"
+        )
     # Print final summary
     print(f"\n{'='*60}")
     if args.ocr_only:

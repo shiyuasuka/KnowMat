@@ -44,6 +44,25 @@ def assess_final_quality(state: KnowMatState) -> Dict[str, Any]:
     aggregation_rationale = state.get("aggregation_rationale", "")
     human_review_guide = state.get("human_review_guide", "")
     final_data = state.get("final_data", {})
+
+    if isinstance(final_data.get("items"), list):
+        validation = state.get("v11_validation") or {}
+        fatal_count = int(validation.get("fatal_count", 0) or 0)
+        review_count = int(validation.get("review_count", 0) or 0)
+        scores = [run.get("confidence_score", 0.0) for run in run_results]
+        llm_confidence = sum(scores) / len(scores) if scores else 0.5
+        confidence = 0.0 if fatal_count else min(llm_confidence, 0.85 if review_count else 1.0)
+        needs_review = fatal_count > 0 or review_count > 0 or confidence < 0.8
+        return {
+            "final_confidence_score": confidence,
+            "confidence_rationale": (
+                f"alpha.6 validation state={validation.get('state', 'unknown')}; "
+                f"fatal={fatal_count}, review={review_count}; "
+                f"mean extraction confidence={llm_confidence:.2f}."
+            ),
+            "needs_human_review": needs_review,
+            "flag": needs_review,
+        }
     
     if not run_results:
         # No runs to assess

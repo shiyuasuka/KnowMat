@@ -58,6 +58,24 @@ def _prepare_candidate(candidate: Dict[str, Any], source_path: str) -> Dict[str,
         for item in prepared.get("items", [])
         if isinstance(item, dict)
     ]
+    # Alpha25's public contract already supports ``image`` but not the more
+    # specific internal ``image_digitized`` provenance used to protect
+    # sidecar facts from generic owner routing.  Convert only at the package
+    # boundary; the complete sidecar provenance remains in quality_audit.json.
+    for item in prepared["items"]:
+        extracted = item.get("Extracted_Data")
+        if not isinstance(extracted, dict):
+            continue
+        properties = extracted.get("Properties")
+        if not isinstance(properties, list):
+            continue
+        for prop in properties:
+            if (
+                isinstance(prop, dict)
+                and str(prop.get("data_source") or "").strip().casefold()
+                == "image_digitized"
+            ):
+                prop["data_source"] = "image"
     if not prepared["items"]:
         raise ValueError("alpha25 candidate contains no material items")
     return prepared
@@ -244,6 +262,59 @@ def normalize_v11(state: KnowMatState) -> Dict[str, Any]:
     issues_md_path = validate_dir / f"{paper_id}_issues.md"
     issues_md_path.write_text(
         _issues_markdown(validation), encoding="utf-8", newline="\n"
+    )
+    # Keep a paper-level, machine-readable audit trail alongside final.json.
+    # The canonical issues.json remains under v11/04_validate for backwards
+    # compatibility; this copy makes every removed/migrated/isolated record
+    # discoverable without changing final.json's top-level contract.
+    audit_records = [
+        deepcopy(row)
+        for row in validation.get("issues", []) or []
+        if isinstance(row, dict)
+    ]
+    audit_signatures = {
+        json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+        for row in audit_records
+    }
+    for raw in coverage.get("quality_audit_records", []) or []:
+        if not isinstance(raw, dict):
+            continue
+        row = deepcopy(raw)
+        signature = json.dumps(row, ensure_ascii=False, sort_keys=True, default=str)
+        if signature in audit_signatures:
+            continue
+        audit_signatures.add(signature)
+        audit_records.append(row)
+    counts_by_code: dict[str, int] = {}
+    for row in audit_records:
+        code = str(
+            row.get("code")
+            or (
+                f"verifier_{row.get('decision')}"
+                if row.get("decision")
+                else "untyped_issue"
+            )
+        )
+        counts_by_code[code] = counts_by_code.get(code, 0) + 1
+    quality_audit_path = output_root / "quality_audit.json"
+    quality_audit_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "knowmat_quality_audit_v1",
+                "paper_id": paper_id,
+                "source_text": source_file.name,
+                "state": validation.get("state"),
+                "fatal_count": int(validation.get("fatal_count") or 0),
+                "review_count": int(validation.get("review_count") or 0),
+                "record_count": len(audit_records),
+                "counts_by_code": dict(sorted(counts_by_code.items())),
+                "records": audit_records,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
     )
     metadata = (
         _read_json_object(metadata_path, "run metadata")

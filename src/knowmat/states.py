@@ -194,6 +194,8 @@ class KnowMatState(TypedDict, total=False):
     # OCR options (optional; used by parse_pdf_with_paddleocrvl)
     ocr_pages: Optional[str]
     ocr_skip_cached: bool
+    ocr_baseline_id: Optional[str]
+    ocr_manifest_path: Optional[str]
     
     # PDF parsing results
     paper_text: str
@@ -230,6 +232,10 @@ class KnowMatState(TypedDict, total=False):
     # Post-processing controls
     enable_property_standardization: bool
     qa_report: Optional[Dict[str, Any]]
+    v11_validation: Optional[Dict[str, Any]]
+    v11_run_metadata: Optional[Dict[str, Any]]
+    v11_promotable: bool
+    alpha25_coverage: Optional[Dict[str, Any]]
 
 
 def load_run_extraction(run: "EvaluationRun") -> Dict[str, Any]:

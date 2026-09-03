@@ -11,6 +11,7 @@ import json
 import os
 import re
 import uuid
+from pathlib import Path
 from typing import Optional
 
 from langgraph.graph import StateGraph, START, END
@@ -27,8 +28,10 @@ from knowmat.nodes.validator import validate_and_correct
 from knowmat.nodes.flagging import assess_final_quality
 from knowmat.nodes.standardize import standardize_properties
 from knowmat.nodes.schema_convert import convert_to_target_schema
+from knowmat.nodes.v11_normalize import normalize_v11
 from knowmat.app_config import Settings, settings
 from knowmat.config import _env_path
+from knowmat.ocr_manifest import load_ocr_manifest, verify_ocr_record
 
 
 def sanitize_filename(name: str, max_length: int = 200) -> str:
@@ -78,6 +81,24 @@ def sanitize_filename(name: str, max_length: int = 200) -> str:
     return safe
 
 
+def verify_selected_ocr_input(
+    input_path: str,
+    *,
+    ocr_baseline_id: Optional[str],
+    ocr_manifest_path: Optional[str],
+) -> None:
+    """Verify the frozen source artifact before any graph node or LLM call."""
+
+    manifest_path = str(ocr_manifest_path or "").strip()
+    if not manifest_path:
+        return
+    manifest = load_ocr_manifest(Path(manifest_path))
+    expected_baseline = str(ocr_baseline_id or "").strip()
+    if expected_baseline and manifest.get("baseline_id") != expected_baseline:
+        raise RuntimeError("Selected OCR baseline identity changed before extraction")
+    verify_ocr_record(manifest, Path(input_path))
+
+
 def evaluation_condition(state: KnowMatState) -> str:
     """Decide whether to rerun extraction or proceed to aggregation.
 
@@ -114,8 +135,10 @@ def build_graph(full_pipeline: bool = True) -> StateGraph:
     builder.add_edge("detect_sub_field", "extract_data")
 
     if not full_pipeline:
+        builder.add_node("normalize_v11", normalize_v11)
         builder.add_node("convert_schema", convert_to_target_schema)
-        builder.add_edge("extract_data", "convert_schema")
+        builder.add_edge("extract_data", "normalize_v11")
+        builder.add_edge("normalize_v11", "convert_schema")
         builder.add_edge("convert_schema", END)
     else:
         builder.add_node("evaluate_data", evaluate_data)
@@ -123,6 +146,7 @@ def build_graph(full_pipeline: bool = True) -> StateGraph:
         builder.add_node("validate_and_correct", validate_and_correct)
         builder.add_node("assess_final_quality", assess_final_quality)
         builder.add_node("standardize_properties", standardize_properties)
+        builder.add_node("normalize_v11", normalize_v11)
         builder.add_node("convert_schema", convert_to_target_schema)
 
         builder.add_edge("extract_data", "evaluate_data")
@@ -130,7 +154,8 @@ def build_graph(full_pipeline: bool = True) -> StateGraph:
             "evaluate_data", evaluation_condition, ["extract_data", "aggregate_runs"]
         )
         builder.add_edge("aggregate_runs", "validate_and_correct")
-        builder.add_edge("validate_and_correct", "assess_final_quality")
+        builder.add_edge("validate_and_correct", "normalize_v11")
+        builder.add_edge("normalize_v11", "assess_final_quality")
         builder.add_edge("assess_final_quality", "standardize_properties")
         builder.add_edge("standardize_properties", "convert_schema")
         builder.add_edge("convert_schema", END)
@@ -150,6 +175,8 @@ def run(
     flagging_model: Optional[str] = None,
     full_pipeline: bool = False,
     enable_property_standardization: bool = False,
+    ocr_baseline_id: Optional[str] = None,
+    ocr_manifest_path: Optional[str] = None,
 ) -> dict:
     """Run the full KnowMat 2.0 pipeline on a given input file and write results.
 
@@ -178,6 +205,15 @@ def run(
 
     if _env_path:
         print(f"Loaded environment variables from: {_env_path}")
+
+    # Baseline membership must be checked against the immutable source Markdown,
+    # not the parser's output copy.  Do this before routing so a bad selection
+    # cannot consume even one LLM request.
+    verify_selected_ocr_input(
+        pdf_path,
+        ocr_baseline_id=ocr_baseline_id,
+        ocr_manifest_path=ocr_manifest_path,
+    )
 
     # Build an isolated Settings instance for this run to avoid mutating
     # the module-level singleton in concurrent executions.
@@ -240,6 +276,9 @@ def run(
         "run_results": [],
         "max_runs": max_runs,
         "enable_property_standardization": enable_property_standardization,
+        "ocr_baseline_id": ocr_baseline_id,
+        "ocr_manifest_path": ocr_manifest_path,
+        "extraction_model": effective_settings.extraction_model,
     }
 
     thread_id = f"knowmat2_{base_name}_{uuid.uuid4().hex[:8]}"
@@ -261,6 +300,15 @@ def run(
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(final_data, f, ensure_ascii=False, indent=2)
     print(f"Saved extraction to {output_path}")
+
+    if isinstance(final_data, dict) and isinstance(final_data.get("items"), list):
+        if final_state.get("v11_promotable", False):
+            final_path = os.path.join(paper_output_dir, "final.json")
+            with open(final_path, "w", encoding="utf-8") as f:
+                json.dump(final_data, f, ensure_ascii=False, indent=2)
+            print(f"Saved v11 final to {final_path}")
+        else:
+            print("V11 validation has fatal issues; final.json was not promoted.")
 
     report_path = os.path.join(paper_output_dir, f"{base_name}_analysis_report.txt")
     with open(report_path, "w", encoding="utf-8") as f:
@@ -297,23 +345,72 @@ def run(
 def _build_qa_report(base_name: str, final_data: dict, final_state: dict) -> dict:
     """Build the QA report dict from final extraction results."""
     items = final_data.get("items") or final_data.get("Materials", [])
-    all_tests = [t for item in items for t in (item.get("Properties_Info", []) or [])]
-    unknown_process_count = sum(
-        1
+    is_v11 = bool(items) and all(
+        isinstance(item, dict) and isinstance(item.get("Extracted_Data"), dict)
         for item in items
-        if (item.get("Process_Info", {}).get("Process_Category") or "Unknown") == "Unknown"
     )
-    phase_filled_count = sum(
-        1 for item in items if (item.get("Microstructure_Info", {}) or {}).get("Main_Phase")
-    )
+    if is_v11:
+        extracted_rows = [item["Extracted_Data"] for item in items]
+        all_tests = [
+            prop
+            for extracted in extracted_rows
+            for prop in (extracted.get("Properties") or [])
+        ]
+        routes = [
+            ((extracted.get("Processing") or {}).get("Process_Route") or {})
+            for extracted in extracted_rows
+        ]
+        stages = [stage for route in routes for stage in (route.get("stages") or [])]
+        unknown_process_count = sum(
+            1
+            for route in routes
+            if not any(stage.get("process_code") for stage in (route.get("stages") or []))
+        )
+        structure_observations = [
+            observation
+            for extracted in extracted_rows
+            for observation in (
+                (extracted.get("Structure") or {}).get("Structure_Observations") or []
+            )
+        ]
+        composition_observations = [
+            observation
+            for extracted in extracted_rows
+            for observation in (
+                (extracted.get("Composition") or {}).get("Composition_Observations") or []
+            )
+        ]
+        phase_filled_count = sum(
+            bool((extracted.get("Structure") or {}).get("Structure_Observations"))
+            for extracted in extracted_rows
+        )
+        target_count = sum(item.get("Role") == "Target" for item in items)
+    else:
+        all_tests = [t for item in items for t in (item.get("Properties_Info", []) or [])]
+        stages = []
+        structure_observations = []
+        composition_observations = []
+        unknown_process_count = sum(
+            1
+            for item in items
+            if (item.get("Process_Info", {}).get("Process_Category") or "Unknown")
+            == "Unknown"
+        )
+        phase_filled_count = sum(
+            1
+            for item in items
+            if (item.get("Microstructure_Info", {}) or {}).get("Main_Phase")
+        )
+        target_count = sum(
+            1
+            for item in items
+            if (item.get("Composition_Info", {}) or {}).get("Role", "Target") == "Target"
+        )
     phase_filled_rate = phase_filled_count / len(items) if items else 0
-    target_count = sum(
-        1
-        for item in items
-        if (item.get("Composition_Info", {}) or {}).get("Role", "Target") == "Target"
-    )
     paper_metadata = final_data.get("Paper_Metadata") or {}
-    missing_doi = 1 if not (paper_metadata.get("DOI")) else 0
+    missing_doi = 1 if not (paper_metadata.get("doi") or paper_metadata.get("DOI")) else 0
+    validation = final_state.get("v11_validation") or {}
+    coverage = final_state.get("alpha25_coverage") or {}
 
     red_line_triggers = []
     if len(items) == 0:
@@ -328,13 +425,37 @@ def _build_qa_report(base_name: str, final_data: dict, final_state: dict) -> dic
     return {
         "paper_name": base_name,
         "pipeline_version": "knowmat-2.0.1",
+        "schema_version": (final_data.get("Rule_Metadata") or {}).get("schema_version"),
         "materials_target_count": target_count,
         "samples_count": len(items),
         "properties_count": len(all_tests),
+        "process_stage_count": len(stages),
+        "composition_observation_count": len(composition_observations),
+        "structure_observation_count": len(structure_observations),
         "unknown_process_count": unknown_process_count,
         "phase_filled_rate": round(phase_filled_rate, 3),
         "missing_doi": missing_doi,
-        "needs_review": len(red_line_triggers) > 0,
+        "validation_state": validation.get("state"),
+        "fatal_count": validation.get("fatal_count", 0),
+        "review_count": validation.get("review_count", 0),
+        "coverage_complete": coverage.get("complete"),
+        "coverage_task_strategy": coverage.get("task_strategy"),
+        "coverage_thinking_mode": coverage.get("thinking_mode"),
+        "coverage_initial_task_count": coverage.get("initial_task_count", 0),
+        "coverage_retry_task_count": coverage.get("retry_task_count", 0),
+        "coverage_task_count": coverage.get("task_count", 0),
+        "coverage_max_evidence_chars": coverage.get("max_evidence_chars", 0),
+        "coverage_rejected_facts": coverage.get("rejected_facts", 0),
+        "llm_extraction_elapsed_seconds": coverage.get("elapsed_seconds"),
+        "llm_provider_call_p95_seconds": coverage.get(
+            "provider_call_elapsed_p95"
+        ),
+        "llm_provider_queue_sum_seconds": coverage.get(
+            "provider_queue_elapsed_sum"
+        ),
+        "ocr_baseline_id": final_state.get("ocr_baseline_id"),
+        "needs_review": bool(red_line_triggers)
+        or validation.get("state") in {"failed", "passed_with_review"},
         "red_line_triggers": red_line_triggers,
         "final_confidence_score": final_state.get("final_confidence_score"),
     }

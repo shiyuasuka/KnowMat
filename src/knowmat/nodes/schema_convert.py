@@ -26,6 +26,9 @@ def convert_to_target_schema(state: KnowMatState) -> Dict[str, Any]:
     if not final_data:
         final_data = state.get("latest_extracted_data", {})
 
+    if isinstance(final_data, dict) and isinstance(final_data.get("items"), list):
+        return {"final_data": final_data}
+
     pdf_path = state.get("pdf_path", "")
 
     converter = SchemaConverter()

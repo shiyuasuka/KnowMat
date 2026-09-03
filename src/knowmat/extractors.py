@@ -28,7 +28,7 @@ import json
 import os
 import re
 import time
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from pydantic import BaseModel, Field, model_validator
 from langchain_openai import ChatOpenAI
 from trustcall import create_extractor
@@ -67,7 +67,64 @@ def _llm_connection_kwargs() -> Dict[str, str]:
     return kwargs
 
 
-def get_llm(agent_type: str = "default") -> ChatOpenAI:
+def extraction_thinking_mode(model: str) -> str:
+    """Return the explicitly configured extraction thinking capability.
+
+    Provider extensions are endpoint capabilities, not reliable properties of
+    a model name.  The default therefore omits the extension for every model;
+    callers may opt into ``enabled`` or ``disabled`` through one environment
+    setting, and the request layer can fall back generically if unsupported.
+    """
+    del model
+    raw = os.getenv(
+        "KNOWMAT2_EXTRACTION_THINKING", "provider_default"
+    ).strip().casefold()
+    if raw in {"enabled", "enable", "on", "true", "1"}:
+        return "enabled"
+    if raw in {"disabled", "disable", "off", "false", "0"}:
+        return "disabled"
+    if raw in {"provider_default", "default", "auto"}:
+        return "provider_default"
+    return "provider_default"
+
+
+def extraction_reasoning_effort(model: str) -> str:
+    """Return the provider-neutral reasoning effort for extraction requests.
+
+    The value is an endpoint capability, not a model-name rule.  Providers
+    that do not support the optional field are handled by the request layer's
+    generic capability fallback.
+    """
+    del model
+    raw = os.getenv(
+        "KNOWMAT2_EXTRACTION_REASONING_EFFORT", "provider_default"
+    ).strip().casefold()
+    if raw in {"low", "medium", "high"}:
+        return raw
+    if raw in {"provider_default", "default", "auto"}:
+        return "provider_default"
+    return "provider_default"
+
+
+def llm_api_mode() -> str:
+    """Return the explicitly configured OpenAI-compatible endpoint protocol."""
+
+    raw = os.getenv("KNOWMAT2_LLM_API_MODE", "chat_completions").strip().casefold()
+    if raw in {"responses", "response", "responses_api"}:
+        return "responses"
+    return "chat_completions"
+
+
+def get_llm(
+    agent_type: str = "default",
+    *,
+    thinking_mode_override: str | None = None,
+    reasoning_effort_override: str | None = None,
+    model_override: str | None = None,
+    request_timeout_override: int | None = None,
+    max_tokens_override: int | None = None,
+    max_retries_override: int | None = None,
+) -> ChatOpenAI:
     """Instantiate a ChatOpenAI using the current settings for a specific agent.
 
     A new instance is created on each call to avoid stale connections
@@ -94,33 +151,82 @@ def get_llm(agent_type: str = "default") -> ChatOpenAI:
         "default": settings.model_name
     }
     
-    model = model_map.get(agent_type, settings.model_name)
+    model = str(model_override or model_map.get(agent_type, settings.model_name)).strip()
 
-    # Per-agent request timeout.  The extraction agent receives a very large
-    # prompt (system+user template ~22k tokens + enriched paper_text), and some
-    # providers (e.g. MiniMax) frequently return an EMPTY tool-call on the first
-    # attempt for such inputs.  A 20-minute timeout there means each empty
-    # return wastes up to 20 min before the raw-JSON fallback kicks in.  Use a
-    # shorter timeout for extraction so empty/slow calls fail fast and the
-    # fallback path is reached sooner; keep the long timeout for other agents.
+    # Per-agent request timeout. Alpha25 requests are bounded source leaves;
+    # keeping one provider slot blocked for many minutes creates batch-wide
+    # tail latency. The limit remains endpoint-configurable and the extraction
+    # layer retries the identical evidence on transient timeout.
     _timeout_by_agent = {
-        "extraction": int(os.getenv("KNOWMAT2_EXTRACTION_TIMEOUT", "480")),
+        "extraction": int(os.getenv("KNOWMAT2_EXTRACTION_TIMEOUT", "180")),
     }
-    request_timeout = _timeout_by_agent.get(agent_type, 1200)
+    request_timeout = int(
+        request_timeout_override
+        if request_timeout_override is not None
+        else _timeout_by_agent.get(agent_type, 1200)
+    )
 
     base_kwargs = {
         "model": model,
         "request_timeout": request_timeout,
-        "max_retries": 3,  # Retry failed requests up to 3 times
-        "max_tokens": 16384,  # Allow large outputs for multi-item papers
+        "max_retries": int(
+            max_retries_override
+            if max_retries_override is not None
+            else 0 if agent_type == "extraction" else 3
+        ),
+        "max_tokens": int(
+            max_tokens_override
+            if max_tokens_override is not None
+            else os.getenv(
+                (
+                    "KNOWMAT2_EXTRACTION_MAX_TOKENS"
+                    if agent_type == "extraction"
+                    else "KNOWMAT2_MAX_TOKENS"
+                ),
+                "8192" if agent_type == "extraction" else "16384",
+            )
+        ),
         **_llm_connection_kwargs(),
     }
+    thinking_mode = thinking_mode_override or (
+        extraction_thinking_mode(model)
+        if agent_type == "extraction"
+        else "provider_default"
+    )
+    if thinking_mode != "provider_default":
+        base_kwargs["extra_body"] = {"thinking": {"type": thinking_mode}}
 
-    # GPT-5 models don't support temperature parameter
-    if any(gpt5_variant in model for gpt5_variant in ["gpt-5", "gpt-5-mini", "gpt-5-nano"]):
+    # API protocol and optional parameters are endpoint capabilities, not model
+    # name properties. This keeps future model trials free of hard-coded names.
+    api_mode = llm_api_mode()
+    configured_extraction_effort = (
+        extraction_reasoning_effort(model)
+        if agent_type == "extraction"
+        else "provider_default"
+    )
+    reasoning_effort = str(
+        reasoning_effort_override or configured_extraction_effort
+    ).strip().casefold()
+    if reasoning_effort in {"low", "medium", "high"}:
+        base_kwargs["reasoning_effort"] = reasoning_effort
+    if api_mode == "responses":
+        if "reasoning_effort" not in base_kwargs:
+            base_kwargs["reasoning_effort"] = (
+                os.getenv("KNOWMAT2_EXTRACTION_REASONING_EFFORT", "low")
+                if agent_type == "extraction"
+                else os.getenv("KNOWMAT2_REASONING_EFFORT", "medium")
+            )
+        return ChatOpenAI(
+            use_responses_api=True,
+            output_version="responses/v1",
+            **base_kwargs,
+        )
+    omit_temperature = os.getenv(
+        "KNOWMAT2_LLM_OMIT_TEMPERATURE", "0"
+    ).strip().casefold() in {"1", "true", "yes", "on"}
+    if omit_temperature:
         return ChatOpenAI(**base_kwargs)
-    else:
-        return ChatOpenAI(temperature=settings.temperature, **base_kwargs)
+    return ChatOpenAI(temperature=settings.temperature, **base_kwargs)
 
 
 def _coerce_numeric_leaf(value: Any) -> Optional[float]:
@@ -351,7 +457,13 @@ class _LazyExtractor:
                 error_str = str(e)
                 
                 # Authentication errors should not be retried
-                if "401" in error_str or "invalid_model" in error_str.lower() or "authentication" in error_str.lower():
+                if (
+                    "401" in error_str
+                    or "invalid_model" in error_str.lower()
+                    or "authentication" in error_str.lower()
+                    or "insufficient_quota" in error_str.lower()
+                    or "plan credits exceeded" in error_str.lower()
+                ):
                     logger.error("LLM API authentication failed for %s agent: %s", self.agent_type, e)
                     raise RuntimeError(
                         f"LLM API authentication failed for {self.agent_type} agent: {e}. "
@@ -408,7 +520,8 @@ class PaperRouting(BaseModel):
         default_factory=list,
         description=(
             "Optional domain overlays triggered by paper content. "
-            "Possible values: Machining, Coating, Battery."
+            "Possible values: Machining, Coating, Battery, Additive_Manufacturing, "
+            "Titanium_Alloy, High_Temperature_Alloy, High_Entropy_Alloy."
         )
     )
     patch_tags: List[str] = Field(
@@ -1170,6 +1283,156 @@ class CompositionList(BaseModel):
         return data
 
 
+class V11CandidateStage(BaseModel):
+    """Raw process stage emitted by the v11 evidence-first extractor."""
+
+    candidate_stage_id: str
+    stage_index_candidate: int
+    process_name_raw: str
+    process_code_candidate: str
+    process_role_candidate: str
+    parameters_raw: List[Dict[str, Any]] = Field(default_factory=list)
+    source_evidence: List[str]
+    confidence: float
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_stage_shape(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            data = dict(data)
+            if isinstance(data.get("source_evidence"), str):
+                data["source_evidence"] = [data["source_evidence"]]
+            if data.get("process_code_candidate") is None:
+                data["process_code_candidate"] = ""
+        return data
+
+
+class V11CandidateProperty(BaseModel):
+    """Raw property record consumed by alpha.6 deterministic normalization."""
+
+    property_id_candidate: str
+    property_name_raw: str
+    value_raw: str | int | float
+    unit_raw: str
+    test_method_raw: str
+    test_standard_raw: str
+    test_condition_raw: str
+    test_specimen_raw: str
+    raw_note: str
+    data_source: str
+    source_evidence: List[str]
+    confidence: float
+
+    model_config = {"extra": "allow"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_property_shape(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        repaired = dict(data)
+        if isinstance(repaired.get("source_evidence"), str):
+            repaired["source_evidence"] = [repaired["source_evidence"]]
+        for key in (
+            "unit_raw",
+            "test_method_raw",
+            "test_standard_raw",
+            "test_condition_raw",
+            "test_specimen_raw",
+            "raw_note",
+            "data_source",
+        ):
+            if repaired.get(key) is None:
+                repaired[key] = ""
+        if repaired.get("value_raw") is None:
+            repaired["value_raw"] = ""
+        return repaired
+
+
+class V11CandidateProcessing(BaseModel):
+    Process_Text: Dict[str, Any]
+    Process_Route: Dict[str, List[V11CandidateStage]]
+
+    model_config = {"extra": "allow"}
+
+
+class V11CandidateStructure(BaseModel):
+    Structure_Text: Dict[str, Any]
+    structure_status: Literal["reported", "partially_reported", "not_reported", "unknown"]
+    Structure_Observations: List[Dict[str, Any]] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_structure_status(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        repaired = dict(data)
+        raw = str(repaired.get("structure_status") or "").strip().casefold()
+        aliases = {
+            "observed": "reported",
+            "reported_qualitative": "reported",
+            "reported_quantitative": "reported",
+            "partial": "partially_reported",
+            "uncertain": "unknown",
+            "mentioned_without_extractable_observations": "partially_reported",
+            "methods_reported_only": "partially_reported",
+        }
+        normalized = aliases.get(raw)
+        if normalized is None:
+            if raw.startswith(("not_", "unreported", "none")):
+                normalized = "not_reported"
+            elif "partial" in raw or "mention" in raw or "method" in raw:
+                normalized = "partially_reported"
+            elif raw.startswith("report"):
+                normalized = "reported"
+            else:
+                normalized = raw or "unknown"
+        repaired["structure_status"] = normalized
+        return repaired
+
+
+class V11CandidateExtractedData(BaseModel):
+    Composition: Dict[str, Any]
+    Processing: V11CandidateProcessing
+    Structure: V11CandidateStructure
+    Properties: List[V11CandidateProperty] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
+
+
+class V11CandidateItem(BaseModel):
+    Item_ID: str
+    Sample_ID: str
+    Role: Literal["Target", "Reference"]
+    Data_Nature: Literal[
+        "Experimental", "Computed", "Literature_Experimental", "Literature_Computed"
+    ]
+    base_material: str
+    application: Literal["Structural", "Functional"]
+    research_paradigm: Literal["Experimental", "Pure_Simulation", "Hybrid"]
+    Extracted_Data: V11CandidateExtractedData
+
+    model_config = {"extra": "allow"}
+
+
+class V11CandidateDocument(BaseModel):
+    """Evidence-first document produced before alpha.6 normalization."""
+
+    Paper_Metadata: Dict[str, Any]
+    Paper_Routing: Dict[str, Any]
+    items: List[V11CandidateItem]
+
+    model_config = {"extra": "allow"}
+
+    @model_validator(mode="after")
+    def require_items(self) -> "V11CandidateDocument":
+        if not self.items:
+            raise ValueError("v11 candidate must contain at least one item")
+        return self
+
+
 class EvaluationFeedback(BaseModel):
     """Schema for the evaluation agent's output."""
 
@@ -1263,6 +1526,13 @@ routing_extractor = _LazyExtractor(
 # The extraction output may be large, so we do not enable inserts here.
 extraction_extractor = _LazyExtractor(
     [CompositionList], "CompositionList", enable_inserts=False, agent_type="extraction"
+)
+
+v11_extraction_extractor = _LazyExtractor(
+    [V11CandidateDocument],
+    "V11CandidateDocument",
+    enable_inserts=False,
+    agent_type="extraction",
 )
 
 evaluation_extractor = _LazyExtractor(

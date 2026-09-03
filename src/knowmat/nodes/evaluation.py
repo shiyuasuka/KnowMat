@@ -83,6 +83,52 @@ def evaluate_data(state: KnowMatState) -> Dict[str, Any]:
     run_count = state.get("run_count", 0)
     run_results: List[EvaluationRun] = list(state.get("run_results", []))
 
+    if isinstance(extracted_data.get("items"), list):
+        items = extracted_data.get("items") or []
+        missing_fields: List[str] = []
+        total_properties = 0
+        total_evidence = 0
+        for index, item in enumerate(items):
+            axes = (item.get("Extracted_Data") or {}) if isinstance(item, dict) else {}
+            for axis in ("Composition", "Processing", "Structure", "Properties"):
+                if axis not in axes:
+                    missing_fields.append(f"items[{index}].Extracted_Data.{axis}")
+            properties = axes.get("Properties") or []
+            total_properties += len(properties)
+            total_evidence += sum(bool(prop.get("source_evidence")) for prop in properties)
+        evidence_rate = total_evidence / total_properties if total_properties else 1.0
+        confidence = max(
+            0.0,
+            min(1.0, 0.9 - 0.08 * len(missing_fields) - 0.2 * (1.0 - evidence_rate)),
+        )
+        run_id = run_count + 1
+        output_dir = state.get("output_dir", ".")
+        runs_dir = Path(output_dir) / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        extraction_path = runs_dir / f"run_{run_id}_extraction.json"
+        extraction_path.write_text(
+            json.dumps(extracted_data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        record: EvaluationRun = {
+            "run_id": run_id,
+            "confidence_score": confidence,
+            "rationale": (
+                f"Deterministic v11 candidate gate: items={len(items)}, "
+                f"properties={total_properties}, property_evidence_rate={evidence_rate:.2f}, "
+                f"missing_axes={len(missing_fields)}."
+            ),
+            "missing_fields": missing_fields or None,
+            "hallucinated_fields": None,
+            "suggested_prompt": None,
+            "extracted_data_path": str(extraction_path),
+        }
+        run_results.append(record)
+        return {
+            "run_results": run_results,
+            "run_count": run_id,
+            "needs_rerun": bool(missing_fields) and run_id < state.get("max_runs", 1),
+        }
+
     evaluation_prompt = _build_evaluation_prompt(
         extracted_data=extracted_data,
         paper_text=paper_text,

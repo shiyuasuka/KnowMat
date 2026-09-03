@@ -7,6 +7,10 @@ from knowmat.schema_converter import SchemaConverter
 converter = SchemaConverter()
 
 
+def test_image_digitized_uses_existing_public_image_data_source():
+    assert converter._normalize_data_source("image_digitized") == "image"
+
+
 def test_parse_temperature_to_k_from_at_k():
     assert converter.parse_temperature_to_k("measured at 298 K in air") == 298
     assert converter.parse_temperature_to_k("AT 873 K; compression") == 873

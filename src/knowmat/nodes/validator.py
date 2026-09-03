@@ -136,6 +136,36 @@ def validate_and_correct(state: KnowMatState) -> Dict[str, Any]:
     aggregation_notes = state.get("aggregation_notes", "")
     run_results = state.get("run_results", [])
     paper_text = state.get("paper_text", "")
+
+    if isinstance(aggregated_data.get("items"), list):
+        missing = [
+            field
+            for run in run_results
+            for field in (run.get("missing_fields") or [])
+        ]
+        hallucinated = [
+            field
+            for run in run_results
+            for field in (run.get("hallucinated_fields") or [])
+        ]
+        guide_parts = []
+        if missing:
+            guide_parts.append("Recheck reported omissions: " + "; ".join(missing[:20]))
+        if hallucinated:
+            guide_parts.append(
+                "Recheck potentially unsupported facts: " + "; ".join(hallucinated[:20])
+            )
+        if not guide_parts:
+            guide_parts.append("No unresolved LLM evaluation issue was reported.")
+        return {
+            "final_data": aggregated_data,
+            "aggregation_rationale": (
+                f"{aggregation_notes}\n\n"
+                "V11 candidate preserved after evidence evaluation; deterministic alpha.6 "
+                "normalization and schema validation own canonical corrections."
+            ),
+            "human_review_guide": "\n".join(guide_parts),
+        }
     
     if not aggregated_data or not aggregated_data.get("compositions"):
         # Empty aggregation - fallback

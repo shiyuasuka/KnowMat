@@ -64,6 +64,15 @@ def enrich_paper_text(
     paper_text = md_path.read_text(encoding="utf-8")
     ocr_items = json.loads(json_path.read_text(encoding="utf-8"))
 
+    # Normal layout keeps the source PDF beside ``paper_dir``.  Retain a
+    # paper-local candidate for older exports and leave the argument empty if
+    # neither exists; the injector then falls back safely without whole-page
+    # curve extraction.
+    source_pdf = raw_dir / f"{paper_id}.pdf"
+    if not source_pdf.is_file():
+        local_pdf = paper_dir / f"{paper_id}.pdf"
+        source_pdf = local_pdf if local_pdf.is_file() else source_pdf
+
     from knowmat.pdf.figure_describer import inject_figure_descriptions
 
     enriched = inject_figure_descriptions(
@@ -72,5 +81,7 @@ def enrich_paper_text(
         max_workers=max(1, vlm_workers),
         paper_id=paper_id,
         output_dir=str(paper_dir),
+        csv_dir=str(paper_dir),
+        source_pdf=str(source_pdf) if source_pdf.is_file() else "",
     )
     return _clean_html(enriched)

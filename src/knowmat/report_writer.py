@@ -154,6 +154,56 @@ def _write_statistics(f: IO[str], state: Dict[str, Any]) -> None:
         f.write(f"Total Hallucinated Fields Across Runs: {total_hallucinated}\n\n")
 
     final_data = state.get("final_data", {})
+    items = final_data.get("items") or []
+    if items and all(isinstance(item.get("Extracted_Data"), dict) for item in items):
+        extracted_rows = [item["Extracted_Data"] for item in items]
+        composition_count = sum(
+            len((row.get("Composition") or {}).get("Composition_Observations") or [])
+            for row in extracted_rows
+        )
+        property_count = sum(len(row.get("Properties") or []) for row in extracted_rows)
+        stage_count = sum(
+            len(((row.get("Processing") or {}).get("Process_Route") or {}).get("stages") or [])
+            for row in extracted_rows
+        )
+        structure_count = sum(
+            len((row.get("Structure") or {}).get("Structure_Observations") or [])
+            for row in extracted_rows
+        )
+        validation = state.get("v11_validation") or {}
+        coverage = state.get("alpha25_coverage") or {}
+        f.write(f"Final V11 Items: {len(items)}\n")
+        f.write(f"Final Process Stages: {stage_count}\n")
+        f.write(f"Final Composition Observations: {composition_count}\n")
+        f.write(f"Final Structure Observations: {structure_count}\n")
+        f.write(f"Total Properties in Final Result: {property_count}\n")
+        if validation:
+            f.write(
+                "V11 Validation: "
+                f"{validation.get('state', 'unknown')} "
+                f"(fatal={validation.get('fatal_count', 0)}, "
+                f"review={validation.get('review_count', 0)})\n"
+            )
+        if coverage:
+            f.write(
+                "Alpha25 Coverage: "
+                f"complete={coverage.get('complete', False)}, "
+                f"tasks={coverage.get('task_count', 0)}, "
+                f"strategy={coverage.get('task_strategy', 'unknown')}, "
+                f"thinking={coverage.get('thinking_mode', 'unknown')}, "
+                f"initial_tasks={coverage.get('initial_task_count', 0)}, "
+                f"retry_tasks={coverage.get('retry_task_count', 0)}, "
+                f"max_evidence_chars={coverage.get('max_evidence_chars', 0)}, "
+                f"accepted={coverage.get('accepted_facts', 0)}, "
+                f"rejected={coverage.get('rejected_facts', 0)}, "
+                f"elapsed={float(coverage.get('elapsed_seconds') or 0):.1f}s, "
+                "provider_p95="
+                f"{float(coverage.get('provider_call_elapsed_p95') or 0):.1f}s, "
+                "provider_queue_sum="
+                f"{float(coverage.get('provider_queue_elapsed_sum') or 0):.1f}s\n"
+            )
+        return
+
     final_compositions = final_data.get("compositions", [])
     f.write(f"Final Extracted Compositions: {len(final_compositions)}\n")
     if final_compositions:

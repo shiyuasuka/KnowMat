@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import ssl
 import time
 import zipfile
 from pathlib import Path
@@ -16,6 +17,24 @@ logger = logging.getLogger(__name__)
 
 _PRECISION_BASE = "https://mineru.net"
 _LIGHTWEIGHT_BASE = "https://mineru.net"
+
+
+def _build_ssl_context() -> ssl.SSLContext:
+    """Build an SSL context with a usable CA bundle.
+
+    macOS Python (and other framework builds) ship urllib without system CA
+    integration, so verification fails with CERTIFICATE_VERIFY_FAILED. Prefer
+    certifi's bundle when available, falling back to the system default.
+    """
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # pragma: no cover - certifi missing or unreadable
+        return ssl.create_default_context()
+
+
+_SSL_CONTEXT = _build_ssl_context()
 
 
 class MineruAPIError(Exception):
@@ -37,7 +56,7 @@ def _json_request(url: str, *, method: str = "GET", data: Optional[dict] = None,
         hdrs.setdefault("Content-Type", "application/json")
     req = Request(url, data=body, headers=hdrs, method=method)
     try:
-        with urlopen(req, timeout=timeout) as resp:
+        with urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as resp:
             raw = resp.read().decode("utf-8")
             return json.loads(raw)
     except HTTPError as exc:
@@ -62,7 +81,7 @@ def _put_binary(url: str, file_path: Path, timeout: float = 300) -> None:
     # OSS signed URLs require matching Content-Type; empty string prevents urllib's default
     req.add_header("Content-Type", "")
     try:
-        with urlopen(req, timeout=timeout) as resp:
+        with urlopen(req, timeout=timeout, context=_SSL_CONTEXT) as resp:
             _ = resp.read()
     except HTTPError as exc:
         body_text = ""
@@ -238,7 +257,7 @@ class MineruPrecisionClient:
         logger.info("[MinerU API] Downloading results from %s...", zip_url[:80])
 
         req = Request(zip_url)
-        with urlopen(req, timeout=120) as resp:
+        with urlopen(req, timeout=120, context=_SSL_CONTEXT) as resp:
             zip_data = resp.read()
 
         with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
@@ -316,5 +335,5 @@ class MineruLightweightClient:
     def _fetch_markdown(self, url: str) -> str:
         """Download markdown content from CDN URL."""
         req = Request(url)
-        with urlopen(req, timeout=60) as resp:
+        with urlopen(req, timeout=60, context=_SSL_CONTEXT) as resp:
             return resp.read().decode("utf-8")

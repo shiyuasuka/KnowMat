@@ -31,6 +31,10 @@ from knowmat.alpha25.candidate_replay import (  # noqa: E402
     build_candidate_replay_manifest,
     stage_candidate_replay_cache,
 )
+from knowmat.alpha25.verification_contracts import (  # noqa: E402
+    FIELD_VERIFICATION_PROTOCOL_VERSION,
+    VERIFICATION_PROTOCOL_VERSION,
+)
 from knowmat.nodes.extraction import extract_data  # noqa: E402
 from knowmat.nodes.subfield_detection import _build_routing_supplements  # noqa: E402
 from knowmat.nodes.v11_normalize import normalize_v11  # noqa: E402
@@ -171,6 +175,17 @@ def _configure_effective_capabilities(
         os.environ.pop("KNOWMAT2_EXTRACTION_RESPONSE_FORMAT", None)
         applied["KNOWMAT2_EXTRACTION_RESPONSE_FORMAT"] = "text"
 
+    # Reasoning effort is a provider-neutral optional capability.  A CLI/env
+    # override may still replace this value after the probe is loaded.
+    probed_reasoning = str(
+        effective.get("reasoning_effort")
+        or os.getenv("KNOWMAT2_EXTRACTION_REASONING_EFFORT", "provider_default")
+    ).strip().casefold()
+    if probed_reasoning not in {"low", "medium", "high", "provider_default"}:
+        probed_reasoning = "provider_default"
+    os.environ["KNOWMAT2_EXTRACTION_REASONING_EFFORT"] = probed_reasoning
+    applied["KNOWMAT2_EXTRACTION_REASONING_EFFORT"] = probed_reasoning
+
     # This process performs no figure generation.  The frozen Markdown already
     # contains the approved chart context, so a second enrichment would violate
     # the isolated-model experiment.
@@ -267,6 +282,164 @@ def _task_audit(
         "all_identities_valid": True,
         "responses": hashes,
     }
+
+
+def _build_verification_configuration(
+    args: argparse.Namespace,
+    *,
+    extraction_model: str,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """Build the effective verifier environment and auditable configuration.
+
+    Field-level verification is a precision experiment with deliberately
+    narrower, source-only review bundles.  Its safety settings are therefore
+    authoritative over conflicting legacy CLI values.
+    """
+
+    field_level = bool(args.verifier_field_level)
+    max_bundle_assertions = max(
+        1, min(12, int(args.verifier_bundle_assertions))
+    )
+    max_bundle_source_chars = max(
+        1, min(12000, int(args.verifier_bundle_chars))
+    )
+    if field_level:
+        max_bundle_assertions = min(6, max_bundle_assertions)
+        max_bundle_source_chars = min(6000, max_bundle_source_chars)
+        recovery_enabled = False
+        risk_routing_enabled = True
+        bypass_axes = "composition"
+        protocol_version = FIELD_VERIFICATION_PROTOCOL_VERSION
+    else:
+        recovery_enabled = not bool(args.no_verifier_recovery)
+        risk_routing_enabled = bool(args.verifier_risk_routing)
+        bypass_axes = str(args.verifier_bypass_axes).strip()
+        protocol_version = VERIFICATION_PROTOCOL_VERSION
+    fallback_output_tokens = max(
+        512,
+        int(
+            getattr(args, "verifier_fallback_max_tokens", None)
+            or args.verifier_max_tokens
+        ),
+    )
+    primary_output_tokens = max(512, int(args.verifier_max_tokens))
+    if field_level:
+        primary_output_tokens = min(3072, primary_output_tokens)
+    compact_output_tokens = max(
+        256,
+        int(getattr(args, "verifier_compact_max_tokens", 1024)),
+    )
+    compact_split_limit = max(
+        0,
+        int(getattr(args, "verifier_compact_split_limit", 1)),
+    )
+    primary_api_mode = str(
+        getattr(args, "verifier_api_mode", "chat_completions")
+    ).strip()
+    fallback_api_mode = str(
+        getattr(args, "verifier_fallback_api_mode", None) or primary_api_mode
+    ).strip()
+
+    environment = {
+        "KNOWMAT2_ALPHA25_HIERARCHICAL_VERIFICATION": "1",
+        "KNOWMAT2_ALPHA25_VERIFIER_FIELD_LEVEL": "1" if field_level else "0",
+        "KNOWMAT2_ALPHA25_VERIFIER_MODEL": str(args.verifier_model).strip(),
+        "KNOWMAT2_ALPHA25_VERIFIER_FALLBACK_MODEL": str(
+            args.verifier_fallback_model or extraction_model
+        ).strip(),
+        "KNOWMAT2_ALPHA25_VERIFIER_API_MODE": primary_api_mode,
+        "KNOWMAT2_ALPHA25_VERIFIER_FALLBACK_API_MODE": fallback_api_mode,
+        "KNOWMAT2_ALPHA25_VERIFIER_THINKING": args.verifier_thinking,
+        "KNOWMAT2_ALPHA25_VERIFIER_REASONING_EFFORT": (
+            args.verifier_reasoning_effort
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_FALLBACK_REASONING_EFFORT": (
+            args.verifier_fallback_reasoning_effort
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_RESPONSE_FORMAT": (
+            args.verifier_response_format
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_TIMEOUT": str(
+            max(1, int(args.verifier_timeout))
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_MAX_TOKENS": str(
+            primary_output_tokens
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_FALLBACK_MAX_TOKENS": str(
+            fallback_output_tokens
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_CONFIRMATION_MAX_TOKENS": str(
+            max(512, int(args.verifier_confirmation_max_tokens))
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_RECOVERY": "1" if recovery_enabled else "0",
+        "KNOWMAT2_ALPHA25_VERIFIER_DESTRUCTIVE_CONSENSUS": (
+            "0" if args.no_verifier_destructive_consensus else "1"
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_TRANSIENT_RETRIES": str(
+            max(0, int(args.verifier_transient_retries))
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_SINGLETON_TRUNCATION_RETRIES": str(
+            max(0, int(args.verifier_singleton_truncation_retries))
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_COMPACT_MAX_TOKENS": str(
+            compact_output_tokens
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_COMPACT_SPLIT_LIMIT": str(
+            compact_split_limit
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_BUNDLE_ASSERTIONS": str(
+            max_bundle_assertions
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_BUNDLE_CHARS": str(
+            max_bundle_source_chars
+        ),
+        "KNOWMAT2_ALPHA25_VERIFIER_BYPASS_AXES": bypass_axes,
+        "KNOWMAT2_ALPHA25_VERIFIER_RISK_ROUTING": (
+            "1" if risk_routing_enabled else "0"
+        ),
+    }
+    if args.verifier_fallback_thinking is not None:
+        environment["KNOWMAT2_ALPHA25_VERIFIER_FALLBACK_THINKING"] = (
+            args.verifier_fallback_thinking
+        )
+    if args.verifier_confirmation_timeout is not None:
+        environment["KNOWMAT2_ALPHA25_VERIFIER_CONFIRMATION_TIMEOUT"] = str(
+            max(1, int(args.verifier_confirmation_timeout))
+        )
+    if args.verifier_workers is not None:
+        environment["KNOWMAT2_ALPHA25_VERIFIER_WORKERS"] = str(
+            max(1, int(args.verifier_workers))
+        )
+
+    config = {
+        "protocol_version": protocol_version,
+        "field_level": field_level,
+        "risk_routing_enabled": risk_routing_enabled,
+        "recovery_enabled": recovery_enabled,
+        "bypass_axes": [
+            axis.strip().casefold()
+            for axis in bypass_axes.split(",")
+            if axis.strip()
+        ],
+        "max_bundle_assertions": max_bundle_assertions,
+        "max_bundle_source_chars": max_bundle_source_chars,
+        "primary_reasoning_effort": args.verifier_reasoning_effort,
+        "fallback_reasoning_effort": args.verifier_fallback_reasoning_effort,
+        "primary_api_mode": primary_api_mode,
+        "fallback_api_mode": fallback_api_mode,
+        "primary_output_token_budget": max(
+            512, primary_output_tokens
+        ),
+        "fallback_output_token_budget": max(
+            512, fallback_output_tokens
+        ),
+        "singleton_truncation_retries": max(
+            0, int(args.verifier_singleton_truncation_retries)
+        ),
+        "compact_output_token_budget": compact_output_tokens,
+        "compact_split_limit": compact_split_limit,
+    }
+    return environment, config
 
 
 def run_paper(
@@ -389,6 +562,15 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument(
+        "--extraction-reasoning-effort",
+        choices=("low", "medium", "high", "provider_default"),
+        default=None,
+        help=(
+            "Provider-neutral reasoning effort for extraction requests; "
+            "overrides KNOWMAT2_EXTRACTION_REASONING_EFFORT."
+        ),
+    )
+    parser.add_argument(
         "--candidate-replay-root",
         type=Path,
         help=(
@@ -397,9 +579,27 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--expected-pre-verifier-root",
+        type=Path,
+        default=None,
+        help=(
+            "Matching control root or manifest whose promoted-candidate digest "
+            "must match before any verifier API call."
+        ),
+    )
+    parser.add_argument(
         "--hierarchical-verification",
         action="store_true",
         help="Enable paper-level candidate verification and bounded recovery.",
+    )
+    parser.add_argument(
+        "--verifier-field-level",
+        action="store_true",
+        help=(
+            "Use field-level source-grounded verification. This precision mode "
+            "forces risk routing, disables recovery, bypasses only Composition, "
+            "and caps primary bundles at 6 assertions / 6000 source characters."
+        ),
     )
     parser.add_argument(
         "--verifier-model",
@@ -408,6 +608,18 @@ def main() -> int:
     parser.add_argument(
         "--verifier-fallback-model",
         help="Fallback verifier model role; defaults to the extraction model.",
+    )
+    parser.add_argument(
+        "--verifier-api-mode",
+        choices=("chat_completions", "responses"),
+        default="chat_completions",
+        help="API transport for the primary verifier role.",
+    )
+    parser.add_argument(
+        "--verifier-fallback-api-mode",
+        choices=("chat_completions", "responses"),
+        default=None,
+        help="API transport for the independent role; inherits the primary mode.",
     )
     parser.add_argument(
         "--verifier-thinking",
@@ -419,6 +631,18 @@ def main() -> int:
         choices=("enabled", "disabled", "provider_default"),
         default=None,
         help="Optional fallback-role thinking capability; defaults to the primary setting.",
+    )
+    parser.add_argument(
+        "--verifier-reasoning-effort",
+        choices=("low", "medium", "high", "provider_default"),
+        default="provider_default",
+        help="Provider-neutral reasoning effort for the primary verifier role.",
+    )
+    parser.add_argument(
+        "--verifier-fallback-reasoning-effort",
+        choices=("low", "medium", "high", "provider_default"),
+        default="low",
+        help="Provider-neutral reasoning effort for the independent review role.",
     )
     parser.add_argument(
         "--verifier-response-format",
@@ -444,15 +668,58 @@ def main() -> int:
             "independent of model identity and capped by --verifier-max-tokens."
         ),
     )
-    parser.add_argument("--verifier-max-tokens", type=int, default=4096)
+    parser.add_argument("--verifier-max-tokens", type=int, default=3072)
+    parser.add_argument(
+        "--verifier-fallback-max-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Independent-review output budget; defaults to "
+            "--verifier-max-tokens and is provider/model neutral."
+        ),
+    )
     parser.add_argument("--verifier-workers", type=int, default=None)
     parser.add_argument("--verifier-transient-retries", type=int, default=0)
+    parser.add_argument(
+        "--verifier-singleton-truncation-retries",
+        type=int,
+        default=1,
+        help=(
+            "Bounded retries for a truncated singleton independent review; "
+            "does not retry grounding or contract failures."
+        ),
+    )
+    parser.add_argument(
+        "--verifier-compact-max-tokens",
+        type=int,
+        default=1024,
+        help=(
+            "Provider-neutral output budget for compact independent review."
+        ),
+    )
+    parser.add_argument(
+        "--verifier-compact-split-limit",
+        type=int,
+        default=1,
+        help=(
+            "Maximum split depth for a truncated multi-assertion compact review; "
+            "singletons are never expanded or retried."
+        ),
+    )
     parser.add_argument("--verifier-bundle-assertions", type=int, default=6)
     parser.add_argument("--verifier-bundle-chars", type=int, default=6000)
     parser.add_argument(
         "--verifier-bypass-axes",
         default="composition,properties",
         help="Comma-separated deterministic axes excluded from LLM verification.",
+    )
+    parser.add_argument(
+        "--verifier-risk-routing",
+        action="store_true",
+        help=(
+            "Send only deterministically high-risk non-protected candidates to "
+            "the hierarchical verifier."
+        ),
     )
     parser.add_argument(
         "--no-verifier-recovery",
@@ -484,6 +751,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.verifier_fallback_max_tokens is None:
+        args.verifier_fallback_max_tokens = args.verifier_max_tokens
+
+    if args.verifier_field_level and not args.hierarchical_verification:
+        parser.error(
+            "--verifier-field-level requires --hierarchical-verification"
+        )
+
     manifest_path = args.experiment_manifest.resolve()
     probe_path = args.capability_probe.resolve()
     manifest, specs = load_paper_specs(
@@ -493,6 +768,17 @@ def main() -> int:
     )
     probe = _read_object(probe_path)
     applied_environment = _configure_effective_capabilities(manifest, probe, args.model)
+    reasoning_effort = str(
+        args.extraction_reasoning_effort
+        or os.getenv("KNOWMAT2_EXTRACTION_REASONING_EFFORT", "provider_default")
+    ).strip().casefold()
+    if reasoning_effort not in {"low", "medium", "high", "provider_default"}:
+        parser.error(
+            "KNOWMAT2_EXTRACTION_REASONING_EFFORT must be low, medium, high, "
+            "or provider_default"
+        )
+    os.environ["KNOWMAT2_EXTRACTION_REASONING_EFFORT"] = reasoning_effort
+    applied_environment["KNOWMAT2_EXTRACTION_REASONING_EFFORT"] = reasoning_effort
     candidate_replay_root = (
         args.candidate_replay_root.expanduser().resolve()
         if args.candidate_replay_root is not None
@@ -503,6 +789,23 @@ def main() -> int:
             parser.error(f"Candidate replay root does not exist: {candidate_replay_root}")
         os.environ["KNOWMAT2_ALPHA25_CACHE_ONLY"] = "1"
         applied_environment["KNOWMAT2_ALPHA25_CACHE_ONLY"] = "1"
+    expected_pre_verifier_root = (
+        args.expected_pre_verifier_root.expanduser().resolve()
+        if args.expected_pre_verifier_root is not None
+        else None
+    )
+    if expected_pre_verifier_root is not None:
+        if not expected_pre_verifier_root.exists():
+            parser.error(
+                "Expected pre-verifier control root does not exist: "
+                f"{expected_pre_verifier_root}"
+            )
+        os.environ["KNOWMAT2_ALPHA25_EXPECTED_PRE_VERIFIER_ROOT"] = str(
+            expected_pre_verifier_root
+        )
+        applied_environment[
+            "KNOWMAT2_ALPHA25_EXPECTED_PRE_VERIFIER_ROOT"
+        ] = str(expected_pre_verifier_root)
     if args.provider_concurrency is not None:
         concurrency = str(max(1, int(args.provider_concurrency)))
         os.environ["KNOWMAT2_ALPHA25_GLOBAL_CONCURRENCY"] = concurrency
@@ -511,59 +814,16 @@ def main() -> int:
         timeout = str(max(1, int(args.request_timeout)))
         os.environ["KNOWMAT2_EXTRACTION_TIMEOUT"] = timeout
         applied_environment["KNOWMAT2_EXTRACTION_TIMEOUT"] = timeout
+    verifier_config: dict[str, Any] | None = None
     if args.hierarchical_verification:
         if not str(args.verifier_model or "").strip():
             parser.error("--verifier-model is required with --hierarchical-verification")
-        verification_environment = {
-            "KNOWMAT2_ALPHA25_HIERARCHICAL_VERIFICATION": "1",
-            "KNOWMAT2_ALPHA25_VERIFIER_MODEL": str(args.verifier_model).strip(),
-            "KNOWMAT2_ALPHA25_VERIFIER_FALLBACK_MODEL": str(
-                args.verifier_fallback_model or args.model
-            ).strip(),
-            "KNOWMAT2_ALPHA25_VERIFIER_THINKING": args.verifier_thinking,
-            "KNOWMAT2_ALPHA25_VERIFIER_RESPONSE_FORMAT": (
-                args.verifier_response_format
-            ),
-            "KNOWMAT2_ALPHA25_VERIFIER_TIMEOUT": str(
-                max(1, int(args.verifier_timeout))
-            ),
-            "KNOWMAT2_ALPHA25_VERIFIER_MAX_TOKENS": str(
-                max(512, int(args.verifier_max_tokens))
-            ),
-            "KNOWMAT2_ALPHA25_VERIFIER_CONFIRMATION_MAX_TOKENS": str(
-                max(512, int(args.verifier_confirmation_max_tokens))
-            ),
-            "KNOWMAT2_ALPHA25_VERIFIER_RECOVERY": (
-                "0" if args.no_verifier_recovery else "1"
-            ),
-            "KNOWMAT2_ALPHA25_VERIFIER_DESTRUCTIVE_CONSENSUS": (
-                "0" if args.no_verifier_destructive_consensus else "1"
-            ),
-            "KNOWMAT2_ALPHA25_VERIFIER_TRANSIENT_RETRIES": str(
-                max(0, int(args.verifier_transient_retries))
-            ),
-            "KNOWMAT2_ALPHA25_VERIFIER_BUNDLE_ASSERTIONS": str(
-                max(1, min(12, int(args.verifier_bundle_assertions)))
-            ),
-            "KNOWMAT2_ALPHA25_VERIFIER_BUNDLE_CHARS": str(
-                max(1, min(12000, int(args.verifier_bundle_chars)))
-            ),
-            "KNOWMAT2_ALPHA25_VERIFIER_BYPASS_AXES": str(
-                args.verifier_bypass_axes
-            ).strip(),
-        }
-        if args.verifier_fallback_thinking is not None:
-            verification_environment[
-                "KNOWMAT2_ALPHA25_VERIFIER_FALLBACK_THINKING"
-            ] = args.verifier_fallback_thinking
-        if args.verifier_confirmation_timeout is not None:
-            verification_environment[
-                "KNOWMAT2_ALPHA25_VERIFIER_CONFIRMATION_TIMEOUT"
-            ] = str(max(1, int(args.verifier_confirmation_timeout)))
-        if args.verifier_workers is not None:
-            verification_environment["KNOWMAT2_ALPHA25_VERIFIER_WORKERS"] = str(
-                max(1, int(args.verifier_workers))
+        verification_environment, verifier_config = (
+            _build_verification_configuration(
+                args,
+                extraction_model=args.model,
             )
+        )
         for key, value in verification_environment.items():
             os.environ[key] = value
             applied_environment[key] = value
@@ -572,7 +832,10 @@ def main() -> int:
         # The explicit CLI switch is authoritative for this runner.
         os.environ["KNOWMAT2_ALPHA25_HIERARCHICAL_VERIFICATION"] = "0"
         applied_environment["KNOWMAT2_ALPHA25_HIERARCHICAL_VERIFICATION"] = "0"
+        os.environ["KNOWMAT2_ALPHA25_VERIFIER_FIELD_LEVEL"] = "0"
+        applied_environment["KNOWMAT2_ALPHA25_VERIFIER_FIELD_LEVEL"] = "0"
     effective_capabilities = dict(probe.get("effective") or {})
+    effective_capabilities["reasoning_effort"] = reasoning_effort
 
     output_root = args.output_root.resolve()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -631,13 +894,26 @@ def main() -> int:
         "capability_probe": str(probe_path),
         "model": args.model,
         "hierarchical_verification": bool(args.hierarchical_verification),
+        "verifier_protocol_version": (
+            verifier_config["protocol_version"] if verifier_config else None
+        ),
+        "verifier_config": verifier_config,
         "candidate_replay_root": (
             str(candidate_replay_root) if candidate_replay_root is not None else None
+        ),
+        "expected_pre_verifier_root": (
+            str(expected_pre_verifier_root)
+            if expected_pre_verifier_root is not None
+            else None
         ),
         "verifier_roles": (
             {
                 "primary": str(args.verifier_model).strip(),
                 "fallback": str(args.verifier_fallback_model or args.model).strip(),
+                "primary_api_mode": args.verifier_api_mode,
+                "fallback_api_mode": (
+                    args.verifier_fallback_api_mode or args.verifier_api_mode
+                ),
             }
             if args.hierarchical_verification
             else None

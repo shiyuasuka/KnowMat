@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import unicodedata
@@ -29,6 +30,7 @@ from knowmat.alpha25.claim_quality import (
     semantic_fact_signature,
 )
 from knowmat.alpha25.evidence import (
+    normalize_evidence_text,
     table_projection_supports_record,
     unique_ordered_table_row_projection,
 )
@@ -44,6 +46,7 @@ from knowmat.alpha25.source_coordinates import (
     dense_tensile_table_decisions,
     discrete_tensile_sidecars,
     logical_tables,
+    _owner_cell_condition_suffix,
     resolve_structured_table_record,
 )
 
@@ -57,6 +60,24 @@ _ID_FIELDS = {
     "entity_id",
 }
 _EVIDENCE_FIELDS = {"source_evidence", "confidence"}
+_DANGLING_PROPERTY_OWNER_SEPARATOR = re.compile(r"[-‐‑‒–—]\s*$")
+
+# Preparation coordinates are not tensile test conditions.  Keep this matcher
+# deliberately narrow: it only recognizes explicit treatment language (or a
+# bare temperature when the same source assertion proves that the sample was
+# treated at that temperature).  A bare ``650 °C`` remains a legitimate test
+# temperature unless the source locally proves otherwise.
+_PREPARATION_CONDITION_CUE = re.compile(
+    r"(?ix)\b(?:sinter(?:ed|ing)?|heat[\s-]?treat(?:ed|ment)?|"
+    r"age(?:d|ing)?|anneal(?:ed|ing)?|solution[\s-]?treat(?:ed|ment)?|"
+    r"as[\s-]?(?:built|fabricated|sintered)|HIP(?:ed)?|"
+    r"hot[\s-]?isostatic(?:ally)?\s+press(?:ed|ing)?)\b"
+)
+_PREPARATION_NUMERIC_CONDITION = re.compile(
+    r"(?ix)^\s*(?:at\s+)?[-+]?\d{2,4}(?:\.\d+)?\s*"
+    r"(?:°\s*C|deg(?:ree)?s?\s*C|\^?\s*\\circ\s*\{?\s*C\s*\}?)"
+    r"(?:\s+(?:for|holding|held)\s+[^;]+)?\s*$"
+)
 
 
 def global_tensile_scope_v201_enabled() -> bool:
@@ -144,6 +165,19 @@ def property_coordinate_quarantine_v203_enabled() -> bool:
         "off",
         "disabled",
     }
+
+
+def precision_first_owner_dedup_v207_enabled() -> bool:
+    """Enable conservative cross-chunk property owner de-duplication.
+
+    This gate is intentionally opt-in for the first A/B run.  It only removes
+    a non-tensile Property when the same property/value/condition/evidence is
+    emitted for multiple owners without an explicit ``both``/``respectively``
+    mapping.  Table-coordinate facts and reference rows are left untouched.
+    """
+
+    raw = os.getenv("KNOWMAT2_ALPHA25_PRECISION_FIRST_OWNER_DEDUP_V207", "0")
+    return raw.strip().casefold() in {"1", "true", "yes", "on"}
 
 
 _CHARACTERIZATION_METHOD_ALIASES = (
@@ -481,6 +515,7 @@ _CELSIUS_SERIES = re.compile(
     r"(?i)(?<![A-Za-z0-9])"
     r"([-+]?\d{2,4}(?:\.\d+)?(?:\s*(?:,|and|to|[-–—])\s*"
     r"[-+]?\d{2,4}(?:\.\d+)?)*)\s*"
+    r"(?:\\[,;:]\s*)?"
     r"(?:°\s*C|deg(?:ree)?s?\s*C|\^?\s*\\circ\s*\{?\s*C\s*\}?)"
 )
 _SYNTHETIC_ROW_LABEL = re.compile(r"(?i)^.+[_-]row[_-]?\d+$")
@@ -767,6 +802,12 @@ _FORBIDDEN_PROCESS_PARAMETER_KEYS = {
     "simulation time step",
 }
 _STATE_CATEGORY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    # Interlayer-delay table headers commonly omit the word ``interlayer``
+    # while inventory rows retain it (``120 s Delay`` versus
+    # ``120 s interlayer delay``).  Treat those as presentation variants of
+    # one preparation-state category; the explicit numeric+unit qualifier is
+    # still required by callers before a state owner can be selected.
+    ("interlayer_delay", re.compile(r"(?i)\b(?:interlayer\s+)?delays?\b")),
     # Source tables frequently use compact treatment codes (``HIP2``/``HT2``)
     # without a separator.  The trailing optional code must be part of the
     # category match; otherwise the whole composite state is treated as an
@@ -823,6 +864,9 @@ def _normalize_state_markup(value: Any) -> str:
 
     text = unicodedata.normalize("NFKC", str(value or ""))
     text = re.sub(r"\\(?=\s)", "", text)
+    # TeX thin-space commands are presentation-only and often occur between
+    # a temperature value and ``^{\\circ}C`` in OCR Markdown.
+    text = re.sub(r"\\[,;:]\s*", " ", text)
     return re.sub(
         r"\^?\s*\{?\s*\\circ\s*\}?\s*(?:\{\s*C\s*\}|C)",
         "°C",
@@ -859,12 +903,82 @@ def _state_descriptor(value: Any) -> tuple[str, tuple[str, ...]] | None:
     return category, tuple(dict.fromkeys(qualifiers))
 
 
+_NON_IDENTITY_TARGET_STATE = re.compile(
+    r"(?ix)^(?:lpbf|pbf[- ]?eb|epbf|ebm|waam|x|y|z)$"
+)
+
+
 _COMPOSITE_STATE_CODE = re.compile(r"(?i)\b(?:hip|ht)\s*[-_]?\s*\d+\b")
 _COMPOSITE_STATE_PREFIXES = (
     ("as_sintered", re.compile(r"(?i)\bas[\s-]*sinter(?:ed|ing)?\b")),
     ("as_built", re.compile(r"(?i)\bas[\s-]*(?:built|printed|fabricated|deposited|produced)\b")),
     ("as_cast", re.compile(r"(?i)\bas[\s-]*cast\b")),
 )
+
+_REFERENCE_STATE_PROCESS_COORDINATES: tuple[
+    tuple[str, re.Pattern[str]], ...
+] = (
+    (
+        "laser_pbf",
+        re.compile(
+            r"(?ix)\b(?:l[\s-]*pbf|lpbf|slm|selective\s+laser\s+melting|"
+            r"laser\s+powder[\s-]*bed\s+fusion)\b"
+        ),
+    ),
+    (
+        "electron_beam_pbf",
+        re.compile(
+            r"(?ix)\b(?:e[\s-]*pbf|epbf|ebm|electron\s+beam\s+melting|"
+            r"electron[\s-]*beam\s+powder[\s-]*bed\s+fusion)\b"
+        ),
+    ),
+    (
+        "binder_jetting",
+        re.compile(r"(?ix)\b(?:binder[\s-]*jett(?:ed|ing)|bj)\b"),
+    ),
+    (
+        "directed_energy_deposition",
+        re.compile(
+            r"(?ix)\b(?:directed\s+energy\s+deposition|d[\s-]*e[\s-]*d|ded)\b"
+        ),
+    ),
+    (
+        "wire_arc",
+        re.compile(
+            r"(?ix)\b(?:wire\s*(?:\+|and)?\s*arc|waam|wire[\s-]*arc)\b"
+        ),
+    ),
+)
+
+
+def _reference_state_process_discriminator(
+    anchor: InventoryAnchor,
+    *,
+    citation_state_coordinates: set[tuple[str, str]] | None = None,
+) -> str:
+    """Return one explicit manufacturing coordinate for a literature state."""
+
+    coordinate = (
+        _identity_key(anchor.sample_id_raw),
+        normalize_source_alias(anchor.state_raw),
+    )
+    if not (
+        citation_state_coordinates
+        and coordinate in citation_state_coordinates
+        and
+        str(anchor.role or "").strip().casefold() == "reference"
+        and str(anchor.data_nature or "").strip().casefold().startswith(
+            "literature_"
+        )
+    ):
+        return ""
+    text = unicodedata.normalize("NFKC", str(anchor.state_raw or ""))
+    matches = [
+        coordinate
+        for coordinate, pattern in _REFERENCE_STATE_PROCESS_COORDINATES
+        if pattern.search(text)
+    ]
+    return matches[0] if len(matches) == 1 else ""
 
 
 def _state_composite_discriminator(value: Any) -> tuple[str, ...]:
@@ -920,6 +1034,8 @@ def _state_composite_discriminator(value: Any) -> tuple[str, ...]:
 
 def _expand_distinct_state_anchors(
     anchors: Sequence[InventoryAnchor],
+    *,
+    citation_state_coordinates: set[tuple[str, str]] | None = None,
 ) -> tuple[list[InventoryAnchor], dict[str, set[str]]]:
     """Create a base identity plus stable IDs for 2+ explicit source states.
 
@@ -947,11 +1063,32 @@ def _expand_distinct_state_anchors(
         ] = []
         for anchor in rows:
             descriptor = _state_descriptor(anchor.state_raw)
+            # A target's bare manufacturing route/orientation is fact context,
+            # not an independent material state.  The extractor may emit a
+            # synthetic ``Base [LPBF]`` owner; do not expand such raw
+            # descriptors into a new item when the source has no named state.
+            if (
+                descriptor is not None
+                and str(anchor.role).casefold() == "target"
+                and str(anchor.data_nature).casefold() == "experimental"
+                and _NON_IDENTITY_TARGET_STATE.fullmatch(
+                    str(anchor.state_raw or "").strip()
+                )
+            ):
+                descriptor = None
+            reference_process = _reference_state_process_discriminator(
+                anchor,
+                citation_state_coordinates=citation_state_coordinates,
+            )
             # Providers sometimes copy the sample label into ``state_raw``.
             # That is an identity restatement, not a distinct material state.
             if (
                 descriptor is None
-                or (descriptor[0].startswith("raw:") and not descriptor[1])
+                or (
+                    descriptor[0].startswith("raw:")
+                    and not descriptor[1]
+                    and not reference_process
+                )
                 or _identity_key(anchor.state_raw) == _identity_key(base_label(anchor))
             ):
                 continue
@@ -989,6 +1126,10 @@ def _expand_distinct_state_anchors(
             (anchor, descriptor)
             for anchor, descriptor in described
             if not descriptor[0].startswith("raw:")
+            or _reference_state_process_discriminator(
+                anchor,
+                citation_state_coordinates=citation_state_coordinates,
+            )
         ]
 
         by_category: dict[str, set[tuple[str, ...]]] = {}
@@ -1044,6 +1185,21 @@ def _expand_distinct_state_anchors(
                 # that otherwise share one coarse category (e.g. HIP2 + HT2
                 # versus as-sintered + HIP2 + HT2).
                 buckets = [bucket + "|components:" + "+".join(composite) for bucket in buckets]
+            reference_process = _reference_state_process_discriminator(
+                anchor,
+                citation_state_coordinates=citation_state_coordinates,
+            )
+            if reference_process:
+                # A cited author may report the same post-treatment schedule
+                # for different manufacturing routes. Temperature/time alone
+                # then intentionally coalesce, but LPBF and EPBF remain distinct
+                # source states. This discriminator is restricted to explicit
+                # Literature Reference inventory states and canonicalizes common
+                # synonyms, so it cannot split current-study Target samples.
+                buckets = [
+                    bucket + "|source-process:" + reference_process
+                    for bucket in buckets
+                ]
             record_buckets[id(anchor)] = buckets
             for bucket in buckets:
                 bucket_states.setdefault(bucket, []).append(str(anchor.state_raw).strip())
@@ -1158,6 +1314,53 @@ def _evidence(value: Any) -> list[str]:
     return [str(row).strip() for row in value if str(row).strip()]
 
 
+def _incomplete_property_owner_audit(
+    facts: Sequence[AxisFact],
+) -> tuple[set[str], list[MaterializeIssue]]:
+    """Audit incomplete Property owners without affecting other axes.
+
+    The item must first materialize normally so Composition and Structure stay
+    independent of the Property decision.  The returned exact owner labels are
+    used only to remove formal Properties after the complete item is built.
+    """
+
+    owners: set[str] = set()
+    issues: list[MaterializeIssue] = []
+    for fact in facts:
+        if not isinstance(fact, PropertyFact):
+            continue
+        owner = str(fact.sample_id_raw or "").strip()
+        if not owner or not _DANGLING_PROPERTY_OWNER_SEPARATOR.search(owner):
+            continue
+        owners.add(owner)
+        issues.append(
+            MaterializeIssue(
+                code="property_incomplete_owner_quarantined",
+                sample_id_raw=fact.sample_id_raw,
+                path="quarantine.Properties",
+                message=(
+                    "A dangling owner separator is an incomplete source label and "
+                    "cannot create an independent formal Property owner."
+                ),
+                evidence=list(fact.source_evidence),
+                expected={
+                    "owner": "complete literal source identity",
+                    "automatic_suffix_completion": False,
+                    "other_axes_unchanged": True,
+                },
+                actual={
+                    "reason": "dangling_owner_separator",
+                    "fact": fact.model_dump(),
+                },
+                suggested_action=(
+                    "Restore only if a complete owner is literal in the source; "
+                    "do not guess the missing suffix."
+                ),
+            )
+        )
+    return owners, issues
+
+
 def _union_evidence(target: dict[str, Any], incoming: dict[str, Any]) -> None:
     rows = _evidence(target.get("source_evidence"))
     for row in _evidence(incoming.get("source_evidence")):
@@ -1195,6 +1398,269 @@ def _deduplicate(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         else:
             _merge_record(merged[signature], row)
     return [merged[key] for key in order]
+
+
+_PROCESS_STAGE_OWNER_WORDS = re.compile(
+    r"(?i)\b(?:processing|process|build|printing|deposition|fabrication)\s+"
+    r"(?:parameters?|conditions?|settings?|route)\b"
+)
+_PROCESS_STAGE_TECHNIQUE = re.compile(
+    r"(?i)\b(?:waam|ebam|lpbf|pbf|slm|ebm|ded|lmd|laser|electron\s+beam|"
+    r"wire\s*(?:arc|fed)|binder\s+jet(?:ting)?)\b"
+)
+
+
+def _recover_unowned_process_table_facts(
+    index: _IdentityIndex,
+    facts: Sequence[AxisFact],
+) -> tuple[list[AxisFact], list[MaterializeIssue]]:
+    """Recover a process-table owner from one literal local table caption.
+
+    Combined chunks occasionally return a complete parameter table with
+    ``sample_id_raw=not_reported`` even though the caption says, for example,
+    ``Table 2: WAAM processing parameters``.  The table caption is a stronger
+    coordinate than the routed process-family fallback, but only when it names
+    exactly one existing owner.  This helper deliberately refuses prose-only
+    assertions, multi-owner captions, and guessed aliases.
+    """
+
+    recovered: list[AxisFact] = []
+    issues: list[MaterializeIssue] = []
+    for fact in facts:
+        if fact.fact_type != "process_stage" or not _is_unresolved_alias(
+            fact.sample_id_raw
+        ):
+            recovered.append(fact)
+            continue
+        evidence = [str(row or "").strip() for row in fact.source_evidence if str(row or "").strip()]
+        if not evidence or not any(row.startswith("|") for row in evidence):
+            recovered.append(fact)
+            continue
+        joined = "\n".join(evidence)
+        process_name = str(fact.data.get("process_name_raw") or "").strip()
+        # Require a local caption and a process-table cue.  Do not use a
+        # paper-global process mention to bind an otherwise unowned table.
+        captions = [
+            row
+            for row in evidence
+            if re.search(r"(?i)\b(?:table|tab\.)\s*\d+\b", row)
+            and _PROCESS_STAGE_OWNER_WORDS.search(row)
+        ]
+        if not captions:
+            recovered.append(fact)
+            continue
+        candidate_owners: set[str] = set()
+        for caption in captions:
+            candidate_owners.update(index.resolve_evidence([caption]))
+            for canonical in index.anchors:
+                if any(
+                    _source_label_occurs_in_row(label, caption)
+                    for label in _owner_presentation_variants(index, canonical)
+                ):
+                    candidate_owners.add(canonical)
+        # Resolve only direct owner labels.  A caption containing a process
+        # family token is accepted only when the same token is an exact owner
+        # alias; this avoids binding ``WAAM`` to a feedstock or reference row.
+        exact_name_owners = {
+            canonical
+            for canonical in index.anchors
+            if any(
+                normalize_source_alias(process_name)
+                and normalize_source_alias(label)
+                == normalize_source_alias(process_name)
+                for label in _owner_presentation_variants(index, canonical)
+            )
+        }
+        if exact_name_owners:
+            candidate_owners &= exact_name_owners
+        if len(candidate_owners) != 1:
+            recovered.append(fact)
+            continue
+        owner = next(iter(candidate_owners))
+        if len(
+            {
+                canonical
+                for canonical in index.resolve_evidence(captions)
+                if canonical != owner
+            }
+        ):
+            # An explicit multi-owner caption is not safe to narrow by process
+            # name; leave it for the normal ambiguity/quarantine path.
+            recovered.append(fact)
+            continue
+        updated = fact.model_copy(update={"sample_id_raw": index.display_label(owner)})
+        recovered.append(updated)
+        issues.append(
+            MaterializeIssue(
+                code="process_table_owner_recovered",
+                sample_id_raw=index.display_label(owner),
+                path=f"items.{index.display_label(owner)}.Processing",
+                message=(
+                    "An unowned process parameter table was rebound to the only "
+                    "existing material owner named by its local caption."
+                ),
+                evidence=evidence,
+                expected={
+                    "owner": "one exact source-table caption owner",
+                    "multi_owner_caption": False,
+                    "owner_invented": False,
+                },
+                actual={
+                    "before_owner": fact.sample_id_raw,
+                    "after_owner": index.display_label(owner),
+                    "process_name_raw": process_name,
+                    "captions": captions,
+                    "fact": fact.model_dump(),
+                },
+                suggested_action=(
+                    "Review only if the caption labels a process family rather "
+                    "than the material owner represented by the table."
+                ),
+            )
+        )
+    return recovered, issues
+
+
+def _process_stage_identity_key(stage: Mapping[str, Any]) -> str:
+    """Return a presentation-neutral key for duplicate process-stage chunks."""
+
+    name = str(stage.get("process_name_raw") or "").strip()
+    lowered = unicodedata.normalize("NFKC", name).casefold()
+    # Keep named process technologies distinct (WAAM vs EBAM), while treating
+    # harmless presentation suffixes such as ``build``/``deposition`` as the
+    # same stage family.
+    technology = next(
+        (
+            token
+            for token in ("waam", "ebam", "lpbf", "pbf", "slm", "ebm", "ded", "lmd")
+            if re.search(rf"\b{re.escape(token)}\b", lowered)
+        ),
+        "",
+    )
+    family = _process_family(name) or ""
+    return "|".join((technology, family))
+
+
+def _process_stage_reported_parameters(stage: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = stage.get("parameters_raw")
+    if not isinstance(rows, list):
+        return []
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and str(row.get("value_raw") or "").strip()
+        and not _is_unresolved_alias(row.get("value_raw"))
+    ]
+
+
+def _process_stage_parameter_signature(stage: Mapping[str, Any]) -> dict[tuple[str, str], str]:
+    signature: dict[tuple[str, str], str] = {}
+    for row in _process_stage_reported_parameters(stage):
+        name = normalize_source_alias(row.get("parameter_name_raw"))
+        condition = normalize_source_alias(row.get("condition_label_raw"))
+        value = normalize_source_alias(row.get("value_raw"))
+        if name and value:
+            signature[(name, condition)] = value
+    return signature
+
+
+def _process_stage_evidence_overlaps(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    left_rows = _evidence(left.get("source_evidence"))
+    right_rows = _evidence(right.get("source_evidence"))
+    return any(_evidence_rows_share_assertion(a, b) for a in left_rows for b in right_rows)
+
+
+def _deduplicate_process_stages(
+    stages: Sequence[dict[str, Any]],
+    *,
+    sample_id: str,
+) -> tuple[list[dict[str, Any]], list[MaterializeIssue]]:
+    """Merge same-event process stages emitted by overlapping chunks.
+
+    Only overlapping source assertions are merged.  Conflicting explicit
+    parameter values or distinct condition labels remain separate stages, so
+    this cannot collapse real heat-treatment/process variants.  A generic
+    multi-owner process sentence with no reported parameters is isolated when
+    a richer source-local stage for the same technology already exists.
+    """
+
+    output: list[dict[str, Any]] = []
+    issues: list[MaterializeIssue] = []
+    for incoming in stages:
+        row = deepcopy(incoming)
+        key = _process_stage_identity_key(row)
+        incoming_sig = _process_stage_parameter_signature(row)
+        merge_index: int | None = None
+        for index, existing in enumerate(output):
+            if _process_stage_identity_key(existing) != key:
+                continue
+            existing_sig = _process_stage_parameter_signature(existing)
+            # Do not merge two explicit value conflicts or condition variants.
+            conflict = any(
+                pair in existing_sig and existing_sig[pair] != value
+                for pair, value in incoming_sig.items()
+            )
+            if conflict:
+                continue
+            if not _process_stage_evidence_overlaps(existing, row):
+                continue
+            merge_index = index
+            break
+        if merge_index is None:
+            output.append(row)
+            continue
+        survivor = output[merge_index]
+        before = deepcopy(survivor)
+        _union_evidence(survivor, row)
+        params = list(survivor.get("parameters_raw") or [])
+        known = {
+            (
+                normalize_source_alias(item.get("parameter_name_raw")),
+                normalize_source_alias(item.get("condition_label_raw")),
+                normalize_source_alias(item.get("value_raw")),
+            )
+            for item in params
+            if isinstance(item, dict)
+        }
+        for item in row.get("parameters_raw") or []:
+            if not isinstance(item, dict):
+                continue
+            signature = (
+                normalize_source_alias(item.get("parameter_name_raw")),
+                normalize_source_alias(item.get("condition_label_raw")),
+                normalize_source_alias(item.get("value_raw")),
+            )
+            if signature not in known:
+                params.append(deepcopy(item))
+                known.add(signature)
+        survivor["parameters_raw"] = params
+        issues.append(
+            MaterializeIssue(
+                code="process_stage_duplicate_merged",
+                sample_id_raw=sample_id,
+                path=f"items.{sample_id}.Processing.Process_Route",
+                message=(
+                    "Overlapping chunks emitted the same source process stage; "
+                    "their compatible parameters were merged into one stage."
+                ),
+                evidence={
+                    "survivor_evidence": _evidence(before.get("source_evidence")),
+                    "duplicate_evidence": _evidence(row.get("source_evidence")),
+                },
+                expected={"one_stage_per_source_event": True},
+                actual={
+                    "before": before,
+                    "merged": row,
+                    "after": deepcopy(survivor),
+                },
+                suggested_action=(
+                    "Review only if the overlapping source spans actually describe "
+                    "separate process events with identical names."
+                ),
+            )
+        )
+    return output, issues
 
 
 def _composition_atom_key(component: dict[str, Any]) -> tuple[Any, ...] | None:
@@ -1543,7 +2009,7 @@ def _property_unique_table_projection(
             for line in evidence.splitlines()
             if line.strip().startswith("|") and line.strip().endswith("|")
         )
-    decisions: dict[str, dict[str, Any]] = {}
+    decisions: dict[tuple[Any, Any, str], dict[str, Any]] = {}
     for evidence in dict.fromkeys(candidates):
         decision = unique_ordered_table_row_projection(evidence, source_text)
         if decision.status != "matched":
@@ -1558,7 +2024,17 @@ def _property_unique_table_projection(
             if not table_projection_supports_record(payload, decision):
                 continue
             serialized = decision.to_dict()
-            key = json.dumps(serialized, ensure_ascii=False, sort_keys=True)
+            # A single physical table cell is often cited by both the full
+            # source row and a compact projected row.  Those evidence shapes
+            # serialize differently even though they resolve to the same
+            # source coordinate.  Deduplicate by the immutable physical
+            # location, not by the presentation of the evidence, while still
+            # keeping separate repeated tables/rows ambiguous.
+            key = (
+                serialized.get("block_index"),
+                serialized.get("row_index"),
+                normalize_evidence_text(serialized.get("source_row") or ""),
+            )
             decisions.setdefault(key, serialized)
     if len(decisions) != 1:
         return None
@@ -2143,7 +2619,7 @@ def _sanitize_structure_observation(row: dict[str, Any]) -> dict[str, Any] | Non
         source_type = "reported"
     if not entities and not features:
         return None
-    return {
+    result = {
         "observation_id": str(row.get("observation_id") or "temporary"),
         "structure_kind": kind,
         "material_state": str(row.get("material_state") or "not_reported"),
@@ -2155,6 +2631,290 @@ def _sanitize_structure_observation(row: dict[str, Any]) -> dict[str, Any] | Non
         "features": features,
         "source_evidence": evidence,
     }
+    # ``region_raw`` is an optional observation coordinate already consumed by
+    # the evaluator/verification layers.  Preserve it when a source table
+    # proves a row-level region (for example D versus ID); ordinary observations
+    # remain byte-compatible because the field is omitted when absent.
+    region = _first_present(row, "region_raw", "region", "location_raw")
+    if region not in (None, ""):
+        result["region_raw"] = str(region).strip()
+    return result
+
+
+def _structure_table_name_key(value: Any) -> str:
+    """Normalize a structure row label for exact table-coordinate matching."""
+
+    # Source tables and model responses use different TeX/Unicode renderings
+    # (``$ \\gamma' $`` versus ``γ'``).  Alias normalization removes only
+    # presentation markup and punctuation; it does not fuzzy-match words.
+    text = _normalize_state_markup(value)
+    # The extractor commonly moves a trailing unit (``(%)``, ``(nm)``, …)
+    # into ``unit_raw`` while OCR tables retain it in the row label.  Removing
+    # only an unambiguous unit suffix keeps feature matching exact without
+    # conflating distinct scientific names.
+    text = re.sub(
+        r"\s*\(\s*(?:%|nm|μm|um|mm|cm|m|°?c|k|pa|kpa|mpa|gpa)\s*\)\s*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return normalize_source_alias(text)
+
+
+def _structure_table_value_key(value: Any) -> str:
+    """Normalize one literal table value while retaining its numeric payload."""
+
+    text = normalize_evidence_text(str(value or ""))
+    return re.sub(r"\s+", "", text)
+
+
+def _structure_table_region_label(value: Any) -> str:
+    """Return a compact source region label without footnote markup."""
+
+    text = unicodedata.normalize("NFKC", str(value or "")).strip()
+    # ``D^a``/``ID^b`` are table footnote annotations, not distinct regions.
+    text = re.sub(r"\s*(?:\^\s*|\{\s*|\}\s*)[ab]\s*$", "", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip()
+    if normalize_source_alias(text) in {"d", "id"}:
+        return normalize_source_alias(text).upper()
+    return text
+
+
+def _structure_table_effective_header_path(table: Any, column: int) -> tuple[str, ...]:
+    """Return header coordinates including OCR-emitted continuation rows.
+
+    Some OCR HTML tables use ``<td>`` for every cell, including the two header
+    rows.  ``logical_tables`` then correctly preserves the cells but cannot
+    mark the second row as a header.  For coordinate recovery only, recognize
+    a continuation row when its first cell repeats the first header label (or
+    is blank) and the row is predominantly non-numeric.  This is deliberately
+    conservative so ordinary numeric data rows are never promoted to headers.
+    """
+
+    path = list(table.header_path(column))
+    if not table.rows or table.header_row_count >= len(table.rows):
+        return tuple(path)
+    first_header = normalize_source_alias(
+        table.rows[0][0].text if table.rows[0] and table.rows[0][0] else ""
+    )
+    for row_index in range(table.header_row_count, min(len(table.rows), table.header_row_count + 2)):
+        row = table.rows[row_index]
+        values = [str(cell.text).strip() for cell in row if cell is not None and str(cell.text).strip()]
+        if len(values) < 2:
+            break
+        first_value = normalize_source_alias(values[0])
+        numeric = sum(bool(re.fullmatch(r"[-+]?\d+(?:\.\d+)?(?:\s*[%°a-z].*)?", value, flags=re.I)) for value in values)
+        if first_value not in {"", first_header} or numeric > len(values) // 2:
+            break
+        cell = row[column] if column < len(row) else None
+        text = str(cell.text).strip() if cell is not None else ""
+        if text:
+            path.append(text)
+    return tuple(path)
+
+
+def _recover_structure_table_feature_coordinates(
+    facts: Sequence[AxisFact],
+    source_text: str,
+) -> tuple[list[AxisFact], list[MaterializeIssue]]:
+    """Split one malformed multi-row structure table fact into row owners.
+
+    GLM frequently returns a single StructureFact containing two values for
+    every feature while copying only the feature/value rows.  When the full
+    source table has one unique owner/state column and one explicit region
+    column, the values can be rebound to the source row without inference.
+    Ambiguous or incomplete tables are left untouched and audited.
+    """
+
+    if not source_text:
+        return list(facts), []
+    tables = logical_tables(source_text)
+    if not tables:
+        return list(facts), []
+    output: list[AxisFact] = []
+    issues: list[MaterializeIssue] = []
+    for fact in facts:
+        if not isinstance(fact, StructureFact) or fact.fact_type != "structure_observation":
+            output.append(fact)
+            continue
+        features = [
+            row for row in fact.data.get("features") or [] if isinstance(row, dict)
+        ]
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for feature in features:
+            key = _structure_table_name_key(
+                feature.get("feature_name_raw") or feature.get("feature_name")
+            )
+            if key:
+                groups.setdefault(key, []).append(feature)
+        duplicated = [rows for rows in groups.values() if len(rows) >= 2]
+        if not duplicated or not all(
+            str(row.get("value_raw") or "").strip() for rows in duplicated for row in rows
+        ):
+            output.append(fact)
+            continue
+
+        owner = str(fact.data.get("sample_id") or fact.sample_id_raw or "").strip()
+        state = str(fact.data.get("material_state") or "").strip()
+        owner_key = normalize_source_alias(owner)
+        state_key = normalize_source_alias(_normalize_state_markup(state))
+        table_matches: list[tuple[Any, int, int, int, dict[str, list[tuple[int, str, str]]]]] = []
+        for table in tables:
+            width = max((len(row) for row in table.rows), default=0)
+            if width < 3:
+                continue
+            owner_state_columns: list[int] = []
+            region_columns: list[int] = []
+            for column in range(width):
+                header_path = _structure_table_effective_header_path(table, column)
+                header_keys = [normalize_source_alias(value) for value in header_path]
+                if owner_key and owner_key not in header_keys:
+                    continue
+                if state_key and state_key not in header_keys:
+                    continue
+                owner_state_columns.append(column)
+            for column in range(width):
+                header_keys = [
+                    normalize_source_alias(value)
+                    for value in _structure_table_effective_header_path(table, column)
+                ]
+                if any(key in {"location", "region", "zone", "position", "area"} for key in header_keys):
+                    region_columns.append(column)
+            if len(owner_state_columns) != 1 or len(region_columns) != 1:
+                continue
+            value_column = owner_state_columns[0]
+            region_column = region_columns[0]
+            by_region: dict[str, list[tuple[int, str, str]]] = {}
+            valid = True
+            for feature_key, rows in groups.items():
+                if len(rows) < 2:
+                    continue
+                source_rows = [
+                    (index, row)
+                    for index, row in enumerate(table.rows)
+                    if index >= table.header_row_count
+                    and row
+                    and _structure_table_name_key(row[0].text if row[0] else "") == feature_key
+                ]
+                assignments: list[tuple[int, str, str]] = []
+                for feature in rows:
+                    value_key = _structure_table_value_key(feature.get("value_raw"))
+                    candidates = []
+                    for row_index, row in source_rows:
+                        if value_column >= len(row) or row[value_column] is None:
+                            continue
+                        if _structure_table_value_key(row[value_column].text) == value_key:
+                            if region_column < len(row) and row[region_column] is not None:
+                                region = _structure_table_region_label(row[region_column].text)
+                                if region:
+                                    candidates.append((row_index, region, row[value_column].text))
+                    if len(candidates) != 1:
+                        valid = False
+                        break
+                    assignments.append(candidates[0])
+                if not valid:
+                    break
+                for row_index, region, value_text in assignments:
+                    by_region.setdefault(region, []).append((row_index, feature_key, value_text))
+            if not valid or len(by_region) < 2:
+                continue
+            # Every duplicated feature must be represented once per region.
+            expected = len(duplicated)
+            if any(len(rows) != expected for rows in by_region.values()):
+                continue
+            table_matches.append((table, value_column, region_column, expected, by_region))
+
+        if len(table_matches) != 1:
+            output.append(fact)
+            if duplicated and len(table_matches) != 1:
+                issues.append(
+                    MaterializeIssue(
+                        code="structure_table_coordinate_ambiguous",
+                        sample_id_raw=fact.sample_id_raw,
+                        path=f"items.{fact.sample_id_raw}.Structure.Structure_Observations",
+                        message=(
+                            "A multi-valued structure observation had repeated feature "
+                            "names, but no unique owner/state/region table coordinate "
+                            "was proven; the observation was preserved unchanged."
+                        ),
+                        evidence=list(fact.source_evidence),
+                        expected={"unique_table_coordinate": True, "fact_preserved": True},
+                        actual={
+                            "owner": owner,
+                            "state": state,
+                            "candidate_table_count": len(table_matches),
+                            "repeated_feature_count": len(duplicated),
+                            "fact": fact.model_dump(),
+                        },
+                        suggested_action=(
+                            "Review the table header/region mapping before assigning "
+                            "values to separate structure owners."
+                        ),
+                    )
+                )
+            continue
+
+        table, value_column, region_column, expected, by_region = table_matches[0]
+        feature_by_key = {key: rows for key, rows in groups.items()}
+        for region, assignments in by_region.items():
+            assignment_values = {feature_key: value for _, feature_key, value in assignments}
+            selected_features: list[dict[str, Any]] = []
+            evidence_rows: list[str] = list(table.raw_rows[: table.header_row_count])
+            for feature_key, rows in feature_by_key.items():
+                if len(rows) < 2 or feature_key not in assignment_values:
+                    selected_features.extend(deepcopy(rows))
+                    continue
+                selected = next(
+                    row for row in rows
+                    if _structure_table_value_key(row.get("value_raw"))
+                    == _structure_table_value_key(assignment_values[feature_key])
+                )
+                selected = deepcopy(selected)
+                source_row_index = next(
+                    row_index
+                    for row_index, key, value in assignments
+                    if key == feature_key and value == assignment_values[feature_key]
+                )
+                selected["source_evidence"] = [table.raw_rows[source_row_index]]
+                selected_features.append(selected)
+                evidence_rows.append(table.raw_rows[source_row_index])
+            cloned_data = deepcopy(fact.data)
+            cloned_data["features"] = selected_features
+            cloned_data["region_raw"] = region
+            cloned_data["source_evidence"] = list(dict.fromkeys(evidence_rows))
+            cloned_data["original"] = " | ".join(evidence_rows)
+            cloned_data["simplified"] = str(fact.data.get("simplified") or cloned_data["original"])
+            cloned_data["observation_id"] = f"temporary-{normalize_source_alias(region)}"
+            output.append(
+                fact.model_copy(
+                    deep=True,
+                    update={"data": cloned_data, "source_evidence": list(dict.fromkeys(evidence_rows))},
+                )
+            )
+        issues.append(
+            MaterializeIssue(
+                code="structure_table_coordinate_recovered",
+                severity="info",
+                sample_id_raw=fact.sample_id_raw,
+                path=f"items.{fact.sample_id_raw}.Structure.Structure_Observations",
+                message=(
+                    "A repeated multi-valued structure table fact was split by its "
+                    "unique literal owner/state/region coordinates."
+                ),
+                evidence=list(fact.source_evidence),
+                expected={"unique_table_coordinate": True, "regions": sorted(by_region)},
+                actual={
+                    "owner": owner,
+                    "state": state,
+                    "region_column": region_column,
+                    "value_column": value_column,
+                    "regions": sorted(by_region),
+                    "split_count": len(by_region),
+                },
+                suggested_action="Review only if the source table uses a non-literal region header.",
+            )
+        )
+    return output, issues
 
 
 def _sanitize_parameters(value: Any, stage_evidence: Sequence[str]) -> list[dict[str, Any]]:
@@ -2223,19 +2983,456 @@ def _sanitize_parameters(value: Any, stage_evidence: Sequence[str]) -> list[dict
     return parameters
 
 
+_PROCESS_TABLE_CAPTION = re.compile(
+    r"(?i)\b(?:table|tab\.)\s*\d+\s*:\s*(?P<family>.+?)\s+"
+    r"(?:processing|print|fabrication)\s+parameters?\b"
+)
+
+
+def _processing_table_family(value: Any) -> str:
+    text = re.sub(r"[_\-]+", " ", str(value or "")).casefold()
+    for token in ("waam", "ebam", "lpbf", "pbf", "slm", "ebm", "ded", "lmd"):
+        if re.search(rf"\b{re.escape(token)}\b", text):
+            return token
+    return ""
+
+
+def _parse_processing_table_rows(
+    source_text: str | None,
+) -> dict[str, list[tuple[str, str, str]]]:
+    """Parse source-literal two-cell processing tables by caption family.
+
+    This is deliberately a narrow recovery path.  It only considers a
+    Markdown table immediately followed by a ``Table N: <family> processing
+    parameters`` caption and returns the literal label/value cells.  No
+    values, units, or owners are inferred from prose.
+    """
+
+    lines = str(source_text or "").splitlines()
+    recovered: dict[str, list[tuple[str, str, str]]] = {}
+    for index, line in enumerate(lines):
+        caption = _PROCESS_TABLE_CAPTION.search(line)
+        if not caption:
+            continue
+        family = _processing_table_family(caption.group("family"))
+        if not family:
+            continue
+        rows: list[tuple[str, str, str]] = []
+        cursor = index - 1
+        while cursor >= 0 and not lines[cursor].strip():
+            cursor -= 1
+        table_lines: list[str] = []
+        while cursor >= 0 and lines[cursor].lstrip().startswith("|"):
+            table_lines.append(lines[cursor])
+            cursor -= 1
+        for raw in reversed(table_lines):
+            cells = _table_cells(raw)
+            if len(cells) < 2:
+                continue
+            label, value = cells[0].strip(), cells[1].strip()
+            if not label or not value or re.fullmatch(r"[-: ]+", label):
+                continue
+            rows.append((label, value, raw.strip()))
+        if rows:
+            recovered.setdefault(family, []).extend(rows)
+    # Deduplicate repeated OCR table copies while retaining source order.
+    for family, rows in list(recovered.items()):
+        seen: set[tuple[str, str]] = set()
+        recovered[family] = [
+            row
+            for row in rows
+            if not ((row[0], row[1]) in seen or seen.add((row[0], row[1])))
+        ]
+    return recovered
+
+
+def _recover_processing_table_parameters(
+    stage: Mapping[str, Any],
+    *,
+    source_text: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Recover omitted literal rows for one uniquely identified process table.
+
+    The candidate stage must name the same process family as exactly one source
+    table caption.  Existing parameters win; only missing rows are appended.
+    """
+
+    family = _processing_table_family(stage.get("process_name_raw"))
+    tables = _parse_processing_table_rows(source_text)
+    rows = tables.get(family, []) if family else []
+    if not rows:
+        return list(stage.get("parameters_raw") or []), []
+    evidence = _evidence(stage.get("source_evidence"))
+    # A stage that does not cite the table locally must not borrow rows from a
+    # different event/table in the paper.
+    cited_caption = any(
+        _PROCESS_TABLE_CAPTION.search(row)
+        and family in _processing_table_family(row)
+        for row in evidence
+    )
+    # Some chunk responses retain body rows but omit the caption.  A literal
+    # overlap with exactly this family's parsed table is still a deterministic
+    # coordinate; it does not authorize borrowing from another process table.
+    cited_body_row = any(
+        normalize_source_alias(raw_row) in normalize_source_alias(" ".join(evidence))
+        for _, _, raw_row in rows
+    )
+    if not cited_caption and not cited_body_row:
+        return list(stage.get("parameters_raw") or []), []
+    params = list(stage.get("parameters_raw") or [])
+    existing = {
+        (
+            normalize_source_alias(item.get("parameter_name_raw")),
+            normalize_source_alias(item.get("value_raw")),
+        )
+        for item in params
+        if isinstance(item, dict)
+    }
+    added: list[dict[str, Any]] = []
+    for label, value, raw_row in rows:
+        # Split the only common multi-value cell form into atomic, named rows.
+        parts = re.findall(
+            r"(?i)(infill|perimeter)\s*:\s*(.*?)(?=(?:infill|perimeter)\s*:|$)",
+            value.replace(r"\\n", " ").replace(r"\n", " ").replace("\n", " "),
+        )
+        candidates = [
+            (f"{part_label} {label}", part_value.strip())
+            for part_label, part_value in parts
+        ] or [(label, value)]
+        for name, raw_value in candidates:
+            key = (normalize_source_alias(name), normalize_source_alias(raw_value))
+            if not name or not raw_value or key in existing:
+                continue
+            unit_match = re.search(
+                r"(?i)(?:^|\s)(mm/min|mm/s|mm|mA|kV|W|s|seconds?|inches?|°C|K|%)\b",
+                raw_value,
+            )
+            value_for_schema = raw_value
+            unit_for_schema = unit_match.group(1) if unit_match else None
+            # The frozen process normalizer expects one atomic value.  Keep
+            # alternate-unit text in the evidence row, but pass the primary
+            # numeric value/unit separately so ``5 mm (0.2 in)`` and
+            # ``1350 mm/min (53.2 IPM)`` are not rejected as malformed.
+            if unit_match:
+                number_match = re.search(
+                    r"(?i)(?:approximately|approx\.?|about|around|~|≈)?\s*"
+                    r"[-+]?\d+(?:\.\d+)?",
+                    raw_value,
+                )
+                if number_match:
+                    value_for_schema = number_match.group(0).strip()
+            added.append(
+                {
+                    "parameter_name_raw": name,
+                    "value_raw": value_for_schema,
+                    "unit_raw": unit_for_schema,
+                    "source_evidence": raw_row,
+                    "recovery": "source_table_literal_row",
+                }
+            )
+            existing.add(key)
+    if not added:
+        return params, []
+    return [*params, *added], [
+        {
+            "family": family,
+            "added_parameters": deepcopy(added),
+            "reason": "candidate omitted source-literal processing-table rows",
+        }
+    ]
+
+
 def _sanitize_property(row: dict[str, Any]) -> dict[str, Any] | None:
     value_raw = str(row.get("value_raw") or "").strip()
     if not value_raw:
         return None
     result = deepcopy(row)
+    for key in (
+        "test_method_raw",
+        "test_standard_raw",
+        "test_condition_raw",
+        "test_specimen_raw",
+    ):
+        # Convert an explicit provider placeholder to the empty value expected
+        # by the Alpha25 normalizer, but preserve a genuinely absent ``None``.
+        # The latter is part of the unchanged public final.json representation
+        # for source fields that were never supplied.
+        if (
+            str(result.get(key) or "").strip()
+            and _is_unresolved_alias(result.get(key))
+        ):
+            result[key] = ""
     specimen = str(result.get("test_specimen_raw") or "").strip()
     condition = str(result.get("test_condition_raw") or "").strip()
-    if specimen and (not condition or _is_unresolved_alias(condition)):
-        # alpha25 normalizes specimen_raw inside Test_Condition. Reuse the exact
-        # reported specimen phrase so the condition cannot contradictorily be
-        # labelled not_reported while containing that raw detail.
-        result["test_condition_raw"] = specimen
+    if specimen:
+        # Alpha25's public contract has no independent Test_Specimen field:
+        # specimen_raw is normalized inside Test_Condition. The tensile
+        # protocol ledger may already have filled method/rate/temperature into
+        # condition_raw before this sanitizer runs. Preserve both source-
+        # reported coordinates instead of letting the ledger overwrite an
+        # orientation, geometry, or categorical specimen label.
+        specimen_key = normalize_source_alias(specimen)
+        condition_key = normalize_source_alias(condition)
+        # ``normalize_source_alias`` removes all separators, so a token-boundary
+        # regex would miss an existing prefix such as ``X orientation`` in
+        # ``X orientation; room temperature`` and duplicate it.  Containment
+        # is the correct comparison in this already-normalized representation.
+        specimen_is_present = bool(
+            specimen_key and specimen_key in condition_key
+        )
+        dense_specimen_coordinate = bool(
+            str(result.get("property_id_candidate") or "").startswith(
+                "dense-table-cell:"
+            )
+            or (
+                str(result.get("data_source") or "").strip().casefold() == "table"
+                and normalize_source_alias(result.get("raw_note")) == specimen_key
+                and any(
+                    "<tr" in str(row or "").casefold()
+                    for row in _evidence(result.get("source_evidence"))
+                )
+            )
+        )
+        # Chart sidecars keep the immutable X/Y/Z coordinate in the dedicated
+        # specimen slot.  Their evidence is CSV-backed, so appending the
+        # coordinate to ``test_condition_raw`` here would undo the later
+        # sidecar orientation cleanup (and the v11 normalizer would treat X/Y/Z
+        # as the complete test condition).  Keep this narrowly scoped to
+        # digitized core tensile rows; ordinary image properties and prose
+        # specimens must retain the historical promotion behavior.
+        sidecar_specimen_coordinate = bool(
+            str(result.get("data_source") or "").strip().casefold()
+            == "image_digitized"
+            and is_core_tensile_property_name(
+                result.get("property_name_raw")
+            )
+            and re.fullmatch(
+                r"(?i)[XYZ](?:\s*(?:[- ]?direction|orientation))?",
+                specimen,
+            )
+            and any(
+                "data_csv:" in str(row).casefold()
+                for row in _evidence(result.get("source_evidence"))
+            )
+        )
+        if (
+            not specimen_is_present
+            and not dense_specimen_coordinate
+            and not sidecar_specimen_coordinate
+        ):
+            result["test_condition_raw"] = (
+                f"{specimen}\n\n{condition}" if condition else specimen
+            )
     return result
+
+
+def _is_preparation_only_tensile_condition(
+    fact: AxisFact,
+    *,
+    source_text: str = "",
+) -> tuple[bool, str]:
+    """Return whether a tensile condition is a preparation coordinate only.
+
+    GLM sometimes copies the temperature from ``sample sintered at 1280 °C``
+    into ``test_condition_raw`` while dropping the actual tensile protocol.
+    This helper does not infer a protocol or a new owner.  It only removes the
+    preparation token from the formal test-condition slot when the token is
+    explicit in the local evidence, or when a bare numeric temperature is
+    source-proven as a preparation temperature for the named sample.
+    """
+
+    if not isinstance(fact, PropertyFact) or not _numeric_core_tensile_fact(fact):
+        return False, ""
+    condition = str(fact.data.get("test_condition_raw") or "").strip()
+    if not condition:
+        return False, ""
+    local_evidence = "\n".join(str(row or "") for row in fact.source_evidence)
+    if _PREPARATION_CONDITION_CUE.search(condition):
+        # A condition with an explicit test cue is not preparation-only.  This
+        # protects strings such as ``tensile test after heat treatment``.
+        if re.search(
+            r"(?ix)\b(?:tensile|test(?:ing)?|ASTM|ISO|strain\s+rate|"
+            r"crosshead|mm\s*/\s*min|MPa\s*/\s*min|room\s+temperature)\b",
+            condition,
+        ):
+            return False, ""
+        # An explicit treatment phrase is useful for routing when it is the
+        # only state coordinate (for example ``GA`` + ``sintered at ...``).
+        # Remove it only when the owner already carries that same state; in
+        # that case retaining it as a test condition would duplicate the owner
+        # coordinate and produce a false tensile-temperature match.
+        condition_key = normalize_source_alias(_normalize_state_markup(condition))
+        owner_key = normalize_source_alias(_normalize_state_markup(fact.sample_id_raw))
+        if condition_key and condition_key in owner_key:
+            return True, "owner_already_contains_preparation_state"
+        return False, ""
+
+    if not _PREPARATION_NUMERIC_CONDITION.fullmatch(condition):
+        return False, ""
+    numbers = re.findall(r"(?<![A-Za-z0-9])\d+(?:\.\d+)?", condition)
+    if not numbers:
+        return False, ""
+    token = numbers[0]
+    if _PREPARATION_CONDITION_CUE.search(local_evidence):
+        return True, "local_preparation_evidence"
+
+    # The owner label is often the only local preparation cue (``1280 °C
+    # sample``).  Require the full source to prove both the same temperature
+    # and a treatment event before classifying the numeric token as preparation.
+    owner = str(fact.sample_id_raw or "").strip()
+    owner_is_temperature_sample = bool(
+        re.search(rf"(?i)\b{re.escape(token)}\s*°?\s*C\b", owner)
+        and re.search(r"(?i)\bsamples?\b", owner)
+    )
+    if not owner_is_temperature_sample:
+        return False, ""
+    source = str(source_text or "")
+    if not source or not _PREPARATION_CONDITION_CUE.search(source):
+        return False, ""
+    source_number = re.search(
+        rf"(?i)(?<![A-Za-z0-9]){re.escape(token)}(?![A-Za-z0-9])",
+        source,
+    )
+    if source_number is None:
+        return False, ""
+    window = source[max(0, source_number.start() - 120) : source_number.end() + 160]
+    if not _PREPARATION_CONDITION_CUE.search(window):
+        return False, ""
+    return True, "source_preparation_temperature_for_named_sample"
+
+
+def _isolate_preparation_only_tensile_conditions(
+    facts: Sequence[AxisFact],
+    *,
+    source_text: str = "",
+) -> tuple[list[AxisFact], list[MaterializeIssue]]:
+    """Clear treatment-only tensile conditions while retaining an audit trail."""
+
+    updated: list[AxisFact] = []
+    issues: list[MaterializeIssue] = []
+    for fact in facts:
+        is_preparation, reason = _is_preparation_only_tensile_condition(
+            fact, source_text=source_text
+        )
+        if not is_preparation:
+            updated.append(fact)
+            continue
+        before = fact.model_dump()
+        data = deepcopy(fact.data)
+        data["test_condition_raw"] = ""
+        # Do not populate ``material_state`` here: doing so would manufacture a
+        # state owner from a condition that may belong to another property.
+        after = fact.model_copy(update={"data": data})
+        updated.append(after)
+        issues.append(
+            MaterializeIssue(
+                code="tensile_preparation_condition_isolated",
+                sample_id_raw=fact.sample_id_raw,
+                path=f"items.{fact.sample_id_raw}.Extracted_Data.Properties",
+                message=(
+                    "A preparation temperature/treatment was removed from the "
+                    "formal tensile test condition; the source evidence remains "
+                    "available for owner/state review."
+                ),
+                evidence=list(fact.source_evidence),
+                expected={
+                    "test_condition": "test protocol only",
+                    "preparation_coordinate_in_test_condition": False,
+                    "owner_inference": False,
+                    "audit_preserved": True,
+                },
+                actual={
+                    "reason": reason,
+                    "before": before,
+                    "after": after.model_dump(),
+                    "source_preparation_evidence": [
+                        row
+                        for row in [*fact.source_evidence, source_text]
+                        if _PREPARATION_CONDITION_CUE.search(str(row or ""))
+                    ][:5],
+                },
+                suggested_action=(
+                    "Restore a preparation state only when one source assertion "
+                    "explicitly binds it to this owner; never treat it as the "
+                    "tensile test temperature."
+                ),
+            )
+        )
+    return updated, issues
+
+
+def _merge_condition_preserving_existing(
+    existing: Any,
+    proposed: Any,
+    *,
+    separator: str = "\n\n",
+) -> str | None:
+    """Merge a recovered protocol without replacing source-local conditions.
+
+    Table/sidecar coordinates are often materialized before the paper-level
+    tensile protocol pass (for example ``200 h`` in a dense table cell).  A
+    later recovery decision may contain only the protocol fragment (for
+    example ``900 °C``) or may serialize the complete projected condition.
+    Keep the source-local value authoritative and append only literal
+    fragments that are not already present.  This is deliberately
+    presentation-preserving: the original text is returned unchanged when it
+    already covers the proposed value.
+    """
+
+    existing_text = str(existing or "").strip()
+    proposed_text = str(proposed or "").strip()
+    if not existing_text:
+        return proposed_text or None
+    if not proposed_text:
+        return existing_text
+
+    def _condition_key(value: Any) -> str:
+        text = _normalize_state_markup(value)
+        text = re.sub(
+            r"\\mathring\s*\{?\s*C\s*\}?",
+            "°C",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return normalize_source_alias(text)
+
+    existing_parts = [
+        part.strip()
+        for part in re.split(r"(?:\r?\n)+|\s*;\s*", existing_text)
+        if part.strip()
+    ]
+    proposed_parts = [
+        part.strip()
+        for part in re.split(r"(?:\r?\n)+|\s*;\s*", proposed_text)
+        if part.strip()
+    ]
+    existing_keys = [_condition_key(part) for part in existing_parts]
+    existing_joined_key = _condition_key(existing_text)
+    additions: list[str] = []
+    for part, part_key in zip(proposed_parts, map(_condition_key, proposed_parts)):
+        if not part_key:
+            continue
+        # Containment handles harmless source formatting differences such as
+        # ``at 900 °C`` versus ``900 \\mathring{C}`` after normalization.
+        if part_key in existing_joined_key or any(
+            (
+                part_key == key
+                or (len(part_key) >= 4 and part_key in key)
+                or (len(key) >= 4 and key in part_key)
+            )
+            for key in existing_keys
+            if key
+        ):
+            continue
+        if any(
+            part_key == _condition_key(previous)
+            for previous in additions
+        ):
+            continue
+        additions.append(part)
+    if not additions:
+        return existing_text
+    return f"{existing_text}{separator}{'; '.join(additions)}"
 
 
 def _composition_component_to_structure_observation(
@@ -2454,6 +3651,45 @@ def _invalid_nonnegative_chart_series(
         "negative_tolerance": tolerance,
         "data_csv": csv_reference,
         "property": deepcopy(row),
+    }
+
+
+def _continuous_curve_property_quarantine(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Identify chart-series summaries that are not scalar Properties.
+
+    Continuous line-chart metadata (``series:``, ``key_points=`` and
+    ``start=(x,y)``/``mid=`` coordinates) belongs in the preserved chart CSV,
+    not in the scalar Property ledger.  The extractor may still emit such a
+    summary when it sees the chart sidecar marker.  Reject only this explicit
+    serialization shape; ordinary scalar results whose evidence merely
+    mentions a curve remain untouched.
+    """
+
+    evidence = _evidence(row.get("source_evidence"))
+    blob = "\n".join(
+        [
+            str(row.get("property_name_raw") or ""),
+            str(row.get("value_raw") or ""),
+            *evidence,
+        ]
+    )
+    if not blob:
+        return None
+    is_series_metadata = bool(
+        re.search(r"(?i)\bseries\s*:\s*[^\n;]+\bkey_points\s*=", blob)
+        or re.search(
+            r"(?i)\b(?:start|mid|end|min_y|max_y)\s*=\s*\(\s*"
+            r"[-+]?\d+(?:\.\d+)?\s*,\s*[-+]?\d+(?:\.\d+)?\s*\)",
+            blob,
+        )
+        or re.search(r"(?i)\bdigitized\s+trend\s+curve\b", blob)
+    )
+    if not is_series_metadata:
+        return None
+    return {
+        "reason": "continuous_curve_metadata_not_scalar_property",
+        "property": deepcopy(dict(row)),
+        "evidence": evidence,
     }
 
 
@@ -2709,6 +3945,41 @@ def _existing_identity_parent(value: Any) -> str:
     return _identity_key(composition_parent) if composition_parent else ""
 
 
+def _anchor_is_table_phase_analysis_point(anchor: InventoryAnchor) -> bool:
+    """Return whether one literal table row defines a phase-analysis point.
+
+    A single-letter sample ID is common for real material variants, so the
+    label alone is never enough.  Require the same source row to put that label
+    in column one and a pure structural entity in column two.  Source alias
+    normalization only reconciles equivalent notation such as ``σ`` and
+    ``$ \\sigma $``; it does not perform fuzzy matching.
+    """
+
+    sample_raw = unicodedata.normalize(
+        "NFKC", str(anchor.sample_id_raw or "")
+    ).strip()
+    material_raw = unicodedata.normalize(
+        "NFKC", str(anchor.material_name_raw or "")
+    ).strip()
+    phase_base = _STRUCTURAL_ENTITY_SUFFIX.sub("", material_raw).strip()
+    return bool(
+        re.fullmatch(r"[A-Z]", sample_raw)
+        and (
+            _STRUCTURAL_PHASE_TOKEN.fullmatch(phase_base)
+            or _STRUCTURAL_ENTITY_STATE.fullmatch(material_raw)
+        )
+        and any(
+            len(cells) >= 2
+            and unicodedata.normalize("NFKC", cells[0]).strip() == sample_raw
+            and normalize_source_alias(cells[1])
+            == normalize_source_alias(material_raw)
+            for evidence in anchor.source_evidence
+            for raw_row in str(evidence or "").splitlines()
+            if (cells := _table_cells(raw_row))
+        )
+    )
+
+
 def _anchor_is_structural_entity(anchor: InventoryAnchor) -> bool:
     """Reject provider-created material anchors that explicitly name phases."""
 
@@ -2719,6 +3990,7 @@ def _anchor_is_structural_entity(anchor: InventoryAnchor) -> bool:
     material_raw = unicodedata.normalize(
         "NFKC", str(anchor.material_name_raw or "")
     )
+    table_analysis_point = _anchor_is_table_phase_analysis_point(anchor)
     location_subentity = bool(
         _STRUCTURAL_LOCATION_STATE.fullmatch(state)
         and normalize_source_alias(state) in normalize_source_alias(sample_raw)
@@ -2730,7 +4002,11 @@ def _anchor_is_structural_entity(anchor: InventoryAnchor) -> bool:
             )
         )
     )
-    if not _STRUCTURAL_ENTITY_STATE.search(state) and not location_subentity:
+    if (
+        not _STRUCTURAL_ENTITY_STATE.search(state)
+        and not location_subentity
+        and not table_analysis_point
+    ):
         return False
     sample = _identity_key(anchor.sample_id_raw)
     material = _identity_key(anchor.material_name_raw)
@@ -2782,7 +4058,8 @@ def _anchor_is_structural_entity(anchor: InventoryAnchor) -> bool:
     # ``<formula> boride phase`` in ``material_name_raw``; that explicit
     # source relationship is structural, not a material-item identity.
     return bool(
-        location_subentity
+        table_analysis_point
+        or location_subentity
         or
         _SYNTHETIC_ROW_LABEL.fullmatch(str(anchor.sample_id_raw or "").strip())
         or (sample and material and (sample == material or sample.startswith(material + "row")))
@@ -2981,6 +4258,26 @@ class _IdentityIndex:
     def add_anchor_as(self, anchor: InventoryAnchor, canonical: str) -> None:
         text = str(anchor.sample_id_raw or "").strip()
         if not canonical or not is_plausible_material_identity(text):
+            return
+        self.labels.setdefault(canonical, Counter())[text] += 1
+        self.anchors.setdefault(canonical, []).append(anchor)
+
+    def add_generated_state_anchor_as(
+        self, anchor: InventoryAnchor, canonical: str
+    ) -> None:
+        """Index only an exact ``base [anchor.state_raw]`` generated child."""
+
+        text = str(anchor.sample_id_raw or "").strip()
+        match = re.fullmatch(r"(?s)(.+?)\s*\[([^\[\]]+)\]", text)
+        if not canonical or match is None:
+            return
+        base, state = match.groups()
+        if (
+            not is_plausible_material_identity(base)
+            or normalize_source_alias(state)
+            != normalize_source_alias(anchor.state_raw)
+            or _is_unresolved_alias(anchor.state_raw)
+        ):
             return
         self.labels.setdefault(canonical, Counter())[text] += 1
         self.anchors.setdefault(canonical, []).append(anchor)
@@ -3246,6 +4543,47 @@ def _owner_agnostic_fact_signature(fact: AxisFact) -> str:
     return f"{fact.fact_type}:{_signature(data)}"
 
 
+def _projection_semantic_signature(fact: AxisFact) -> str:
+    """Return a compact owner-free key for cross-chunk projection checks.
+
+    Structure/process payloads retain ``original``/``simplified`` prose in
+    their data, so the ordinary deduplication signature differs when two
+    chunks quote slightly different spans of one assertion.  Strip those
+    presentation fields here; this key is used only together with evidence
+    overlap and a missing literal owner check, never for ordinary merging.
+    """
+
+    data = deepcopy(fact.data)
+
+    def strip(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: strip(child)
+                for key, child in sorted(value.items())
+                if key
+                not in _ID_FIELDS
+                | _EVIDENCE_FIELDS
+                | {
+                    "sample_id",
+                    "sample_id_raw",
+                    "material_name_raw",
+                    "designation_raw",
+                }
+                | {"original", "simplified", "raw_expression"}
+                and child not in (None, "", [], {})
+            }
+        if isinstance(value, list):
+            return [strip(child) for child in value]
+        if isinstance(value, str):
+            return " ".join(value.casefold().split())
+        return value
+
+    return (
+        f"{fact.axis}:{fact.fact_type}:"
+        f"{json.dumps(strip(data), ensure_ascii=False, sort_keys=True, default=str)}"
+    )
+
+
 def _fact_primary_owners(index: _IdentityIndex, fact: AxisFact) -> set[str]:
     owners: set[str] = set()
     for label in [*_fact_identity_labels(fact), fact.sample_id_raw]:
@@ -3285,6 +4623,10 @@ def _register_fact_local_states(
     ] = {}
     for fact in facts:
         state = _fact_material_state_label(fact)
+        if _NON_IDENTITY_TARGET_STATE.fullmatch(state):
+            # Manufacturing route/orientation in ``material_state`` is a
+            # context token, not an independently prepared target state.
+            continue
         descriptor = _state_descriptor(state)
         if descriptor is None:
             continue
@@ -3353,11 +4695,430 @@ def _register_fact_local_states(
         index.add_state_family(canonical, base)
 
 
+_FORMULA_COMPONENT = re.compile(
+    r"(?P<element>[A-Z][a-z]?)[^A-Za-z0-9]{0,4}(?P<count>[0-9]+)"
+)
+_IDENTITY_INDEPENDENT_EVIDENCE = re.compile(
+    r"(?ix)\b(?:chemical\s+composition|nominal\s+composition|composition\s+of|"
+    r"wt\.?\s*%|at\.?\s*%|vol\.?\s*%|table|specimen|sample\s+(?:id|designation)|"
+    r"powder\s+(?:composition|was|with)|eds|edx|icp|xrf)\b"
+)
+
+
+def _formula_compact(value: Any) -> str:
+    """Return a conservative compact formula signature for an identity label."""
+
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    if not text:
+        return ""
+    # TeX wrappers are presentation-only; retaining alphanumeric characters
+    # lets ``Al $_{92}$Ti`` and ``Al₉₂Ti`` compare without doing chemistry.
+    text = re.sub(r"\\(?:mathrm|text|operatorname|mathbf|boldsymbol)\s*", "", text)
+    parts = [
+        (match.group("element").casefold(), match.group("count"))
+        for match in _FORMULA_COMPONENT.finditer(text)
+    ]
+    if len(parts) < 2:
+        return ""
+    return "".join(element + count for element, count in parts)
+
+
+def _edit_distance_at_most_one(left: str, right: str) -> bool:
+    """Avoid fuzzy chemistry matching; accept only one literal OCR edit."""
+
+    if left == right:
+        return True
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right)) <= 1
+    shorter, longer = (left, right) if len(left) < len(right) else (right, left)
+    i = j = edits = 0
+    while i < len(shorter) and j < len(longer):
+        if shorter[i] == longer[j]:
+            i += 1
+            j += 1
+            continue
+        edits += 1
+        if edits > 1:
+            return False
+        j += 1
+    return True
+
+
+def _source_formula_occurrences(source_text: str, compact: str) -> int:
+    if not source_text or not compact:
+        return 0
+    normalized = re.sub(
+        r"[^a-z0-9]+", "", unicodedata.normalize("NFKC", source_text).casefold()
+    )
+    return normalized.count(compact)
+
+
+def _formula_identity_has_independent_evidence(anchor: InventoryAnchor) -> bool:
+    evidence = "\n".join(str(row or "") for row in anchor.source_evidence)
+    return bool(
+        "|" in evidence
+        or _IDENTITY_INDEPENDENT_EVIDENCE.search(evidence)
+    )
+
+
+def _quarantine_unsupported_formula_identity_projections(
+    anchors: Sequence[InventoryAnchor],
+    facts: Sequence[AxisFact],
+    *,
+    source_text: str,
+) -> tuple[list[InventoryAnchor], dict[str, str], list[MaterializeIssue]]:
+    """Redirect one-off OCR formula owners to one source-supported identity.
+
+    This is deliberately narrower than general alias reconciliation.  It only
+    removes a primary identity when the candidate has no composition evidence,
+    one composition-backed formula owner is uniquely one edit away, and the
+    source itself strongly supports the latter.  Facts are kept intact and
+    receive an alias after the identity index is built.
+    """
+
+    if not source_text:
+        return list(anchors), {}, []
+    composition_formulas: set[str] = set()
+    for fact in facts:
+        if fact.fact_type != "composition_observation":
+            continue
+        labels = [fact.sample_id_raw, *_fact_identity_labels(fact)]
+        for label in labels:
+            signature = _formula_compact(label)
+            if signature:
+                composition_formulas.add(signature)
+
+    candidate_rows: list[tuple[InventoryAnchor, str]] = []
+    canonical_rows: list[tuple[InventoryAnchor, str]] = []
+    for anchor in anchors:
+        role = str(anchor.role or "").strip().casefold()
+        nature = str(anchor.data_nature or "").strip().casefold()
+        if role != "target" or nature != "experimental":
+            continue
+        signature = _formula_compact(anchor.sample_id_raw)
+        if not signature:
+            continue
+        if signature in composition_formulas:
+            canonical_rows.append((anchor, signature))
+        else:
+            candidate_rows.append((anchor, signature))
+    if not candidate_rows or not canonical_rows:
+        return list(anchors), {}, []
+
+    supported_by_signature: dict[str, set[str]] = {}
+    canonical_by_signature: dict[str, InventoryAnchor] = {}
+    for anchor, signature in canonical_rows:
+        key = _identity_key(anchor.sample_id_raw)
+        if key:
+            supported_by_signature.setdefault(signature, set()).add(key)
+        # Several chunks may emit the same source-backed formula with harmless
+        # presentation suffixes such as ``(at.%)`` or a longer material name.
+        # They are one identity candidate, not separate destinations.  Keep a
+        # deterministic representative so this duplication cannot suppress a
+        # valid one-edit OCR redirect.
+        previous = canonical_by_signature.get(signature)
+        if previous is None:
+            canonical_by_signature[signature] = anchor
+            continue
+        previous_key = _identity_key(previous.sample_id_raw)
+        previous_score = (
+            len(previous_key),
+            -float(previous.confidence),
+            len(str(previous.sample_id_raw or "")),
+            str(previous.sample_id_raw or "").casefold(),
+        )
+        current_score = (
+            len(key),
+            -float(anchor.confidence),
+            len(str(anchor.sample_id_raw or "")),
+            str(anchor.sample_id_raw or "").casefold(),
+        )
+        if current_score < previous_score:
+            canonical_by_signature[signature] = anchor
+    redirects: dict[str, str] = {}
+    removed_keys: set[str] = set()
+    issues: list[MaterializeIssue] = []
+    for candidate, candidate_signature in candidate_rows:
+        candidate_key = _identity_key(candidate.sample_id_raw)
+        if not candidate_key or candidate_key in removed_keys:
+            continue
+        if _formula_identity_has_independent_evidence(candidate):
+            continue
+        candidate_occurrences = _source_formula_occurrences(
+            source_text, candidate_signature
+        )
+        if candidate_occurrences != 1:
+            continue
+        possible: dict[str, tuple[InventoryAnchor, str, int]] = {}
+        for canonical_signature, canonical in canonical_by_signature.items():
+            canonical_key = _identity_key(canonical.sample_id_raw)
+            if not canonical_key or canonical_key == candidate_key:
+                continue
+            if not _edit_distance_at_most_one(candidate_signature, canonical_signature):
+                continue
+            if canonical_signature == candidate_signature:
+                continue
+            if canonical_key not in supported_by_signature.get(canonical_signature, set()):
+                continue
+            occurrences = _source_formula_occurrences(
+                source_text, canonical_signature
+            )
+            if occurrences < 2:
+                continue
+            possible[canonical_key] = (canonical, canonical_signature, occurrences)
+        if len(possible) != 1:
+            continue
+        canonical, canonical_signature, canonical_occurrences = next(
+            iter(possible.values())
+        )
+        canonical_label = str(canonical.sample_id_raw or "").strip()
+        redirects[str(candidate.sample_id_raw).strip()] = canonical_label
+        removed_keys.add(candidate_key)
+        issues.append(
+            MaterializeIssue(
+                code="unsupported_material_identity_projection_quarantined",
+                sample_id_raw=str(candidate.sample_id_raw or ""),
+                path=f"items.{candidate.sample_id_raw}",
+                message=(
+                    "A one-off formula-like owner without composition support was "
+                    "redirected to the unique source-supported formula owner."
+                ),
+                evidence=list(candidate.source_evidence),
+                expected={
+                    "owner": canonical_label,
+                    "independent_composition_support": True,
+                    "candidate_primary_item": False,
+                },
+                actual={
+                    "candidate_anchor": candidate.model_dump(),
+                    "canonical_anchor": canonical.model_dump(),
+                    "candidate_formula": candidate_signature,
+                    "canonical_formula": canonical_signature,
+                    "candidate_source_occurrences": candidate_occurrences,
+                    "canonical_source_occurrences": canonical_occurrences,
+                    "matching_rule": "one_edit_formula_ocr_loss",
+                },
+                suggested_action=(
+                    "Restore only when the candidate has an independent composition "
+                    "or table-backed sample declaration."
+                ),
+            )
+        )
+    filtered = [
+        anchor
+        for anchor in anchors
+        if _identity_key(anchor.sample_id_raw) not in removed_keys
+    ]
+    return filtered, redirects, issues
+
+
+_SYNTHETIC_BRACKET_OWNER = re.compile(
+    r"^(?P<base>.+?)\s*\[(?P<qualifier>[^\[\]]+)\]\s*$"
+)
+_SYNTHETIC_PROCESS_QUALIFIER = re.compile(
+    r"(?ix)^(?:lpbf|pbf[- ]?eb|epbf|ebm|waam|w[a-z]*am|x|y|z|"
+    r"as[- ]?(?:printed|built|fabricated)|as[- ]?received)$"
+)
+def _normalize_synthetic_bracket_owners(
+    anchors: Sequence[InventoryAnchor],
+    facts: Sequence[AxisFact],
+    *,
+    source_text: str,
+) -> tuple[list[InventoryAnchor], list[AxisFact], list[MaterializeIssue]]:
+    """Collapse model-invented ``Base [qualifier]`` owners to source identities.
+
+    Alpha25 facts often arrive from separate chunks where the model turns a
+    process/orientation/test qualifier into a new ``sample_id_raw`` (for
+    example ``H230AM [LPBF]`` or ``H230AM [X]``).  Unless that complete label is
+    literal in the OCR, it is not an independent material identity.  Redirect
+    only when an exact source-backed base anchor already exists; retain a
+    treatment/exposure qualifier as ``state_raw`` when it clearly denotes a
+    material state, while process and orientation qualifiers remain fact
+    context.  This is a fail-closed identity cleanup and never invents a base.
+    """
+
+    if not anchors:
+        return list(anchors), list(facts), []
+    by_key = {
+        _identity_key(anchor.sample_id_raw): anchor
+        for anchor in anchors
+        if _identity_key(anchor.sample_id_raw)
+    }
+    redirects: dict[str, str] = {}
+    state_updates: dict[str, str | None] = {}
+    issues: list[MaterializeIssue] = []
+    for anchor in anchors:
+        label = str(anchor.sample_id_raw or "").strip()
+        match = _SYNTHETIC_BRACKET_OWNER.fullmatch(label)
+        if match is None:
+            continue
+        base = match.group("base").strip()
+        qualifier = match.group("qualifier").strip()
+        base_key = _identity_key(base)
+        if not base_key or base_key not in by_key:
+            continue
+        # A complete bracketed label is accepted only when the source contains
+        # that exact label (ignoring punctuation/spacing).  Otherwise it is a
+        # model-generated presentation suffix.
+        # Only collapse a narrow, clearly non-identity process/orientation
+        # qualifier.  Treatment states (``[heat treated]``), citation labels
+        # (``[22]``), and other descriptive states may be legitimate inventory
+        # coordinates and are intentionally left untouched.
+        if not _SYNTHETIC_PROCESS_QUALIFIER.fullmatch(qualifier):
+            continue
+        # A normalized source string can make ``H230AM ... LPBF`` look like the
+        # concatenated token ``H230AMLPBF`` even though the source never names
+        # the bracketed label.  Process/orientation qualifiers are therefore
+        # always context, not independent identities, when the exact base
+        # anchor exists.
+        redirects[label] = base
+        state_updates[label] = str(anchor.state_raw or "").strip() or None
+        issues.append(
+            MaterializeIssue(
+                code="synthetic_bracket_owner_collapsed",
+                severity="review",
+                sample_id_raw=label,
+                path=f"items.{label}",
+                message=(
+                    "A bracketed sample owner was not a literal source label and "
+                    "was collapsed to the existing base identity; the qualifier "
+                    "was retained only as state when it denotes treatment/exposure."
+                ),
+                evidence=list(anchor.source_evidence),
+                expected={
+                    "source_literal_owner": base,
+                    "independent_item": False,
+                    "audit_preserved": True,
+                },
+                actual={
+                    "before": anchor.model_dump(),
+                    "base_owner": base,
+                    "qualifier": qualifier,
+                    "qualifier_as_state": state_updates[label],
+                },
+                suggested_action=(
+                    "Restore the bracketed identity only when the complete label "
+                    "is explicitly declared in the OCR source."
+                ),
+            )
+        )
+    if not redirects:
+        return list(anchors), list(facts), []
+
+    normalized_anchors: list[InventoryAnchor] = []
+    seen: set[tuple[str, str | None, str, str]] = set()
+    for anchor in anchors:
+        target_label = redirects.get(str(anchor.sample_id_raw).strip())
+        if target_label is None:
+            target_label = str(anchor.sample_id_raw).strip()
+            state = anchor.state_raw
+        else:
+            state = state_updates.get(str(anchor.sample_id_raw).strip())
+            if not state:
+                state = anchor.state_raw
+        key = (
+            _identity_key(target_label),
+            _identity_key(state),
+            str(anchor.role),
+            str(anchor.data_nature),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_anchors.append(
+            anchor.model_copy(update={"sample_id_raw": target_label, "state_raw": state})
+        )
+
+    normalized_facts: list[AxisFact] = []
+    for fact in facts:
+        target_label = redirects.get(str(fact.sample_id_raw).strip())
+        if target_label is None:
+            normalized_facts.append(fact)
+            continue
+        data = deepcopy(fact.data)
+        state = state_updates.get(str(fact.sample_id_raw).strip())
+        if state and not str(data.get("material_state") or "").strip():
+            data["material_state"] = state
+        normalized_facts.append(
+            fact.model_copy(update={"sample_id_raw": target_label, "data": data})
+        )
+    return normalized_anchors, normalized_facts, issues
+
+
+def _apply_identity_redirects(
+    index: _IdentityIndex, redirects: Mapping[str, str]
+) -> None:
+    for alias, destination in redirects.items():
+        targets = index.resolve_exact(destination)
+        if len(targets) == 1:
+            index.bind_unique_alias(alias, targets[0])
+
+
+def _split_conflicting_role_anchor_labels(
+    anchors: Sequence[InventoryAnchor],
+) -> list[InventoryAnchor]:
+    """Keep same-label Target and Reference anchors addressable independently.
+
+    Inventory chunks occasionally use one literal sample label for both the
+    current experiment and a cited comparison row.  A normalized identity key
+    cannot represent that role distinction, so the latter would otherwise be
+    folded into the Target canonical item before fact routing.  Add the same
+    stable ``[reference]`` presentation used by citation recovery, but only
+    when the source inventory actually declares both role/nature families.
+    No alias or material name is inferred here; the original anchor evidence
+    remains attached to the split Reference anchor.
+    """
+
+    by_key: dict[str, list[InventoryAnchor]] = {}
+    for anchor in anchors:
+        key = _identity_key(anchor.sample_id_raw)
+        if key:
+            by_key.setdefault(key, []).append(anchor)
+    conflicting_keys = {
+        key
+        for key, rows in by_key.items()
+        if any(
+            str(row.role or "").strip().casefold() == "target"
+            and str(row.data_nature or "").strip().casefold() == "experimental"
+            for row in rows
+        )
+        and any(
+            str(row.role or "").strip().casefold() == "reference"
+            and str(row.data_nature or "").strip().casefold().startswith("literature_")
+            for row in rows
+        )
+    }
+    if not conflicting_keys:
+        return list(anchors)
+    output: list[InventoryAnchor] = []
+    for anchor in anchors:
+        key = _identity_key(anchor.sample_id_raw)
+        role = str(anchor.role or "").strip().casefold()
+        nature = str(anchor.data_nature or "").strip().casefold()
+        label = str(anchor.sample_id_raw or "").strip()
+        if (
+            key in conflicting_keys
+            and role == "reference"
+            and nature.startswith("literature_")
+            and not re.search(r"(?i)\s*\[reference\]\s*$", label)
+        ):
+            anchor = anchor.model_copy(
+                update={"sample_id_raw": f"{label} [reference]"}
+            )
+        output.append(anchor)
+    return output
+
+
 def _build_identity_index(
-    anchors: Sequence[InventoryAnchor], facts: Sequence[AxisFact]
+    anchors: Sequence[InventoryAnchor],
+    facts: Sequence[AxisFact],
+    *,
+    split_citation_reference_states: bool = False,
 ) -> _IdentityIndex:
     index = _IdentityIndex()
-    citation_aliases: list[tuple[str, str]] = []
+    citation_aliases: list[tuple[str, str, str]] = []
     non_material_owner_aliases: list[InventoryAnchor] = []
     reassigned_anchors: list[InventoryAnchor] = []
     for anchor in anchors:
@@ -3367,9 +5128,13 @@ def _build_identity_index(
         reassigned_anchors.append(reassigned)
         if citation_label:
             citation_aliases.append(
-                (citation_label, str(reassigned.sample_id_raw or "").strip())
+                (
+                    citation_label,
+                    str(reassigned.sample_id_raw or "").strip(),
+                    str(reassigned.state_raw or "").strip(),
+                )
             )
-    anchors = reassigned_anchors
+    anchors = _split_conflicting_role_anchor_labels(reassigned_anchors)
     # Filter the provider's original label before state expansion. Otherwise a
     # forbidden identity such as ``FIB-sample-A`` can become superficially
     # plausible after ``[state]`` is appended. Precompute the forbidden keys so
@@ -3397,7 +5162,24 @@ def _build_identity_index(
         if is_plausible_material_identity(anchor.sample_id_raw):
             material_anchors.append(anchor)
     anchors = material_anchors
-    anchors, state_base_aliases = _expand_distinct_state_anchors(anchors)
+    citation_state_coordinates = (
+        {
+            (_identity_key(material_label), normalize_source_alias(state))
+            for _, material_label, state in citation_aliases
+            if normalize_source_alias(state)
+        }
+        if split_citation_reference_states
+        else set()
+    )
+    anchors, state_base_aliases = _expand_distinct_state_anchors(
+        anchors,
+        citation_state_coordinates=citation_state_coordinates,
+    )
+    generated_state_keys = {
+        _identity_key(display)
+        for displays in state_base_aliases.values()
+        for display in displays
+    }
     # A measured composition/structure row may use an analytical object as
     # its own sample identity (for example ``binder jetting fracture surface``)
     # while another chunk also emits the broader ``binder jetting`` sample.
@@ -3457,9 +5239,15 @@ def _build_identity_index(
         _identity_key(label)
         for fact in facts
         if fact.fact_type != "material_identity"
-        and not all(
-            _ORIENTATION_CONTEXT_ONLY_EVIDENCE.search(evidence)
-            for evidence in fact.source_evidence
+        and (
+            isinstance(fact, PropertyFact)
+            and str(
+                fact.data.get("property_id_candidate") or ""
+            ).startswith("tensile-process-owner-v205:")
+            or not all(
+                _ORIENTATION_CONTEXT_ONLY_EVIDENCE.search(evidence)
+                for evidence in fact.source_evidence
+            )
         )
         for label in [fact.sample_id_raw, *_fact_identity_labels(fact)]
         if label
@@ -3854,7 +5642,14 @@ def _build_identity_index(
             and _identity_key(anchor.sample_id_raw) not in expanded_base_keys
         ):
             continue
-        index.add_anchor_as(anchor, canonical_key(anchor.sample_id_raw))
+        canonical = canonical_key(anchor.sample_id_raw)
+        if (
+            split_citation_reference_states
+            and _identity_key(anchor.sample_id_raw) in generated_state_keys
+        ):
+            index.add_generated_state_anchor_as(anchor, canonical)
+        else:
+            index.add_anchor_as(anchor, canonical)
     for anchor in anchors:
         expected = canonical_key(anchor.sample_id_raw)
         index.add_alias(anchor.sample_id_raw, expected)
@@ -3863,10 +5658,12 @@ def _build_identity_index(
             index.add_alias(anchor.material_name_raw, canonical[0])
         if len(canonical) == 1 and anchor.state_raw:
             index.add_state_alias(anchor.state_raw, canonical[0])
-    for citation_label, material_label in citation_aliases:
-        targets = index.resolve_exact(material_label)
-        for target in targets:
-            index.add_alias(citation_label, target)
+    if not split_citation_reference_states:
+        for citation_label, material_label, _ in citation_aliases:
+            targets = index.resolve_exact(material_label)
+            for target in targets:
+                index.add_alias(citation_label, target)
+
     # Regions, test pieces, methods, standards and structural entities are not
     # material identities. Their facts may still be retained when the provider
     # also supplied a material_name_raw that resolves to exactly one existing
@@ -3886,6 +5683,46 @@ def _build_identity_index(
                 base_targets = index.resolve_exact(display_base)
                 if len(base_targets) == 1:
                     index.add_state_family(canonical, base_targets[0])
+
+    for citation_label, material_label, citation_state in (
+        citation_aliases if split_citation_reference_states else []
+    ):
+        state_displays = state_base_aliases.get(material_label, set())
+        all_state_targets = {
+            target
+            for display in state_displays
+            for target in index.resolve_exact(display)
+        }
+        exact_state_targets = {
+            target
+            for target in all_state_targets
+            if any(
+                normalize_source_alias(anchor.state_raw)
+                == normalize_source_alias(citation_state)
+                for anchor in index.anchors.get(target, [])
+            )
+        }
+        if len(exact_state_targets) == 1:
+            alias = _identity_key(citation_label)
+            if alias and alias not in index.primary_aliases:
+                index.alias_targets.setdefault(alias, set()).update(
+                    exact_state_targets
+                )
+            continue
+        if len(all_state_targets) >= 2:
+            # A citation-only author alias is not itself a material base. When
+            # the source inventory explicitly provides multiple literature
+            # states, expose exactly those existing children to assertion-level
+            # reconciliation instead of binding the author back to a synthetic
+            # base item.
+            alias = _identity_key(citation_label)
+            if alias and alias not in index.primary_aliases:
+                index.alias_targets.setdefault(alias, set()).update(
+                    all_state_targets
+                )
+            continue
+        for target in index.resolve_exact(material_label):
+            index.add_alias(citation_label, target)
 
     # Providers can retain a contextual qualifier in an inventory chunk while
     # omitting it from a fact chunk (for example ``multi-spot melt sample``
@@ -4026,6 +5863,310 @@ def _fact_declared_targets(
     return ()
 
 
+def _literature_reference_owner(
+    index: _IdentityIndex, canonical: str
+) -> bool:
+    """Return whether one exact inventory owner is wholly literature-backed."""
+
+    anchors = index.anchors.get(canonical, [])
+    return bool(anchors) and all(
+        str(anchor.role or "").strip().casefold() == "reference"
+        and str(anchor.data_nature or "").strip().casefold().startswith(
+            "literature_"
+        )
+        for anchor in anchors
+    )
+
+
+def _fact_declared_reference_targets(
+    index: _IdentityIndex, fact: AxisFact
+) -> tuple[str, ...]:
+    """Expose state children hidden behind a citation-only base alias."""
+
+    declared_targets = _fact_declared_targets(index, fact)
+    if len(declared_targets) != 1:
+        return declared_targets
+    base = declared_targets[0]
+    base_presentations = {
+        _identity_key(index.display_label(base)),
+        *(
+            _identity_key(anchor.sample_id_raw)
+            for anchor in index.anchors.get(base, [])
+        ),
+    }
+    if (
+        not _literature_reference_owner(index, base)
+        or _identity_key(fact.sample_id_raw) in base_presentations
+    ):
+        return declared_targets
+    state_children = tuple(
+        sorted(
+            candidate
+            for candidate, candidate_base in index.state_family_base.items()
+            if candidate_base == base
+            and _literature_reference_owner(index, candidate)
+        )
+    )
+    return state_children if len(state_children) >= 2 else declared_targets
+
+
+def _reference_assertion_literal_overlap(left: Any, right: Any) -> bool:
+    """Match only a substantial literal assertion after OCR normalization."""
+
+    left_text = normalize_evidence_text(str(left or ""))
+    right_text = normalize_evidence_text(str(right or ""))
+    if min(len(left_text), len(right_text)) < 48:
+        return False
+    return left_text in right_text or right_text in left_text
+
+
+def _reference_assertion_value_supported(fact: AxisFact, assertion: str) -> bool:
+    """Require every declared numeric token and unit in the anchor assertion."""
+
+    if not isinstance(fact, PropertyFact):
+        return False
+    value_numbers = _numeric_tokens(fact.data.get("value_raw"))
+    if not value_numbers or not value_numbers.issubset(_numeric_tokens(assertion)):
+        return False
+    unit = str(fact.data.get("unit_raw") or "").strip()
+    if unit and not _is_unresolved_alias(unit):
+        normalized_unit = normalize_evidence_text(unit)
+        if normalized_unit and normalized_unit not in normalize_evidence_text(assertion):
+            return False
+    return True
+
+
+def _unique_declared_reference_assertion_match(
+    index: _IdentityIndex,
+    fact: AxisFact,
+) -> dict[str, Any] | None:
+    """Resolve one declared Reference state from its own copied assertion.
+
+    A citation author can name several literature states. Process words inside
+    the fact quote are not owner evidence because the current study can use the
+    same process label. Only one candidate anchor's own substantial assertion,
+    containing the complete fact value, may select a state.
+    """
+
+    declared_targets = _fact_declared_reference_targets(index, fact)
+    if not declared_targets or not all(
+        _literature_reference_owner(index, target)
+        for target in declared_targets
+    ):
+        return None
+
+    matches: list[tuple[str, InventoryAnchor, str]] = []
+    for target in sorted(declared_targets):
+        target_matches: list[tuple[InventoryAnchor, str]] = []
+        for anchor in sorted(
+            index.anchors.get(target, []),
+            key=lambda row: (
+                normalize_source_alias(row.state_raw),
+                normalize_source_alias(row.sample_id_raw),
+                _signature(row.model_dump()),
+            ),
+        ):
+            for assertion in sorted(dict.fromkeys(anchor.source_evidence)):
+                if not _reference_assertion_value_supported(fact, assertion):
+                    continue
+                if not any(
+                    _reference_assertion_literal_overlap(evidence, assertion)
+                    for evidence in fact.source_evidence
+                ):
+                    continue
+                target_matches.append((anchor, assertion))
+        if target_matches:
+            anchor, assertion = min(
+                target_matches,
+                key=lambda row: (
+                    len(normalize_evidence_text(row[1])),
+                    normalize_evidence_text(row[1]),
+                    _signature(row[0].model_dump()),
+                ),
+            )
+            matches.append((target, anchor, assertion))
+    if len(matches) != 1:
+        return None
+
+    target, anchor, assertion = matches[0]
+    return {
+        "target": target,
+        "anchor": anchor,
+        "assertion": assertion,
+        "declared_targets": declared_targets,
+    }
+
+
+def _recover_unique_declared_reference_assertion_owners(
+    index: _IdentityIndex,
+    facts: Sequence[AxisFact],
+    *,
+    destination_index: _IdentityIndex | None = None,
+) -> tuple[list[AxisFact], list[MaterializeIssue]]:
+    """Narrow ambiguous same-author Reference properties without guessing."""
+
+    recovered: list[AxisFact] = []
+    issues: list[MaterializeIssue] = []
+    for fact in facts:
+        declared_targets = _fact_declared_reference_targets(index, fact)
+        eligible = (
+            isinstance(fact, PropertyFact)
+            and bool(_numeric_tokens(fact.data.get("value_raw")))
+            and len(declared_targets) >= 2
+            and all(
+                _literature_reference_owner(index, target)
+                for target in declared_targets
+            )
+        )
+        if not eligible:
+            recovered.append(fact)
+            continue
+        match = _unique_declared_reference_assertion_match(index, fact)
+        if match is None:
+            candidate_rows = [
+                {
+                    "owner": index.display_label(candidate),
+                    "states": sorted(
+                        {
+                            str(row.state_raw or "").strip()
+                            for row in index.anchors.get(candidate, [])
+                        }
+                    ),
+                    "role": sorted(_owner_roles(index, candidate)),
+                    "data_nature": sorted(
+                        {
+                            str(row.data_nature or "").strip()
+                            for row in index.anchors.get(candidate, [])
+                        }
+                    ),
+                    "anchor_source_evidence": sorted(
+                        {
+                            evidence
+                            for row in index.anchors.get(candidate, [])
+                            for evidence in row.source_evidence
+                        }
+                    ),
+                }
+                for candidate in sorted(declared_targets)
+            ]
+            issues.append(
+                MaterializeIssue(
+                    code="reference_assertion_state_owner_ambiguous",
+                    sample_id_raw=fact.sample_id_raw,
+                    path="quarantine.Properties",
+                    message=(
+                        "A numeric same-author literature Property was isolated "
+                        "because zero or multiple Reference state assertions "
+                        "matched its complete literal value."
+                    ),
+                    evidence={
+                        "fact_source_evidence": list(fact.source_evidence),
+                        "candidate_owners": candidate_rows,
+                    },
+                    expected={
+                        "matching_reference_assertion_count": 1,
+                        "cross_role_reassignment": False,
+                        "target_fallback": False,
+                    },
+                    actual={
+                        "quarantined": fact.model_dump(),
+                        "declared_owner": fact.sample_id_raw,
+                        "candidate_owners": candidate_rows,
+                        "reason": "reference_state_assertion_not_unique",
+                        "owner_invented": False,
+                    },
+                    suggested_action=(
+                        "Restore only after one Reference state's own assertion "
+                        "uniquely contains the complete fact value."
+                    ),
+                )
+            )
+            continue
+
+        target = str(match["target"])
+        anchor = match["anchor"]
+        assertion = str(match["assertion"])
+        after_owner = index.display_label(target)
+        before = fact.model_dump()
+        updated = fact.model_copy(update={"sample_id_raw": after_owner})
+        recovered.append(updated)
+        if destination_index is not None and target not in destination_index.anchors:
+            destination_index.add_generated_state_anchor_as(anchor, target)
+            base_label = after_owner.split(" [", 1)[0]
+            base_targets = destination_index.resolve_exact(base_label)
+            if len(base_targets) == 1:
+                destination_index.add_state_family(target, base_targets[0])
+        candidate_rows = [
+            {
+                "owner": index.display_label(candidate),
+                "states": sorted(
+                    {
+                        str(row.state_raw or "").strip()
+                        for row in index.anchors.get(candidate, [])
+                    }
+                ),
+                "role": sorted(_owner_roles(index, candidate)),
+                "data_nature": sorted(
+                    {
+                        str(row.data_nature or "").strip()
+                        for row in index.anchors.get(candidate, [])
+                    }
+                ),
+            }
+            for candidate in sorted(match["declared_targets"])
+        ]
+        decision_key = ":".join(
+            [
+                "reference-assertion-state",
+                normalize_source_alias(fact.sample_id_raw),
+                normalize_source_alias(anchor.state_raw),
+                normalize_source_alias(fact.data.get("property_name_raw")),
+                normalize_source_alias(fact.data.get("value_raw")),
+            ]
+        )
+        issues.append(
+            MaterializeIssue(
+                code="reference_assertion_state_owner_reassigned",
+                sample_id_raw=after_owner,
+                path=f"items.{after_owner}.Extracted_Data.Properties",
+                message=(
+                    "An ambiguous same-author literature Property was narrowed "
+                    "to the only Reference state whose own assertion contains "
+                    "the complete literal fact value."
+                ),
+                evidence={
+                    "fact_source_evidence": list(fact.source_evidence),
+                    "matched_anchor_source_evidence": assertion,
+                },
+                expected={
+                    "candidate_roles": ["Reference"],
+                    "candidate_data_nature": "Literature_*",
+                    "matching_reference_assertion_count": 1,
+                    "owner_invented": False,
+                    "cross_role_reassignment": False,
+                },
+                actual={
+                    "before": before,
+                    "after": updated.model_dump(),
+                    "declared_owner": fact.sample_id_raw,
+                    "candidate_owners": candidate_rows,
+                    "selected_owner": after_owner,
+                    "selected_state": anchor.state_raw,
+                    "selected_role": anchor.role,
+                    "selected_data_nature": anchor.data_nature,
+                    "matched_anchor_source_evidence": assertion,
+                    "decision_key": decision_key,
+                    "owner_invented": False,
+                },
+                suggested_action=(
+                    "Review only if two literature states repeat the same full "
+                    "numeric assertion; that case remains unresolved."
+                ),
+            )
+        )
+    return recovered, issues
+
+
 def _fact_evidence_owner_targets(
     index: _IdentityIndex, fact: AxisFact
 ) -> tuple[str, ...]:
@@ -4152,6 +6293,13 @@ _DIRECT_OWNER_COMPARISON = re.compile(
     r"(?ix)\b(?:respectively|versus|vs\.?|compared\s+(?:with|to)|"
     r"relative\s+to|than)\b"
 )
+_TENSILE_OWNER_COMPARATOR_CUE = re.compile(
+    r"(?ix)\b(?:"
+    r"comparable|similar)\s+to\s+(?:those|that)\s+of\b|"
+    r"\b(?:compared|relative)\s+(?:to|with|against)\b|"
+    r"\b(?:higher|lower|greater|less)\s+than\b|"
+    r"\b(?:versus|vs\.?)\b"
+)
 _DIRECT_OWNER_ASSERTION_VERB = re.compile(
     r"(?ix)\b(?:contain(?:s|ed)?|consist(?:s|ed)?|exhibit(?:s|ed)?|"
     r"show(?:s|ed)?|observ(?:e|ed|ation)|measur(?:e|ed|ement)|"
@@ -4196,6 +6344,40 @@ def _fact_evidence_units(fact: AxisFact) -> tuple[str, ...]:
                 if sentence.strip()
             )
     return tuple(dict.fromkeys(units))
+
+
+def _fact_evidence_owner_is_comparator(
+    index: _IdentityIndex,
+    fact: AxisFact,
+    target: str,
+) -> bool:
+    """Return whether the sole literal owner is a comparison object.
+
+    A tensile result sentence may omit its subject label while naming only the
+    baseline after ``higher/lower than`` or ``compared with``.  That baseline
+    is evidence for the comparison, not permission to replace an already exact
+    structured owner.  Restrict the check to the bounded text immediately
+    following a comparator cue so ordinary one-owner lists ending in
+    ``respectively`` keep their established reconciliation behavior.
+    """
+
+    presentations = {
+        index.display_label(target),
+        *(
+            str(anchor.sample_id_raw or "").strip()
+            for anchor in index.anchors.get(target, [])
+        ),
+    }
+    for unit in _fact_evidence_units(fact):
+        for comparator in _TENSILE_OWNER_COMPARATOR_CUE.finditer(unit):
+            comparison_object = unit[comparator.end() : comparator.end() + 180]
+            if any(
+                _strict_source_owner_occurs(label, comparison_object)
+                for label in presentations
+                if label
+            ):
+                return True
+    return False
 
 
 def _evidence_value_literal(value: Any, text: str) -> bool:
@@ -4423,6 +6605,8 @@ def _fact_owner_reassignment_kind(
     if not _fact_evidence_owner_is_explicit(index, fact, evidence):
         return None
     if _numeric_core_tensile_fact(fact):
+        if _fact_evidence_owner_is_comparator(index, fact, evidence):
+            return None
         return "numeric_core_tensile_explicit_owner"
     return _direct_evidence_binding_kind(fact, evidence, index)
 
@@ -4618,6 +6802,38 @@ def _group_route(index: _IdentityIndex, fact: AxisFact) -> tuple[str, ...]:
     # owner.  This guard is intentionally before the normal declared-owner
     # route and never activates for a multi-owner comparison/table span.
     declared_targets = _fact_declared_targets(index, fact)
+    reference_assertion_routing = (
+        isinstance(fact, PropertyFact)
+        and bool(_numeric_tokens(fact.data.get("value_raw")))
+    )
+    declared_reference_targets = (
+        _fact_declared_reference_targets(index, fact)
+        if reference_assertion_routing
+        else ()
+    )
+    reference_assertion_match = (
+        _unique_declared_reference_assertion_match(index, fact)
+        if reference_assertion_routing
+        else None
+    )
+    if (
+        len(declared_reference_targets) == 1
+        and reference_assertion_match is not None
+        and reference_assertion_match["target"] == declared_reference_targets[0]
+    ):
+        # The fact was either emitted directly on, or deterministically narrowed
+        # to, one exact literature state. A process token in that assertion is
+        # descriptive context and cannot pull it across Role into a current
+        # Target using the generic evidence router.
+        return declared_reference_targets
+    if len(declared_reference_targets) > 1 and all(
+        _literature_reference_owner(index, target)
+        for target in declared_reference_targets
+    ):
+        # Same-author Reference states that did not produce one unique anchor
+        # assertion match remain unresolved. Never turn their ambiguity into a
+        # current-study fact merely because both use a word such as LPBF.
+        return ()
     if (
         source_coordinate_precision_v202_enabled()
         and isinstance(fact, PropertyFact)
@@ -4635,7 +6851,52 @@ def _group_route(index: _IdentityIndex, fact: AxisFact) -> tuple[str, ...]:
         exact_targets = index.resolve_exact(fact.sample_id_raw)
         if len(exact_targets) == 1:
             return exact_targets
+    if len(declared_targets) == 1 and _numeric_core_tensile_fact(fact):
+        declared = declared_targets[0]
+        declared_labels = [index.display_label(declared)]
+        declared_labels.extend(
+            anchor.sample_id_raw for anchor in index.anchors.get(declared, [])
+        )
+        declared_orientations = {
+            token
+            for label in declared_labels
+            for token in _tensile_orientation_tokens(label, owner_label=True)
+        }
+        fact_context = "\n".join(
+            [
+                str(fact.data.get("test_condition_raw") or ""),
+                str(fact.data.get("test_specimen_raw") or ""),
+                *fact.source_evidence,
+            ]
+        )
+        if (
+            len(declared_orientations) == 1
+            and _tensile_orientation_tokens(fact_context)
+            == declared_orientations
+        ):
+            # An exact oriented owner plus the same single literal coordinate
+            # is stronger than a nested coarse label inside its evidence
+            # (``LPBF`` inside ``LPBF / Z``).  Preserve that source coordinate
+            # before generic evidence/state routing can collapse it.
+            return declared_targets
     evidence_targets = _fact_evidence_owner_targets(index, fact)
+    if (
+        len(declared_targets) == 1
+        and len(evidence_targets) == 1
+        and declared_targets[0] != evidence_targets[0]
+        and _numeric_core_tensile_fact(fact)
+        and _orientation_qualified_tensile_owner(
+            index,
+            loser_owner=evidence_targets[0],
+            winner_owner=declared_targets[0],
+            loser=fact,
+        )
+    ):
+        # Promotion may have upgraded a coarse prose owner (LPBF) to the one
+        # existing oriented inventory coordinate (LPBF / Z).  The evidence
+        # still literally names the coarse process label, so generic evidence
+        # reconciliation would otherwise undo that source-proven refinement.
+        return declared_targets
     if len(declared_targets) == 1:
         preferred = _preferred_evidence_material_owner(
             index, fact, declared_targets[0]
@@ -4693,6 +6954,163 @@ def _group_route(index: _IdentityIndex, fact: AxisFact) -> tuple[str, ...]:
     return evidence_targets if len(evidence_targets) == 1 else ()
 
 
+def _metric_state_owner_requires_literal_coordinate(
+    index: _IdentityIndex, canonical: str
+) -> bool:
+    """Return whether a measurement-shaped state owner needs a source token.
+
+    Labels such as ``300 s Delay`` can be legitimate prepared-material states,
+    but they are also easy destinations for cross-chunk projections such as
+    ``the longer delay`` or a detached numeric table row. Once the inventory
+    has admitted such a state, do not let that admission itself become evidence
+    for every fact carrying the same provider label.
+    """
+
+    family = index.state_family_base.get(canonical, canonical)
+    presentations = {
+        value
+        for target in {canonical, family}
+        for value in (
+            index.display_label(target),
+            *(
+                str(anchor.sample_id_raw or "").strip()
+                for anchor in index.anchors.get(target, [])
+            ),
+        )
+        if value
+    }
+    return any(
+        _EXPLICIT_STATE_ID.fullmatch(value) and _is_non_material_label(value)
+        for value in presentations
+    )
+
+
+def _fact_has_literal_metric_state_coordinate(
+    index: _IdentityIndex, fact: AxisFact, canonical: str
+) -> bool:
+    """Require one literal state token in the fact's own evidence envelope."""
+
+    family = index.state_family_base.get(canonical, canonical)
+    presentations = {
+        index.display_label(canonical),
+        index.display_label(family),
+        *(
+            str(anchor.sample_id_raw or "").strip()
+            for target in {canonical, family}
+            for anchor in index.anchors.get(target, [])
+        ),
+    }
+    declared = str(fact.sample_id_raw or "").strip()
+    declared_targets = set(index.resolve_exact(declared))
+    if declared and (
+        canonical in declared_targets
+        or family in declared_targets
+        or any(
+            index.state_family_base.get(target, target) == family
+            for target in declared_targets
+        )
+    ):
+        presentations.add(declared)
+    # Dense-table completion already proves one immutable owner/value cell.
+    # Its normalized owner may differ from the literal header only by physical
+    # token spacing (``120s Delay`` versus ``120 s Delay``). Permit that exact
+    # presentation difference only for the audited cell fact; detached
+    # Processing/Structure rows must still satisfy strict literal matching.
+    if (
+        isinstance(fact, PropertyFact)
+        and str(fact.data.get("property_id_candidate") or "").startswith(
+            "dense-table-cell:"
+        )
+        and declared
+        and _identity_key(fact.data.get("raw_note")) == _identity_key(declared)
+    ):
+        declared_key = _identity_key(declared)
+        if declared_key and any(
+            declared_key in _identity_key(evidence)
+            for evidence in fact.source_evidence
+        ):
+            return True
+    return any(
+        _strict_source_owner_occurs(label, evidence)
+        for label in presentations
+        if label
+        for evidence in fact.source_evidence
+    )
+
+
+def _fact_has_literal_state_owner_coordinate(
+    index: _IdentityIndex, fact: AxisFact, canonical: str
+) -> bool:
+    """Return whether a state-qualified owner is proven by this fact itself.
+
+    State-family routing is useful for resolving compact aliases, but the
+    existence of a sibling state must not become evidence for unrelated facts.
+    Require one of the fact's own state fields, an exact state/owner literal in
+    its evidence, an exact qualified owner label, or a previously audited table
+    coordinate.  This applies to every axis; it is intentionally stricter than
+    the older numeric-state gate, which only covered measurement-shaped labels.
+    """
+
+    family = index.state_family_base.get(canonical, canonical)
+    if family == canonical:
+        return True
+    anchor_states = {
+        normalize_source_alias(_normalize_state_markup(anchor.state_raw))
+        for anchor in index.anchors.get(canonical, [])
+        if str(anchor.state_raw or "").strip()
+    }
+    anchor_state_match_keys = {
+        _table_state_match_key(anchor.state_raw)
+        for anchor in index.anchors.get(canonical, [])
+        if _table_state_match_key(anchor.state_raw) is not None
+    }
+    state_literals = {
+        str(anchor.state_raw).strip()
+        for anchor in index.anchors.get(canonical, [])
+        if str(anchor.state_raw or "").strip()
+    }
+    for key in ("material_state", "state_raw"):
+        value = str(fact.data.get(key) or "").strip()
+        if not value or _is_unresolved_alias(value):
+            continue
+        if normalize_source_alias(_normalize_state_markup(value)) in anchor_states:
+            return True
+    for key in ("test_specimen_raw", "test_condition_raw"):
+        value = str(fact.data.get(key) or "").strip()
+        if value and any(
+            normalize_source_alias(_normalize_state_markup(value)) == state_key
+            for state_key in anchor_states
+        ) or (
+            value
+            and _table_state_match_key(value) is not None
+            and _table_state_match_key(value) in anchor_state_match_keys
+        ):
+            return True
+    if any(
+        _strict_source_owner_occurs(state, evidence)
+        for state in state_literals
+        for evidence in fact.source_evidence
+    ):
+        return True
+    qualified_labels = {
+        index.display_label(canonical),
+        *(str(anchor.sample_id_raw or "").strip() for anchor in index.anchors.get(canonical, [])),
+    }
+    if any(
+        _strict_source_owner_occurs(label, evidence)
+        for label in qualified_labels
+        if label
+        for evidence in fact.source_evidence
+    ):
+        return True
+    declared = str(fact.sample_id_raw or "").strip()
+    if declared and canonical in set(index.resolve_exact(declared)):
+        return True
+    # A table coordinate was already proven by a dedicated one-to-one resolver;
+    # it is safe even if the copied body row does not repeat the state header.
+    return _fact_has_table_coordinate(fact)
+
+
 _REPORTED_RESULT_BLOCKER = re.compile(
     r"(?ix)\b(?:"
     r"(?:minimum|maximum|required|requirement|specified|specification|limit|threshold)"
@@ -4731,7 +7149,7 @@ def _markdown_table_cells(row: str) -> list[str]:
 
 
 def _fact_markdown_table_rows(fact: AxisFact) -> list[tuple[str, list[str]]]:
-    """Return unique complete Markdown rows copied into one fact's evidence."""
+    """Return unique complete Markdown/HTML rows copied into fact evidence."""
 
     rows: list[tuple[str, list[str]]] = []
     seen: set[str] = set()
@@ -4739,6 +7157,8 @@ def _fact_markdown_table_rows(fact: AxisFact) -> list[tuple[str, list[str]]]:
         for raw_row in str(evidence or "").splitlines():
             row = raw_row.strip()
             cells = _markdown_table_cells(row)
+            if not cells and "<tr" in row.casefold():
+                cells = _table_cells(row)
             if not cells or row in seen:
                 continue
             seen.add(row)
@@ -5133,6 +7553,18 @@ def _table_state_owner(
 ) -> str | None:
     """Resolve or register one state owner under a proven material family."""
 
+    # Manufacturing route/orientation tokens are fact context, not independent
+    # target material states.  Do not synthesize ``Base [LPBF]``/``Base [X]``
+    # identities from a table coordinate when the source only names ``Base``.
+    if (
+        _NON_IDENTITY_TARGET_STATE.fullmatch(str(state or "").strip())
+        and any(
+            str(anchor.role).casefold() == "target"
+            and str(anchor.data_nature).casefold() == "experimental"
+            for anchor in index.anchors.get(base, [])
+        )
+    ):
+        return None
     descriptor = _state_descriptor(state)
     if descriptor is None:
         return None
@@ -5288,14 +7720,47 @@ def _reconcile_table_column_facts(
 
 
 def _fact_has_table_coordinate(fact: AxisFact) -> bool:
-    """Return whether a fact carries a resolved table-column coordinate."""
+    """Return whether a fact carries a complete resolved table coordinate.
 
-    return bool(
-        re.search(
-            r"(?i)(?:^|[;|])\s*table\s+column\s*:",
-            str(fact.data.get("raw_note") or ""),
-        )
+    The legacy path records an explicit ``Table column:`` note.  Dense
+    mechanical-table completion instead records an immutable
+    ``dense-table-cell:`` decision key and preserves the literal owner/value
+    rows.  Treat that newer representation as a coordinate only when all
+    scientific fields are present and the ordinary complete-table validator
+    can recover the owner/value binding.  This is deliberately narrower than
+    trusting ``data_source=table`` so copied or model-invented table facts do
+    not bypass the shared-owner precision gate.
+    """
+
+    if re.search(
+        r"(?i)(?:^|[;|])\s*table\s+column\s*:",
+        str(fact.data.get("raw_note") or ""),
+    ):
+        return True
+    if not isinstance(fact, PropertyFact):
+        return False
+    decision_key = str(fact.data.get("property_id_candidate") or "").strip()
+    if not decision_key.startswith("dense-table-cell:"):
+        return False
+    required = (
+        fact.sample_id_raw,
+        fact.data.get("raw_note"),
+        fact.data.get("property_name_raw"),
+        fact.data.get("value_raw"),
+        fact.data.get("unit_raw"),
     )
+    if any(not str(value or "").strip() for value in required):
+        return False
+    evidence = "\n".join(str(row or "") for row in fact.source_evidence)
+    if not evidence or not any(token in evidence for token in ("|", "<td", "<th")):
+        return False
+    unit = str(fact.data.get("unit_raw") or "").strip()
+    if unit == "%":
+        if "%" not in evidence:
+            return False
+    elif normalize_source_alias(unit) not in normalize_source_alias(evidence):
+        return False
+    return _tensile_precision_complete_table(fact) is not None
 
 
 _TENSILE_DIRECTION_AGGREGATE = re.compile(
@@ -6943,6 +9408,12 @@ def _unique_row_state_member(
     state_anchors: dict[tuple[str, tuple[str, tuple[str, ...]]], InventoryAnchor] = {}
     for anchor in index.anchors.get(base, []):
         state = str(anchor.state_raw or "").strip()
+        if (
+            _NON_IDENTITY_TARGET_STATE.fullmatch(state)
+            and str(anchor.role).casefold() == "target"
+            and str(anchor.data_nature).casefold() == "experimental"
+        ):
+            continue
         descriptor = _state_descriptor(state)
         state_key = normalize_source_alias(state)
         if not state_key or descriptor is None or state_key not in normalized_row:
@@ -7991,6 +10462,44 @@ def _tensile_precision_complete_table(fact: AxisFact) -> dict[str, Any] | None:
     source = str(fact.data.get("data_source") or "").strip().casefold()
     if source not in {"table", "unknown", ""}:
         return None
+    decision_key = str(fact.data.get("property_id_candidate") or "").strip()
+    if decision_key.startswith("dense-table-cell:"):
+        owner = str(fact.sample_id_raw or "").strip()
+        owner_literal = str(fact.data.get("raw_note") or "").strip()
+        value = fact.data.get("value_raw")
+        value_cells = [
+            cell
+            for evidence in fact.source_evidence
+            for line in str(evidence or "").splitlines()
+            for cell in _table_cells(line)
+            if _table_value_cell_matches(value, cell)
+        ]
+        owner_orientations = _tensile_orientation_tokens(
+            owner, owner_label=True
+        )
+        literal_orientations = _tensile_orientation_tokens(
+            f"{owner_literal} orientation"
+        )
+        coordinate_owner_matches = _table_owner_cell_matches(
+            owner, owner_literal
+        ) or bool(
+            len(owner_orientations) == 1
+            and literal_orientations == owner_orientations
+        )
+        if (
+            owner
+            and owner_literal
+            and coordinate_owner_matches
+            and value_cells
+        ):
+            return {
+                "binding": "dense_table_cell_coordinate",
+                "owner_cell": owner_literal,
+                "value_cell": value_cells[0],
+                "owner_condition_qualified": False,
+                "source_coordinate_key": decision_key,
+                "table_complete": True,
+            }
     rows = _fact_markdown_table_rows(fact)
     if len(rows) < 2:
         return None
@@ -8240,6 +10749,23 @@ def _orientation_qualified_tensile_owner(
     }
     if len(winner_orientations) != 1:
         return False
+    same_owner_base = bool(
+        _tensile_owner_base_labels(index, loser_owner)
+        & _tensile_owner_base_labels(index, winner_owner)
+    )
+    # Promotion publishes this immutable coordinate only after proving a
+    # unique existing oriented Target owner.  The model's short evidence quote
+    # may omit the sentence prefix that carried X/Z, so requiring the quote to
+    # repeat the orientation here would undo the audited promotion decision.
+    # Still require the coarse and oriented identities to share one literal
+    # base; the coordinate never authorizes a cross-material reassignment.
+    if (
+        same_owner_base
+        and str(loser.data.get("property_id_candidate") or "").startswith(
+            "tensile-process-owner-v205:"
+        )
+    ):
+        return True
     loser_context = "\n".join(
         [
             str(loser.data.get("test_condition_raw") or ""),
@@ -8249,10 +10775,7 @@ def _orientation_qualified_tensile_owner(
     )
     if _tensile_orientation_tokens(loser_context) != winner_orientations:
         return False
-    return bool(
-        _tensile_owner_base_labels(index, loser_owner)
-        & _tensile_owner_base_labels(index, winner_owner)
-    )
+    return same_owner_base
 
 
 def _truncated_tensile_owner_prefix(
@@ -8549,6 +11072,19 @@ def _merge_tensile_precision_envelope(survivor: AxisFact, removed: AxisFact) -> 
             updates["test_condition_raw"] = removed.data["test_condition_raw"]
         if not str(merged.data.get("test_standard_raw") or "").strip() and str(removed.data.get("test_standard_raw") or "").strip():
             updates["test_standard_raw"] = removed.data["test_standard_raw"]
+        merged_coordinate = str(
+            merged.data.get("property_id_candidate") or ""
+        ).strip()
+        removed_coordinate = str(
+            removed.data.get("property_id_candidate") or ""
+        ).strip()
+        if (
+            not merged_coordinate.startswith("physical-owner-envelope:")
+            and removed_coordinate.startswith("physical-owner-envelope:")
+            and _identity_key(merged.sample_id_raw)
+            == _identity_key(removed.sample_id_raw)
+        ):
+            updates["property_id_candidate"] = removed_coordinate
         if updates:
             merged = merged.model_copy(update={"data": {**merged.data, **updates}})
     return merged
@@ -8943,10 +11479,16 @@ def _tensile_bundle_value_shape(fact: AxisFact) -> dict[str, Any] | None:
     raw_payload = " ".join(
         [
             str(fact.data.get("value_raw") or ""),
-            str(fact.data.get("raw_note") or ""),
             str(fact.data.get("property_name_raw") or ""),
         ]
     )
+    # Block values/properties that are themselves thresholds, deltas, ranges,
+    # or qualitative comparisons.  Do not let a comparative word elsewhere in
+    # ``raw_note`` turn a literal absolute result into a relative value: prose
+    # such as ``UTS was slightly lower at 803 MPa`` still reports 803 MPa and
+    # may be merged into the uniquely richer same-owner 803 ± 30 MPa bundle.
+    # Owner, condition, unit, exact-center, and complete-bundle gates below
+    # continue to be required, so this cannot authorize cross-owner projection.
     if _TENSILE_BUNDLE_BLOCKED_VALUE.search(raw_payload):
         return None
     ordinary = _tensile_precision_value_shape(fact)
@@ -8961,6 +11503,65 @@ def _tensile_bundle_value_shape(fact: AxisFact) -> dict[str, Any] | None:
     ).strip()
     if not value or _TENSILE_PRECISION_RANGE.search(value):
         return None
+    context_payload = " ".join(
+        [
+            str(fact.data.get("raw_note") or ""),
+            *(str(row) for row in fact.source_evidence),
+        ]
+    )
+    # The general precision parser deliberately rejects every occurrence of
+    # ``higher/lower``.  This bundle-only path can be narrower: an absolute
+    # scalar embedded in comparative prose is still literal when its declared
+    # unit is adjacent to the exact number (``slightly lower at 803 MPa``).
+    # Keep inequalities such as ``higher than 803 MPa`` and all bound phrases
+    # closed; only a complete same-owner bundle can consume the returned shape.
+    if (
+        _TENSILE_PRECISION_RELATIVE.search(context_payload)
+        and not _TENSILE_PRECISION_BOUND_QUALIFIER.search(context_payload)
+        and not _TENSILE_EXTERNAL_COMPARATOR_RELATION.search(context_payload)
+    ):
+        numbers = _tensile_precision_numbers(value)
+        if len(numbers) == 1:
+            try:
+                central = float(numbers[0])
+            except ValueError:
+                central = math.nan
+            unit = _tensile_precision_unit_key(
+                fact.data.get("unit_raw"), central=central
+            )
+            adjacent_units = {
+                parsed[0]
+                for evidence in fact.source_evidence
+                for match in re.finditer(
+                    rf"(?i)(?<![A-Za-z0-9]){re.escape(numbers[0])}"
+                    rf"(?![A-Za-z0-9.])\s*(?P<unit>MPa|GPa|%|percent)"
+                    rf"(?![A-Za-z])",
+                    unicodedata.normalize("NFKC", str(evidence or "")),
+                )
+                for parsed in [
+                    _tensile_precision_unit_key(
+                        match.group("unit"), central=central
+                    )
+                ]
+                if parsed is not None
+            }
+            if (
+                math.isfinite(central)
+                and unit is not None
+                and unit[0] in adjacent_units
+            ):
+                return {
+                    "central": central,
+                    "uncertainty": None,
+                    "has_uncertainty": False,
+                    "decimal_places": _tensile_precision_decimal_places(
+                        value
+                    ),
+                    "uncertainty_decimal_places": -1,
+                    "numbers": numbers,
+                    "approximate": False,
+                    "contextual_comparison": True,
+                }
     payload = " ".join(
         [
             value,
@@ -9236,6 +11837,443 @@ def _tensile_bundle_member_relation(
         "precision_gains": precision_gains,
         "strictly_better": any(precision_gains.values()),
     }
+
+
+def _inventory_state_sample_links(
+    index: _IdentityIndex, owner: str
+) -> tuple[tuple[str, InventoryAnchor], ...]:
+    """Return exact inventory state labels that name another primary sample."""
+
+    links: list[tuple[str, InventoryAnchor]] = []
+    for anchor in index.anchors.get(owner, []):
+        state = str(anchor.state_raw or "").strip()
+        if not state:
+            continue
+        targets = index.resolve_exact(state)
+        if len(targets) != 1 or targets[0] == owner:
+            continue
+        links.append((targets[0], anchor))
+    return tuple(links)
+
+
+def _deduplicate_inventory_state_linked_tensile_summaries(
+    index: _IdentityIndex,
+    facts: Sequence[AxisFact],
+) -> tuple[list[AxisFact], list[MaterializeIssue]]:
+    """Merge one complete owner-free summary into its declared state sample.
+
+    This pass is intentionally bundle-level. Equal individual tensile values
+    cannot prove owner identity. A merge is allowed only when the inventory
+    literally declares the generic owner's state as one unique primary sample,
+    every YS/UTS/elongation summary member has a compatible source-bound member
+    under that sample, and at least one survivor adds measurement precision.
+    """
+
+    routed = {id(fact): _group_route(index, fact) for fact in facts}
+    by_owner: dict[str, list[tuple[int, AxisFact]]] = {}
+    for position, fact in enumerate(facts):
+        owners = routed[id(fact)]
+        if len(owners) != 1 or not _numeric_core_tensile_fact(fact):
+            continue
+        by_owner.setdefault(owners[0], []).append((position, fact))
+
+    replacements: dict[int, AxisFact] = {}
+    removed_positions: set[int] = set()
+    issues: list[MaterializeIssue] = []
+    required = set(_TENSILE_BUNDLE_SEMANTICS)
+    for loser_owner, loser_rows in sorted(by_owner.items()):
+        if _tensile_precision_source_role(index, loser_owner) != (
+            "target",
+            "experimental",
+        ):
+            continue
+        if {
+            _core_tensile_semantic(fact) for _, fact in loser_rows
+        } < required:
+            continue
+        loser_evidence = [
+            row for _, fact in loser_rows for row in fact.source_evidence
+        ]
+        if (
+            _CITATION_MARKER.search("\n".join(loser_evidence))
+            or _explicit_primary_owner_mentions(
+                index, loser_evidence, set(index.anchors)
+            )
+        ):
+            continue
+        evidence_counts = Counter(
+            _normalized_literal(row)
+            for row in loser_evidence
+            if _normalized_literal(row)
+        )
+        if not evidence_counts or any(
+            not any(
+                evidence_counts[_normalized_literal(row)] >= 2
+                for row in fact.source_evidence
+                if _normalized_literal(row)
+            )
+            for _, fact in loser_rows
+        ):
+            # Each member must be part of an explicit multi-property assertion,
+            # not an unrelated scalar that happens to share a value.
+            continue
+
+        state_links = _inventory_state_sample_links(index, loser_owner)
+        linked_owners = {target for target, _ in state_links}
+        if len(linked_owners) != 1:
+            continue
+        winner_owner = next(iter(linked_owners))
+        if _tensile_precision_source_role(index, winner_owner) != (
+            "target",
+            "experimental",
+        ):
+            continue
+        winner_rows = by_owner.get(winner_owner, [])
+        if {
+            _core_tensile_semantic(fact) for _, fact in winner_rows
+        } < required:
+            continue
+
+        selected: dict[int, tuple[int, dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]] = {}
+        for loser_position, loser in loser_rows:
+            loser_semantic = _core_tensile_semantic(loser)
+            loser_subtype = _tensile_precision_subtype(loser)
+            loser_conditions = _tensile_precision_condition_values(loser)
+            options: list[
+                tuple[
+                    int,
+                    dict[str, Any],
+                    dict[str, Any] | None,
+                    dict[str, Any] | None,
+                ]
+            ] = []
+            for winner_position, winner in winner_rows:
+                if _core_tensile_semantic(winner) != loser_semantic:
+                    continue
+                winner_subtype = _tensile_precision_subtype(winner)
+                if loser_subtype != winner_subtype and "unspecified" not in {
+                    loser_subtype,
+                    winner_subtype,
+                }:
+                    continue
+                winner_conditions = _tensile_precision_condition_values(winner)
+                if bool(loser_conditions) != bool(winner_conditions):
+                    continue
+                if loser_conditions and not any(
+                    _tensile_precision_conditions_compatible(left, right)
+                    for left in loser_conditions
+                    for right in winner_conditions
+                ):
+                    continue
+                relation = _tensile_bundle_member_relation(loser, winner)
+                if relation is None:
+                    continue
+                table_binding = _tensile_precision_complete_table(winner)
+                prose_binding = (
+                    None
+                    if table_binding is not None
+                    else _tensile_precision_explicit_prose_binding(
+                        index, winner, winner_owner
+                    )
+                )
+                if table_binding is None and prose_binding is None:
+                    continue
+                options.append(
+                    (
+                        winner_position,
+                        relation,
+                        table_binding,
+                        prose_binding,
+                    )
+                )
+            if not options:
+                selected = {}
+                break
+            selected[loser_position] = max(
+                options,
+                key=lambda option: (
+                    int(option[1]["strictly_better"]),
+                    int(option[2] is not None),
+                    _tensile_precision_evidence_score(
+                        facts[option[0]], table_binding=option[2]
+                    ),
+                    _signature(facts[option[0]].model_dump()),
+                ),
+            )
+        if len(selected) != len(loser_rows):
+            continue
+        winner_positions = {row[0] for row in selected.values()}
+        if len(winner_positions) != len(selected) or not any(
+            row[1]["strictly_better"] for row in selected.values()
+        ):
+            continue
+
+        survivor_before = [
+            facts[position].model_dump() for position in sorted(winner_positions)
+        ]
+        mappings: list[dict[str, Any]] = []
+        for loser_position, (
+            winner_position,
+            relation,
+            table_binding,
+            prose_binding,
+        ) in sorted(selected.items()):
+            loser = facts[loser_position]
+            survivor = replacements.get(winner_position, facts[winner_position])
+            replacements[winner_position] = _merge_tensile_precision_envelope(
+                survivor, loser
+            )
+            removed_positions.add(loser_position)
+            mappings.append(
+                {
+                    "semantic": _core_tensile_semantic(loser),
+                    "subtype": _tensile_precision_subtype(loser),
+                    "removed_fact": loser.model_dump(),
+                    "survivor_before_merge": survivor.model_dump(),
+                    "survivor_after_merge": replacements[
+                        winner_position
+                    ].model_dump(),
+                    "member_relation": relation,
+                    "winner_table_binding": table_binding,
+                    "winner_prose_binding": prose_binding,
+                }
+            )
+        survivor_after = [
+            replacements.get(position, facts[position]).model_dump()
+            for position in sorted(winner_positions)
+        ]
+        owner_label = index.display_label(winner_owner)
+        link_anchors = [
+            anchor.model_dump()
+            for target, anchor in state_links
+            if target == winner_owner
+        ]
+        issues.append(
+            MaterializeIssue(
+                code="inventory_state_tensile_summary_duplicate_merged",
+                sample_id_raw=owner_label,
+                path=f"items.{owner_label}.Extracted_Data.Properties",
+                message=(
+                    "A complete owner-free tensile summary was merged into the "
+                    "unique sample explicitly named by its inventory state."
+                ),
+                evidence={
+                    "inventory_state_links": link_anchors,
+                    "summary_evidence": list(dict.fromkeys(loser_evidence)),
+                    "survivor_evidence": list(
+                        dict.fromkeys(
+                            row
+                            for position in winner_positions
+                            for row in facts[position].source_evidence
+                        )
+                    ),
+                },
+                expected={
+                    "rule": "complete_tensile_bundle_with_exact_inventory_state_link",
+                    "unique_linked_owner": True,
+                    "complete_semantics": list(_TENSILE_BUNDLE_SEMANTICS),
+                    "every_member_source_bound": True,
+                    "at_least_one_precision_gain": True,
+                },
+                actual={
+                    "before_owner": index.display_label(loser_owner),
+                    "after_owner": owner_label,
+                    "owner_invented": False,
+                    "linked_owner_candidates": [owner_label],
+                    "removed_bundle": [
+                        fact.model_dump() for _, fact in loser_rows
+                    ],
+                    "survivor_bundle_before_merge": survivor_before,
+                    "survivor_bundle_after_merge": survivor_after,
+                    "member_mappings": mappings,
+                    "decision_key": _signature(
+                        {
+                            "loser_owner": loser_owner,
+                            "winner_owner": winner_owner,
+                            "removed": [
+                                fact.model_dump() for _, fact in loser_rows
+                            ],
+                        }
+                    ),
+                    "protection_gates": {
+                        "partial_bundle": False,
+                        "explicit_summary_owner": False,
+                        "condition_conflict": False,
+                        "role_nature_conflict": False,
+                        "non_unique_state_link": False,
+                        "unbound_winner_member": False,
+                    },
+                },
+                suggested_action=(
+                    "Review the preserved state anchor and member mappings if "
+                    "the summary represents an independent tensile experiment."
+                ),
+            )
+        )
+    return [
+        replacements.get(position, fact)
+        for position, fact in enumerate(facts)
+        if position not in removed_positions
+    ], issues
+
+
+def _recover_inventory_state_linked_property_summary_owners(
+    index: _IdentityIndex,
+    facts: Sequence[AxisFact],
+    source_text: str,
+) -> tuple[list[AxisFact], list[MaterializeIssue]]:
+    """Reassign a three-property summary to one source-declared state sample."""
+
+    blocks = [
+        block.strip()
+        for block in re.split(r"\n\s*\n+", source_text or "")
+        if block.strip()
+    ]
+    routed = {id(fact): _group_route(index, fact) for fact in facts}
+    candidates: dict[str, list[tuple[int, PropertyFact, str, list[str]]]] = {}
+    for position, fact in enumerate(facts):
+        if not isinstance(fact, PropertyFact) or _numeric_core_tensile_fact(fact):
+            continue
+        owners = routed[id(fact)]
+        if len(owners) != 1:
+            continue
+        loser_owner = owners[0]
+        if _tensile_precision_source_role(index, loser_owner) != (
+            "target",
+            "experimental",
+        ):
+            continue
+        links = _inventory_state_sample_links(index, loser_owner)
+        linked_owners = {target for target, _ in links}
+        if len(linked_owners) != 1:
+            continue
+        winner_owner = next(iter(linked_owners))
+        if _tensile_precision_source_role(index, winner_owner) != (
+            "target",
+            "experimental",
+        ):
+            continue
+        if _explicit_primary_owner_mentions(
+            index, fact.source_evidence, set(index.anchors)
+        ) or _CITATION_MARKER.search("\n".join(fact.source_evidence)):
+            continue
+        property_tokens = _table_label_tokens(
+            fact.data.get("property_name_raw")
+        )
+        value_tokens = _numeric_tokens(fact.data.get("value_raw"))
+        if len(property_tokens) < 2 or not value_tokens:
+            continue
+        matching_blocks: list[str] = []
+        for block in blocks:
+            mentions = _explicit_primary_owner_mentions(
+                index, [block], set(index.anchors)
+            )
+            winner_variants = {
+                normalize_source_alias(value)
+                for value in _owner_presentation_variants(index, winner_owner)
+                if normalize_source_alias(value)
+            }
+            nested_mentions = {
+                mention
+                for mention in mentions - {winner_owner}
+                if any(
+                    normalize_source_alias(value) in winner_variant
+                    for value in _owner_presentation_variants(index, mention)
+                    if normalize_source_alias(value)
+                    for winner_variant in winner_variants
+                )
+            }
+            if winner_owner not in mentions or mentions - {
+                winner_owner,
+                *nested_mentions,
+            }:
+                continue
+            if not property_tokens <= _table_label_tokens(block):
+                continue
+            if not value_tokens <= _numeric_tokens(block):
+                continue
+            matching_blocks.append(block)
+        if matching_blocks:
+            candidates.setdefault(loser_owner, []).append(
+                (position, fact, winner_owner, matching_blocks)
+            )
+
+    replacements: dict[int, AxisFact] = {}
+    issues: list[MaterializeIssue] = []
+    for loser_owner, rows in sorted(candidates.items()):
+        winner_owners = {row[2] for row in rows}
+        property_keys = {
+            tuple(sorted(_table_label_tokens(row[1].data.get("property_name_raw"))))
+            for row in rows
+        }
+        if len(winner_owners) != 1 or len(property_keys) < 3:
+            continue
+        winner_owner = next(iter(winner_owners))
+        winner_label = index.display_label(winner_owner)
+        mappings: list[dict[str, Any]] = []
+        for position, fact, _, matching_blocks in rows:
+            reassigned = fact.model_copy(update={"sample_id_raw": winner_label})
+            replacements[position] = reassigned
+            mappings.append(
+                {
+                    "before": fact.model_dump(),
+                    "after": reassigned.model_dump(),
+                    "matching_source_assertions": matching_blocks,
+                }
+            )
+        issues.append(
+            MaterializeIssue(
+                code="inventory_state_property_summary_owner_reassigned",
+                sample_id_raw=winner_label,
+                path=f"items.{winner_label}.Extracted_Data.Properties",
+                message=(
+                    "An owner-free numeric property summary was reassigned to "
+                    "the unique inventory state sample named by matching source "
+                    "assertions."
+                ),
+                evidence={
+                    "inventory_state_links": [
+                        anchor.model_dump()
+                        for target, anchor in _inventory_state_sample_links(
+                            index, loser_owner
+                        )
+                        if target == winner_owner
+                    ],
+                    "matching_source_assertions": list(
+                        dict.fromkeys(
+                            block
+                            for _, _, _, matching_blocks in rows
+                            for block in matching_blocks
+                        )
+                    ),
+                },
+                expected={
+                    "rule": "three_property_summary_with_exact_inventory_state_link",
+                    "unique_linked_owner": True,
+                    "minimum_distinct_properties": 3,
+                    "literal_property_and_value_match": True,
+                },
+                actual={
+                    "before_owner": index.display_label(loser_owner),
+                    "after_owner": winner_label,
+                    "owner_invented": False,
+                    "reassigned_count": len(rows),
+                    "mappings": mappings,
+                    "protection_gates": {
+                        "explicit_summary_owner": False,
+                        "citation_context": False,
+                        "non_unique_state_link": False,
+                        "insufficient_property_bundle": False,
+                        "ambiguous_source_owner": False,
+                    },
+                },
+                suggested_action=(
+                    "Review the preserved inventory state and source assertions "
+                    "if the summary describes a different prepared sample."
+                ),
+            )
+        )
+    return [replacements.get(position, fact) for position, fact in enumerate(facts)], issues
 
 
 def _bundle_fact_dump(
@@ -10171,6 +13209,21 @@ def _evidence_rows_share_assertion(left: Any, right: Any) -> bool:
     return overlap >= 6 and overlap / min(len(left_tokens), len(right_tokens)) >= 0.90
 
 
+_GENERIC_OWNER_SUBJECT = re.compile(
+    r"(?i)\b(?:the\s+)?(?:samples?|specimens?|materials?|alloys?|powders?|"
+    r"feedstocks?|particles?|walls?|builds?)\b"
+)
+
+
+def _evidence_is_generic_owner_assertion(evidence: Sequence[str]) -> bool:
+    """Return whether prose uses a generic subject instead of a material ID."""
+
+    rows = [" ".join(str(row or "").split()) for row in evidence if str(row or "").strip()]
+    if not rows:
+        return False
+    return all(_GENERIC_OWNER_SUBJECT.search(row) for row in rows)
+
+
 def _shared_projection_evidence_key(fact: AxisFact) -> tuple[str, ...]:
     return tuple(
         sorted(
@@ -10332,9 +13385,144 @@ def _multi_owner_projection_is_ambiguous(
     return bool(_COMPARATIVE_OWNER_PROSE.search(text))
 
 
+def _qualitative_owner_binding_is_unresolved(
+    index: _IdentityIndex,
+    fact: AxisFact,
+    owner: str,
+    evidence: Sequence[str],
+    source_text: str = "",
+) -> bool:
+    """Return whether a qualitative fact has no source-local owner binding.
+
+    A task chunk may route a qualitative Structure/Characterization candidate to
+    one owner because that owner appeared in surrounding context, while the
+    quoted assertion itself only says ``the samples`` or uses a pronoun.  When a
+    paper contains multiple current-study target owners, that route is not an
+    adequate scientific coordinate: the same sentence can otherwise be emitted
+    as an owner-specific fact for whichever chunk happened to carry it.  Keep
+    explicit owner mentions, resolved table coordinates, and explicit multi-owner
+    mappings; isolate only the remaining owner-free qualitative assertion.
+
+    This deliberately does not apply to numeric structure features or tensile
+    Properties.  It also leaves papers with a single target owner untouched,
+    where the surrounding source context can unambiguously scope a generic
+    sentence to that one material.
+    """
+
+    if not _fact_is_qualitative_structure_or_characterization(fact):
+        return False
+    if _fact_has_table_coordinate(fact) or _fact_is_reference_owned(
+        index, fact, (owner,)
+    ):
+        return False
+    if _evidence_names_owner(index, owner, evidence):
+        return False
+    # A state-qualified assertion can omit the material's base label while
+    # still carrying a unique source-local state coordinate (for example,
+    # ``the as-built sample`` or ``A aged at 700 °C``).  Accept that coordinate
+    # only when the state resolver finds this exact owner; never use a state
+    # mentioned in a separate/neighboring chunk as a substitute.
+    state_targets = set(index.resolve_state_evidence(evidence))
+    if owner in state_targets or index.state_family_base.get(owner) in state_targets:
+        return False
+    # A chunk may quote only the predicate (for example ``showed irregular
+    # particles``) while the same source paragraph names exactly one target
+    # material in its subject sentence.  This is a valid source-local
+    # coordinate, but only when the paragraph itself contains one and only one
+    # target owner.  Never search neighboring paragraphs, and never use this
+    # recovery for a paragraph that names multiple owners or compares them.
+    if _source_local_unique_owner_binding(
+        index, fact, owner, evidence, source_text
+    ):
+        return False
+    text = "\n".join(str(row or "") for row in evidence)
+    target_owners = {
+        canonical
+        for canonical in index.anchors
+        if "reference" not in _owner_roles(index, canonical)
+        and (
+            "target" in _owner_roles(index, canonical)
+            or not _owner_roles(index, canonical)
+        )
+    }
+    if len(target_owners) < 2 or owner not in target_owners:
+        return False
+    return bool(evidence) and (
+        _evidence_is_generic_owner_assertion(evidence)
+        or not _SOURCE_SAMPLE_NOUN.search(text)
+        or bool(re.search(r"(?i)\b(?:it|they|these|those|this|such)\b", text))
+    )
+
+
+def _source_local_unique_owner_binding(
+    index: _IdentityIndex,
+    fact: AxisFact,
+    owner: str,
+    evidence: Sequence[str],
+    source_text: str,
+) -> bool:
+    """Return whether one evidence paragraph uniquely names ``owner``.
+
+    This is deliberately narrower than a paper-wide owner lookup.  It repairs
+    chunk omissions where the extractor copied a predicate without its local
+    subject (``the samples showed ...``), while preventing a neighboring
+    paragraph or a multi-owner comparison from authorizing a projection.
+    """
+
+    if not source_text or not evidence:
+        return False
+    if _fact_has_table_coordinate(fact):
+        return False
+    paragraphs = [
+        block.strip()
+        for block in re.split(r"\n\s*\n+", source_text)
+        if block.strip()
+    ]
+    if not paragraphs:
+        return False
+    matching: list[str] = []
+    for quoted in evidence:
+        needle = _literal_match_key(quoted)
+        if len(needle) < 16:
+            continue
+        for paragraph in paragraphs:
+            if needle in _literal_match_key(paragraph):
+                matching.append(paragraph)
+                break
+    if not matching:
+        return False
+    # One fact may carry several evidence rows from the same paragraph.  A
+    # unique paragraph is required; evidence borrowed from two paragraphs is
+    # not a safe owner coordinate.
+    unique_paragraphs = list(dict.fromkeys(matching))
+    if len(unique_paragraphs) != 1:
+        return False
+    paragraph = unique_paragraphs[0]
+    if any(
+        line.lstrip().startswith("|") or "<table" in line.casefold()
+        for line in paragraph.splitlines()
+    ):
+        return False
+    named_targets: set[str] = set()
+    for canonical in index.anchors:
+        if "reference" in _owner_roles(index, canonical):
+            continue
+        if _source_label_occurs_in_row(index.display_label(canonical), paragraph):
+            named_targets.add(canonical)
+    if named_targets != {owner}:
+        return False
+    # A unique owner mention is still insufficient for a relational sentence
+    # whose comparison target was not recognized as an anchor.  Keep the
+    # existing comparison gate conservative.
+    if _COMPARATIVE_OWNER_PROSE.search(paragraph):
+        return False
+    return True
+
+
 def _quarantine_shared_owner_projections(
     index: _IdentityIndex,
     facts: Sequence[AxisFact],
+    source_text: str = "",
 ) -> tuple[list[AxisFact], list[MaterializeIssue]]:
     """Isolate generic prose copied to several owners without a coordinate.
 
@@ -10415,6 +13603,98 @@ def _quarantine_shared_owner_projections(
             continue
         owner = owners[0]
         evidence = list(fact.source_evidence)
+        peer_projection = any(
+            other is not fact
+            and len(routed[id(other)]) == 1
+            and routed[id(other)][0] != owner
+            and other.fact_type == fact.fact_type
+            and _fact_is_qualitative_structure_or_characterization(other)
+            and _projection_semantic_signature(other)
+            == _projection_semantic_signature(fact)
+            and not _evidence_names_owner(
+                index, routed[id(other)][0], other.source_evidence
+            )
+            for other in effective
+        )
+        source_context_recovered = (
+            not peer_projection
+            and _source_local_unique_owner_binding(
+                index, fact, owner, evidence, source_text
+            )
+        )
+        if source_context_recovered:
+            issues.append(
+                MaterializeIssue(
+                    code="qualitative_owner_binding_source_context_recovered",
+                    sample_id_raw=index.display_label(owner),
+                    path=f"items.{index.display_label(owner)}.Extracted_Data",
+                    message=(
+                        "A qualitative assertion omitted its owner in the quoted "
+                        "chunk span but was retained because the same source "
+                        "paragraph names exactly one target owner."
+                    ),
+                    evidence={
+                        "fact_evidence": evidence,
+                        "routed_owner": index.display_label(owner),
+                        "source_local_unique_owner": index.display_label(owner),
+                    },
+                    expected={
+                        "owner_binding": "one target owner in the same source paragraph",
+                        "broadcast": False,
+                    },
+                    actual={
+                        "fact": fact.model_dump(),
+                        "reason": "owner_recovered_from_same_paragraph",
+                    },
+                    suggested_action=(
+                        "Review only if the paragraph contains an implicit comparison "
+                        "or a subject omitted by OCR."
+                    ),
+                )
+            )
+        if not peer_projection and not source_context_recovered and _qualitative_owner_binding_is_unresolved(
+            index, fact, owner, evidence, source_text
+        ):
+            removed.add(position)
+            issues.append(
+                MaterializeIssue(
+                    code="qualitative_owner_binding_unresolved_quarantined",
+                    sample_id_raw=index.display_label(owner),
+                    path=f"items.{index.display_label(owner)}.Extracted_Data",
+                    message=(
+                        "A qualitative Structure/Characterization assertion was "
+                        "isolated because its own evidence did not bind it to "
+                        "the routed owner in a multi-owner paper."
+                    ),
+                    evidence={
+                        "fact_evidence": evidence,
+                        "routed_owner": index.display_label(owner),
+                        "target_owners": [
+                            index.display_label(canonical)
+                            for canonical in sorted(index.anchors)
+                            if "reference" not in _owner_roles(index, canonical)
+                        ],
+                    },
+                    expected={
+                        "owner_binding": (
+                            "literal owner mention, resolved table coordinate, "
+                            "or explicit multi-owner mapping"
+                        ),
+                        "broadcast": False,
+                        "audit_preserved": True,
+                    },
+                    actual={
+                        "fact": fact.model_dump(),
+                        "owner": index.display_label(owner),
+                        "reason": "owner_absent_from_qualitative_assertion",
+                    },
+                    suggested_action=(
+                        "Restore only when the source quote or its table coordinate "
+                        "explicitly identifies this material owner."
+                    ),
+                )
+            )
+            continue
         if not _multi_owner_projection_is_ambiguous(index, fact, owner, evidence):
             continue
         removed.add(position)
@@ -10698,7 +13978,249 @@ def _quarantine_shared_owner_projections(
                         ),
                     )
                 )
-    return [fact for position, fact in enumerate(effective) if position not in removed], issues
+    # Finally catch a less obvious cross-chunk projection: providers can emit
+    # the same semantic claim under two owners with different (but still
+    # source-near) evidence snippets.  The earlier envelope pass only sees the
+    # pair when their quotes overlap strongly; this signature pass adds the
+    # missing owner-coordinate check without touching Composition or any
+    # table/sidecar-backed numeric fact.  A claim is safe to keep when its own
+    # evidence names its routed owner; otherwise it is an unsupported owner
+    # assignment and belongs in the audit trail.
+    semantic_owner_rows: dict[str, list[tuple[int, AxisFact, str]]] = {}
+    for position, fact in enumerate(effective):
+        if position in removed:
+            continue
+        owners = routed[id(fact)]
+        if (
+            len(owners) != 1
+            or fact.fact_type == "composition_observation"
+            or _core_tensile_semantic(fact)
+            or _fact_has_table_coordinate(fact)
+            or _fact_is_reference_table_coordinate(index, fact, owners)
+            or _metric_state_owner_requires_literal_coordinate(index, owners[0])
+        ):
+            continue
+        # The routed display label may be a longer material/state identity
+        # while the quote names a valid shorter alias (for example
+        # ``as-built`` or ``Alloy 230``).  That is still an explicit source
+        # coordinate; only completely owner-free generic prose belongs in this
+        # fallback gate.
+        declared_label = str(fact.sample_id_raw or "").strip()
+        if (
+            _fact_explicit_evidence_targets(index, fact)
+            or (
+                declared_label
+                and any(
+                    _strict_source_owner_occurs(declared_label, row)
+                    for row in fact.source_evidence
+                )
+            )
+        ):
+            continue
+        # Processing table rows and chart/tensile sidecars carry their own
+        # coordinate even when the text envelope is terse.  Do not let this
+        # prose-only fallback reinterpret those records.
+        if fact.fact_type == "process_stage" and (
+            _processing_table_coordinate_signature(fact)
+            or str(fact.data.get("data_source") or "").casefold()
+            in {"table", "chart"}
+        ):
+            continue
+        signature = _projection_semantic_signature(fact)
+        if signature:
+            semantic_owner_rows.setdefault(signature, []).append(
+                (position, fact, owners[0])
+            )
+    for signature, rows in semantic_owner_rows.items():
+        owner_rows: dict[str, tuple[int, AxisFact]] = {}
+        for position, fact, owner in rows:
+            owner_rows.setdefault(owner, (position, fact))
+        if len(owner_rows) < 2:
+            continue
+        # Require at least one pair of source-near snippets.  This avoids
+        # deleting independently reported identical observations from distant
+        # parts of a paper while still handling chunk-boundary paraphrases.
+        for position, fact, owner in rows:
+            if position in removed or _evidence_names_owner(
+                index, owner, fact.source_evidence
+            ):
+                continue
+            sibling_rows = [
+                (other_position, other_fact, other_owner)
+                for other_position, other_fact, other_owner in rows
+                if other_owner != owner and other_position not in removed
+            ]
+            has_shared_assertion = any(
+                _evidence_rows_share_assertion(left, right)
+                for left in fact.source_evidence
+                for _, sibling, _ in sibling_rows
+                for right in sibling.source_evidence
+            )
+            # Some providers paraphrase the same generic sentence at each
+            # chunk boundary, so token overlap is low even though neither
+            # quote names an owner.  A generic subject ("the samples", "the
+            # specimens", ...) plus the same semantic payload is still not a
+            # sufficient coordinate for two independent owners.
+            if not has_shared_assertion and not _evidence_is_generic_owner_assertion(
+                fact.source_evidence
+            ):
+                continue
+            removed.add(position)
+            issues.append(
+                MaterializeIssue(
+                    code="shared_owner_semantic_projection_quarantined",
+                    sample_id_raw=index.display_label(owner),
+                    path=f"items.{index.display_label(owner)}.Extracted_Data",
+                    message=(
+                        "A semantic claim was isolated because it was emitted for "
+                        "multiple owners but its own chunk evidence did not name "
+                        "the routed owner."
+                    ),
+                    evidence={
+                        "fact_evidence": list(fact.source_evidence),
+                        "semantic_signature": signature,
+                        "owners": [
+                            index.display_label(row_owner)
+                            for row_owner in owner_rows
+                        ],
+                    },
+                    expected={
+                        "owner_binding": "literal owner mention or unique source coordinate",
+                        "broadcast": False,
+                    },
+                    actual={"fact": fact.model_dump(), "owner": index.display_label(owner)},
+                    suggested_action=(
+                        "Restore only when the source quote explicitly binds the "
+                        "claim to this owner or provides a table/sidecar coordinate."
+                    ),
+                )
+            )
+    return [
+        fact for position, fact in enumerate(effective) if position not in removed
+    ], issues
+
+
+_PRECISION_OWNER_MAPPING = re.compile(
+    r"(?i)\b(?:both|each|respectively|corresponding|one\s+for\s+each)\b"
+)
+_PRECISION_COMPARISON_CUE = re.compile(
+    r"(?i)\b(?:than|versus|vs\.?|compared\s+(?:with|to)|higher|lower|"
+    r"greater|less|similar|different|whereas|while|relative\s+to)\b"
+)
+
+
+def _precision_property_projection_key(fact: AxisFact) -> str:
+    """Build a conservative owner-free key for one non-tensile Property."""
+
+    if not isinstance(fact, PropertyFact):
+        return ""
+    data = fact.data
+    return json.dumps(
+        [
+            normalize_source_alias(data.get("property_name_raw")),
+            normalize_source_alias(data.get("value_raw")),
+            normalize_source_alias(data.get("unit_raw")),
+            normalize_source_alias(data.get("test_condition_raw")),
+        ],
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _precision_first_owner_dedup(
+    index: _IdentityIndex,
+    facts: Sequence[AxisFact],
+) -> tuple[list[AxisFact], list[MaterializeIssue]]:
+    """Quarantine ambiguous cross-chunk Property fan-out in precision mode.
+
+    Alpha25 is allowed to emit high-recall candidates, but a copied comparison
+    sentence can be routed to several owners with the same value and payload.
+    When no explicit multi-owner mapping is present, retaining every copy is a
+    false broadcast.  We isolate the whole ambiguous group rather than guessing
+    a winner and preserve all rows in the audit record.
+    """
+
+    if not precision_first_owner_dedup_v207_enabled():
+        return list(facts), []
+    routed = {id(fact): _group_route(index, fact) for fact in facts}
+    groups: dict[str, list[tuple[int, AxisFact, str]]] = {}
+    for position, fact in enumerate(facts):
+        owners = routed[id(fact)]
+        if (
+            not isinstance(fact, PropertyFact)
+            or _core_tensile_semantic(fact)
+            or len(owners) != 1
+            or _fact_has_table_coordinate(fact)
+            or _fact_is_reference_table_coordinate(index, fact, owners)
+        ):
+            continue
+        key = _precision_property_projection_key(fact)
+        if key:
+            groups.setdefault(key, []).append((position, fact, owners[0]))
+
+    removed: set[int] = set()
+    issues: list[MaterializeIssue] = []
+    for key, rows in groups.items():
+        owners = {owner for _, _, owner in rows}
+        if len(owners) < 2:
+            continue
+        evidence = [
+            row
+            for _, fact, _ in rows
+            for row in fact.source_evidence
+            if str(row or "").strip()
+        ]
+        text = "\n".join(evidence)
+        if _PRECISION_OWNER_MAPPING.search(text):
+            continue
+        # Only isolate a clear comparison/generic assertion.  Independent
+        # identical measurements for two owners remain valid when the source
+        # explicitly maps them via a table or a multi-owner cue.
+        shared_assertion = any(
+            _evidence_rows_share_assertion(left, right)
+            for _, left_fact, _ in rows
+            for _, right_fact, _ in rows
+            if left_fact is not right_fact
+            for left in left_fact.source_evidence
+            for right in right_fact.source_evidence
+        )
+        if not shared_assertion and not _evidence_is_generic_owner_assertion(evidence):
+            continue
+        if not (_PRECISION_COMPARISON_CUE.search(text) or _evidence_is_generic_owner_assertion(evidence)):
+            continue
+        for position, fact, owner in rows:
+            if position in removed:
+                continue
+            removed.add(position)
+            issues.append(
+                MaterializeIssue(
+                    code="precision_first_owner_projection_quarantined",
+                    sample_id_raw=index.display_label(owner),
+                    path=f"items.{index.display_label(owner)}.Extracted_Data.Properties",
+                    message=(
+                        "A non-tensile Property was isolated because the same "
+                        "cross-chunk value/evidence was broadcast to multiple "
+                        "owners without an explicit source mapping."
+                    ),
+                    evidence={
+                        "shared_evidence": evidence,
+                        "projection_key": key,
+                        "owners": [
+                            index.display_label(candidate) for candidate in sorted(owners)
+                        ],
+                    },
+                    expected={
+                        "owner_binding": "one owner or explicit both/respectively/table coordinate",
+                        "broadcast": False,
+                    },
+                    actual={"fact": fact.model_dump(), "owner": index.display_label(owner)},
+                    suggested_action=(
+                        "Restore only when the source explicitly maps the value to "
+                        "each owner; do not infer a winner from a comparison sentence."
+                    ),
+                )
+            )
+    return [fact for position, fact in enumerate(facts) if position not in removed], issues
 
 
 _CHARACTERIZATION_INSTRUMENT_CUE = re.compile(
@@ -10710,6 +14232,10 @@ _CHARACTERIZATION_INSTRUMENT_CUE = re.compile(
 _CHARACTERIZATION_FIGURE_CUE = re.compile(
     r"(?i)\b(?:fig(?:ure)?\.?\s*[A-Z0-9]|results?|graph|"
     r"mapping|patterns?|analysis|findings?|illustrated|depicted|shown)\b"
+)
+_CHARACTERIZATION_EXPLICIT_ACQUISITION_CUE = re.compile(
+    r"(?ix)\b(?:images?|micrographs?|maps?|patterns?|spectra?)\s+"
+    r"(?:was|were)\s+(?:taken|acquired|recorded|collected|obtained)\b"
 )
 
 _STRUCTURE_CHARACTERIZATION_PROXY_NAME = re.compile(
@@ -10904,6 +14430,7 @@ def _quarantine_figure_characterizations(
         )
         if (
             _CHARACTERIZATION_INSTRUMENT_CUE.search(text)
+            or _CHARACTERIZATION_EXPLICIT_ACQUISITION_CUE.search(text)
             or not _CHARACTERIZATION_FIGURE_CUE.search(text)
         ):
             kept.append(fact)
@@ -11133,7 +14660,15 @@ def _recover_numeric_tensile_context_owners(
             )
             if len(compatible_result_contexts) == 1 and static_context is not None:
                 selected, protocol_blocks, families = static_context
-                base = index.state_family_base.get(selected, selected)
+                # ``_unique_static_tensile_owner_context`` proves exactly one
+                # source-named family and may resolve its state to an already
+                # existing primary sample.  For example, generated ``N1 [CR]``
+                # and primary ``N1-CR`` share the canonical key ``n1cr``.  In
+                # that collision case the existing primary predates the
+                # generated state link, so ``state_family_base`` need not carry
+                # the family edge.  Keep the proven family returned by the
+                # context decision instead of re-deriving a different key.
+                base = next(iter(families))
                 rule = "unique_current_study_static_tensile_protocol"
                 source_blocks = [*protocol_blocks, *compatible_result_contexts[0]]
                 decision_evidence = {
@@ -14373,6 +17908,200 @@ def _sidecar_state_owner_base_label(base_label: str, source_text: str) -> str:
     return f"{base_label} {descriptor}"
 
 
+def _oriented_sidecar_owner_v206_enabled() -> bool:
+    """Keep explicit CSV orientation coordinates in the material owner key.
+
+    A sidecar row such as ``EBAM-AB,X,...`` is already a source-declared
+    specimen identity.  Retaining ``-X`` in the generated owner prevents X/Y/Z
+    values from collapsing into one generic item and makes strict owner
+    matching deterministic.  The switch remains available for compatibility
+    with historical outputs.
+    """
+
+    raw = os.getenv("KNOWMAT2_ALPHA25_ORIENTED_SIDECAR_OWNERS_V206", "1")
+    return raw.strip().casefold() not in {"0", "false", "no", "off", "disabled"}
+
+
+def _oriented_sidecar_owner_label(
+    base_owner: str,
+    material_label: str,
+    orientation: str,
+) -> str:
+    """Build one literal owner label for an explicit CSV specimen row."""
+
+    owner = str(base_owner or "").strip()
+    material = str(material_label or "").strip()
+    axis = str(orientation or "").strip().upper()
+    if (
+        not _oriented_sidecar_owner_v206_enabled()
+        or not owner
+        or not material
+        or axis not in {"X", "Y", "Z"}
+        or not re.search(r"(?i)(?:^|[\s_-])AB$", material)
+    ):
+        return owner
+    if re.search(rf"(?i)(?:^|[-_/\s]){axis}$", owner):
+        return owner
+    # Preserve the exact source material token (including ``-AB``) whenever
+    # the existing inventory uses a coarser alias such as ``WAAM``.
+    prefix = material
+    return f"{prefix}-{axis}"
+
+
+def _discrete_sidecar_material_owner(
+    material_label: str,
+    anchors: Sequence[InventoryAnchor],
+    *,
+    source_text: str = "",
+) -> tuple[
+    str,
+    InventoryAnchor | None,
+    str,
+    list[dict[str, Any]],
+]:
+    """Match one CSV material label to exactly one existing Target owner.
+
+    Compact ``-AB`` is accepted only as an as-built qualifier on an already
+    matching material owner.  The CSV can select an inventory coordinate, but
+    it cannot create a new material family or silently choose between two
+    source samples that share the same alloy name.
+    """
+
+    raw = unicodedata.normalize("NFKC", str(material_label or "")).strip()
+    suffix = re.fullmatch(r"(?is)(.+?)[\s_-]+AB", raw)
+    base_literal = suffix.group(1).strip() if suffix else raw
+    required_state = "as_built" if suffix else ""
+    base_key = normalize_source_alias(base_literal)
+    if not base_key:
+        return "unknown", None, "", []
+
+    target_rows = [
+        anchor
+        for anchor in anchors
+        if str(anchor.role or "").strip().casefold() == "target"
+    ]
+    exact_sample = [
+        anchor
+        for anchor in target_rows
+        if normalize_source_alias(anchor.sample_id_raw) == base_key
+    ]
+    matches = exact_sample or [
+        anchor
+        for anchor in target_rows
+        if normalize_source_alias(anchor.material_name_raw) == base_key
+    ]
+    source_state = ""
+    source_state_evidence: tuple[str, ...] = ()
+    base_matches = list(matches)
+    if required_state:
+        explicit_state_matches = [
+            anchor
+            for anchor in base_matches
+            if (
+                (descriptor := _state_descriptor(anchor.state_raw)) is not None
+                and descriptor[0] == required_state
+            )
+        ]
+        if explicit_state_matches:
+            matches = explicit_state_matches
+        else:
+            # A compact ``WAAM-AB``/``EBAM-AB`` sidecar label is a source
+            # literal state qualifier, but the upstream inventory may have
+            # emitted only the bare process owner.  Recover that state only
+            # from one unambiguous owner-local source sentence; never infer it
+            # from the suffix alone or from a paper-wide statement.
+            local_state = _dense_source_local_states(
+                source_text, (base_literal,)
+            ).get(base_key)
+            unqualified_matches = [
+                anchor
+                for anchor in base_matches
+                if (
+                    _is_unresolved_alias(anchor.state_raw)
+                    or normalize_source_alias(anchor.state_raw) == base_key
+                )
+            ]
+            if (
+                local_state is not None
+                and _state_descriptor(local_state[0]) is not None
+                and _state_descriptor(local_state[0])[0] == required_state
+                and unqualified_matches
+            ):
+                source_state, source_state_evidence = local_state
+                matches = unqualified_matches
+            else:
+                matches = []
+
+    audit_rows = [
+        {
+            "sample_id_raw": anchor.sample_id_raw,
+            "material_name_raw": anchor.material_name_raw,
+            "state_raw": anchor.state_raw,
+            "role": anchor.role,
+            "match_basis": "sample" if exact_sample else "material_name",
+            "required_state": required_state or None,
+            "state_resolution": "source_local"
+            if source_state
+            else "inventory"
+            if required_state and matches
+            else None,
+            "state_source_evidence": list(source_state_evidence),
+        }
+        for anchor in matches
+    ]
+    owner_groups: dict[str, list[InventoryAnchor]] = {}
+    for anchor in matches:
+        key = _identity_key(anchor.sample_id_raw)
+        if key:
+            owner_groups.setdefault(key, []).append(anchor)
+    if not owner_groups:
+        return "unknown", None, "", audit_rows
+    if len(owner_groups) != 1:
+        return "ambiguous", None, "", audit_rows
+
+    rows = next(iter(owner_groups.values()))
+    state_rows = [
+        str(anchor.state_raw).strip()
+        for anchor in rows
+        if str(anchor.state_raw or "").strip()
+        and not _is_unresolved_alias(anchor.state_raw)
+        and (
+            required_state
+            or normalize_source_alias(anchor.state_raw) != base_key
+        )
+    ]
+    state_groups: dict[tuple[str, tuple[str, ...]], list[str]] = {}
+    for value in state_rows:
+        descriptor = _state_descriptor(value)
+        if descriptor is not None:
+            state_groups.setdefault(descriptor, []).append(value)
+    if required_state and not state_groups and not source_state:
+        return "unknown", None, "", audit_rows
+    # An unqualified material row may use one uniquely source-backed state
+    # (for example Wrought -> mill annealed). Multiple distinct states are not
+    # silently resolved from a label that did not distinguish them.
+    if len(state_groups) > 1:
+        return "ambiguous", None, "", audit_rows
+    state = (
+        min(
+            next(iter(state_groups.values())),
+            key=lambda value: (len(value), value.casefold()),
+        )
+        if state_groups
+        else source_state
+    )
+    representative = min(
+        rows,
+        key=lambda anchor: (
+            not bool(str(anchor.state_raw or "").strip()) if state else False,
+            len(str(anchor.sample_id_raw or "")),
+            str(anchor.sample_id_raw or "").casefold(),
+            -float(anchor.confidence),
+        ),
+    )
+    return "matched", representative, state, audit_rows
+
+
 def _promote_discrete_tensile_sidecars_v202(
     anchors: Sequence[InventoryAnchor],
     facts: Sequence[AxisFact],
@@ -14441,7 +18170,7 @@ def _promote_discrete_tensile_sidecars_v202(
         return anchor_rows, fact_rows, issues
 
     base, owner_candidates = _unique_discrete_sidecar_target_base(anchor_rows)
-    if base is None or not owner_state_condition_v202_enabled():
+    if not owner_state_condition_v202_enabled():
         for decision in eligible:
             issues.append(
                 MaterializeIssue(
@@ -14454,29 +18183,33 @@ def _promote_discrete_tensile_sidecars_v202(
                     ),
                     evidence=[f"data_csv: {decision.reference}"],
                     expected={
-                        "target_base_owner_count": 1,
                         "owner_state_condition_gate": True,
                     },
                     actual={
                         "decision": decision.to_dict(),
-                        "candidate_owners": owner_candidates,
                         "owner_state_condition_gate": (
                             owner_state_condition_v202_enabled()
                         ),
                     },
                     suggested_action=(
-                        "Promote only after the inventory names one Target material "
-                        "family for the categorical result rows."
+                        "Enable the owner/state/condition precision gate before "
+                        "promoting categorical result rows."
                     ),
                 )
             )
         return anchor_rows, fact_rows, issues
 
-    base_label = str(base.sample_id_raw).strip()
-    state_owner_base_label = _sidecar_state_owner_base_label(
-        base_label, source_text
+    base_label = str(base.sample_id_raw).strip() if base is not None else ""
+    state_owner_base_label = (
+        _sidecar_state_owner_base_label(base_label, source_text)
+        if base is not None
+        else ""
     )
-    base_family = _identity_key(base.material_name_raw or base_label)
+    base_family = (
+        _identity_key(base.material_name_raw or base_label)
+        if base is not None
+        else ""
+    )
     existing_state_owners: dict[str, set[str]] = {}
     for anchor in anchor_rows:
         family = _identity_key(anchor.material_name_raw or anchor.sample_id_raw)
@@ -14494,43 +18227,155 @@ def _promote_discrete_tensile_sidecars_v202(
                 f"data_csv: {decision.reference}",
                 row.raw_row,
             ]
-            state_alias = normalize_source_alias(row.condition)
-            row_owner_candidates = existing_state_owners.get(state_alias, set())
-            if len(row_owner_candidates) > 1:
+            row_base = base
+            row_owner_state = ""
+            row_owner_match_candidates = owner_candidates
+            state_source_evidence: list[str] = []
+            if row.material:
+                (
+                    owner_match_status,
+                    row_base,
+                    row_owner_state,
+                    row_owner_match_candidates,
+                ) = _discrete_sidecar_material_owner(
+                    row.material,
+                    anchor_rows,
+                    source_text=source_text,
+                )
+                if owner_match_status != "matched" or row_base is None:
+                    issues.append(
+                        MaterializeIssue(
+                            code="discrete_chart_sidecar_rejected",
+                            sample_id_raw=row.material or "paper",
+                            path="source_sidecars",
+                            message=(
+                                "A categorical sidecar row did not uniquely match "
+                                "one existing Target material owner."
+                            ),
+                            evidence=evidence,
+                            expected={
+                                "owner_match_status": "matched",
+                                "owner_created_from_csv": False,
+                            },
+                            actual={
+                                "literal_sidecar_row": row.to_dict(),
+                                "owner_match_status": owner_match_status,
+                                "candidate_owners": row_owner_match_candidates,
+                                "sidecar_hash": decision.content_sha256,
+                            },
+                            suggested_action=(
+                                "Add or disambiguate the source-backed Target inventory; "
+                                "do not create an owner from the CSV label alone."
+                            ),
+                        )
+                    )
+                    continue
+                state_source_evidence = list(
+                    dict.fromkeys(
+                        evidence_row
+                        for candidate in row_owner_match_candidates
+                        for evidence_row in candidate.get(
+                            "state_source_evidence", []
+                        )
+                        if str(evidence_row).strip()
+                    )
+                )
+                evidence = list(
+                    dict.fromkeys(
+                        [
+                            *evidence,
+                            *state_source_evidence,
+                        ]
+                    )
+                )
+                row_owner = str(row_base.sample_id_raw).strip()
+                oriented_owner = _oriented_sidecar_owner_label(
+                    row_owner, row.material, row.orientation
+                )
+                if oriented_owner != row_owner:
+                    row_owner = oriented_owner
+                    owner_created = True
+                else:
+                    owner_created = False
+            elif row_base is None:
                 issues.append(
                     MaterializeIssue(
                         code="discrete_chart_sidecar_rejected",
-                        sample_id_raw=base_label,
+                        sample_id_raw="paper",
                         path="source_sidecars",
                         message=(
-                            "A categorical sidecar row matched more than one existing "
-                            "state-qualified Target owner and was not promoted."
+                            "A categorical condition row had no unique Target base "
+                            "material and was not promoted."
                         ),
                         evidence=evidence,
-                        expected={"state_owner_count": 1},
+                        expected={"target_base_owner_count": 1},
                         actual={
                             "literal_sidecar_row": row.to_dict(),
-                            "candidate_owners": sorted(row_owner_candidates),
+                            "candidate_owners": owner_candidates,
                             "sidecar_hash": decision.content_sha256,
                         },
-                        suggested_action="Review the duplicate state owner inventory.",
+                        suggested_action=(
+                            "Promote only after one Target material family is "
+                            "source-backed for this condition row."
+                        ),
                     )
                 )
                 continue
-            owner_created = not row_owner_candidates
-            row_owner = (
-                next(iter(row_owner_candidates))
-                if row_owner_candidates
-                else f"{state_owner_base_label} [{row.condition}]"
-            )
+            else:
+                state_alias = normalize_source_alias(row.condition)
+                row_owner_candidates = existing_state_owners.get(state_alias, set())
+                if len(row_owner_candidates) > 1:
+                    issues.append(
+                        MaterializeIssue(
+                            code="discrete_chart_sidecar_rejected",
+                            sample_id_raw=base_label,
+                            path="source_sidecars",
+                            message=(
+                                "A categorical sidecar row matched more than one existing "
+                                "state-qualified Target owner and was not promoted."
+                            ),
+                            evidence=evidence,
+                            expected={"state_owner_count": 1},
+                            actual={
+                                "literal_sidecar_row": row.to_dict(),
+                                "candidate_owners": sorted(row_owner_candidates),
+                                "sidecar_hash": decision.content_sha256,
+                            },
+                            suggested_action="Review the duplicate state owner inventory.",
+                        )
+                    )
+                    continue
+                owner_created = not row_owner_candidates
+                row_owner = (
+                    next(iter(row_owner_candidates))
+                    if row_owner_candidates
+                    else f"{state_owner_base_label} [{row.condition}]"
+                )
+
+            # Material-labelled rows are resolved through the row-level
+            # matcher above, so they do not enter the ``else`` branch where
+            # ``state_alias`` is initialized.  Always key the state-owner
+            # index from this row's proven state, never from the previous CSV
+            # row's loop-local value.
+            if row.material:
+                state_alias = normalize_source_alias(row_owner_state or row.condition)
+
             state_anchor: InventoryAnchor | None = None
             if owner_created:
                 state_anchor = InventoryAnchor(
                     sample_id_raw=row_owner,
-                    material_name_raw=base.material_name_raw or base_label,
-                    state_raw=row.condition,
-                    role=base.role,
-                    data_nature=base.data_nature,
+                    material_name_raw=(
+                        row_base.material_name_raw
+                        if row_base is not None and row_base.material_name_raw
+                        else (row_base.sample_id_raw if row_base is not None else base_label)
+                    ),
+                    state_raw=row_owner_state or row.condition,
+                    role=row_base.role if row_base is not None else base.role,
+                    data_nature=(
+                        row_base.data_nature
+                        if row_base is not None
+                        else base.data_nature
+                    ),
                     source_evidence=evidence,
                     confidence=0.95,
                 )
@@ -14553,7 +18398,16 @@ def _promote_discrete_tensile_sidecars_v202(
                             "orientation_as_material_state": False,
                         },
                         actual={
-                            "base_owner": base.model_dump(),
+                            # ``base`` is only the globally unique owner.  A
+                            # multi-family sidecar intentionally leaves it
+                            # unset; in that case the row-level matcher above
+                            # has already proven ``row_base`` and is the
+                            # correct audit subject.
+                            "base_owner": (
+                                row_base.model_dump()
+                                if row_base is not None
+                                else None
+                            ),
                             "created_anchor": state_anchor.model_dump(),
                             "literal_sidecar_row": row.to_dict(),
                             "sidecar_hash": decision.content_sha256,
@@ -14571,6 +18425,7 @@ def _promote_discrete_tensile_sidecars_v202(
                     f"data_csv: {decision.reference}",
                     cell.header_raw,
                     row.raw_row,
+                    *state_source_evidence,
                 ]
                 fact = PropertyFact(
                     sample_id_raw=row_owner,
@@ -14582,8 +18437,16 @@ def _promote_discrete_tensile_sidecars_v202(
                         "unit_raw": cell.unit_raw,
                         "test_method_raw": "tensile test",
                         "test_standard_raw": "",
-                        "test_condition_raw": test_condition,
+                        # Keep the test method as the minimal condition when
+                        # the sidecar has no literal temperature/rate/etc.
+                        # The specimen direction is stored independently in
+                        # ``test_specimen_raw``; leaving the condition empty
+                        # makes the frozen v11 normalizer incorrectly publish
+                        # ``X``/``Y``/``Z`` as a test condition and causes
+                        # strict owner/condition matching to fail.
+                        "test_condition_raw": test_condition or "tensile test",
                         "test_specimen_raw": row.orientation,
+                        "material_state": row_owner_state,
                         "raw_note": row.raw_row,
                         # Keep digitized provenance distinct inside Alpha25 so
                         # generic image-owner routing cannot reinterpret a
@@ -14621,8 +18484,8 @@ def _promote_discrete_tensile_sidecars_v202(
                             "sidecar_hash": decision.content_sha256,
                             "source_kind": "image_digitized",
                             "test_condition_raw": test_condition,
-                            "base_owner": base.model_dump(),
-                            "owner_candidates": owner_candidates,
+                            "base_owner": row_base.model_dump(),
+                            "owner_candidates": row_owner_match_candidates,
                             "owner_invented": False,
                             "owner_created_from_source_literal": owner_created,
                             "fact": fact.model_dump(),
@@ -14640,7 +18503,14 @@ def _promote_discrete_tensile_sidecars_v202(
 def _dense_target_owner_aliases(
     anchors: Sequence[InventoryAnchor],
 ) -> dict[str, tuple[str, ...]]:
-    aliases: dict[str, tuple[str, ...]] = {}
+    # Independent chunks frequently emit case/spacing variants of the same
+    # literal sample label (``0s Delay``, ``0 s Delay``). Dense table parsing
+    # previously treated those presentation variants as different owners and
+    # rejected an otherwise unique row/column coordinate. Collapse only the
+    # already-equivalent sample identity key; genuinely different labels that
+    # merely share a generic alias (for example two specimens both called
+    # ``HT``) remain separate and therefore ambiguous.
+    grouped: dict[str, list[InventoryAnchor]] = {}
     for anchor in sorted(
         anchors,
         key=lambda row: (
@@ -14651,17 +18521,55 @@ def _dense_target_owner_aliases(
         if str(anchor.role or "").strip().casefold() != "target":
             continue
         owner = str(anchor.sample_id_raw).strip()
-        material = str(anchor.material_name_raw or "").strip()
-        state = str(anchor.state_raw or "").strip()
-        candidates = [owner, material, state]
-        if state:
-            candidates.extend(
-                f"{base} {state}" for base in (owner, material) if base
-            )
-        aliases[owner] = tuple(
-            dict.fromkeys(value for value in candidates if value)
+        if owner:
+            grouped.setdefault(_identity_key(owner), []).append(anchor)
+
+    aliases: dict[str, tuple[str, ...]] = {}
+    for rows in grouped.values():
+        owner_labels = sorted(
+            {str(row.sample_id_raw).strip() for row in rows},
+            key=lambda value: (
+                # Prefer the readable physical-token form ``120 s`` over
+                # ``120s`` while retaining deterministic case ordering.
+                0 if re.search(r"\d\s+[A-Za-z]", value) else 1,
+                value.casefold(),
+                value,
+            ),
         )
+        owner = owner_labels[0]
+        candidates: list[str] = list(owner_labels)
+        for anchor in rows:
+            material = str(anchor.material_name_raw or "").strip()
+            state = str(anchor.state_raw or "").strip()
+            candidates.extend(value for value in (material, state) if value)
+            if state:
+                candidates.extend(
+                    f"{base} {state}"
+                    for base in (
+                        str(anchor.sample_id_raw).strip(),
+                        material,
+                    )
+                    if base
+                )
+        aliases[owner] = tuple(dict.fromkeys(candidates))
     return aliases
+
+
+def _dense_mechanical_property_key(value: Any) -> str:
+    """Return one alias-stable semantic for explicit mechanical table cells."""
+
+    core = core_tensile_subtype(value)
+    if core:
+        return f"core_tensile:{core}"
+    semantic = normalize_source_alias(value)
+    if semantic in {
+        "elastic modulus",
+        "modulus of elasticity",
+        "young s modulus",
+        "youngs modulus",
+    }:
+        return "elastic_modulus"
+    return semantic
 
 
 def _fact_owns_dense_cell(fact: AxisFact, cell: DenseTensileCell) -> bool:
@@ -14670,31 +18578,35 @@ def _fact_owns_dense_cell(fact: AxisFact, cell: DenseTensileCell) -> bool:
     data = fact.data
     if _identity_key(fact.sample_id_raw) != _identity_key(cell.owner):
         return False
-    if core_tensile_subtype(data.get("property_name_raw")) != core_tensile_subtype(
-        cell.property_name
-    ):
+    if _dense_mechanical_property_key(
+        data.get("property_name_raw")
+    ) != _dense_mechanical_property_key(cell.property_name):
         return False
-    if normalize_source_alias(data.get("value_raw")) != normalize_source_alias(
-        cell.value_raw
-    ):
+    if normalize_source_alias(
+        normalize_evidence_text(str(data.get("value_raw") or ""))
+    ) != normalize_source_alias(normalize_evidence_text(cell.value_raw)):
         return False
     if normalize_source_alias(data.get("unit_raw")) != normalize_source_alias(
         cell.unit_raw
     ):
         return False
     evidence_rows = [
-        normalize_source_alias(line)
+        normalize_source_alias(normalize_evidence_text(line))
         for raw in fact.source_evidence
         for line in str(raw or "").splitlines()
         if "|" in line
     ]
-    evidence = normalize_source_alias("\n".join(fact.source_evidence))
-    value = normalize_source_alias(cell.value_raw)
-    owner = normalize_source_alias(cell.owner_literal)
+    evidence = normalize_source_alias(
+        normalize_evidence_text("\n".join(fact.source_evidence))
+    )
+    value = normalize_source_alias(normalize_evidence_text(cell.value_raw))
+    owner = normalize_source_alias(
+        normalize_evidence_text(cell.owner_literal)
+    )
     headers = {
-        normalize_source_alias(header)
+        normalize_source_alias(normalize_evidence_text(header))
         for header in cell.header_path
-        if normalize_source_alias(header)
+        if normalize_source_alias(normalize_evidence_text(header))
     }
     property_headers = {header for header in headers if header != owner}
     # Exact owner/property/value/unit equality was established above.  The
@@ -14736,10 +18648,12 @@ def _fact_matches_dense_scientific_coordinate(
     if not isinstance(fact, PropertyFact):
         return False
     return bool(
-        core_tensile_subtype(fact.data.get("property_name_raw"))
-        == core_tensile_subtype(cell.property_name)
-        and normalize_source_alias(fact.data.get("value_raw"))
-        == normalize_source_alias(cell.value_raw)
+        _dense_mechanical_property_key(fact.data.get("property_name_raw"))
+        == _dense_mechanical_property_key(cell.property_name)
+        and normalize_source_alias(
+            normalize_evidence_text(str(fact.data.get("value_raw") or ""))
+        )
+        == normalize_source_alias(normalize_evidence_text(cell.value_raw))
         and normalize_source_alias(fact.data.get("unit_raw"))
         == normalize_source_alias(cell.unit_raw)
     )
@@ -14780,6 +18694,478 @@ def _dense_condition_is_owner_state(condition: Any, cell_owner: str) -> bool:
     condition_key = normalize_source_alias(_normalize_state_markup(condition))
     owner_key = normalize_source_alias(_normalize_state_markup(cell_owner))
     return bool(condition_key and len(condition_key) >= 4 and condition_key in owner_key)
+
+
+def _dense_condition_without_orientation(
+    condition: Any, orientation: str
+) -> str:
+    """Move one source-proven build orientation out of test conditions.
+
+    Dense tensile matrices already bind the orientation to one physical table
+    column and store it in ``test_specimen_raw``.  Keeping the same ``X``/``Z``
+    token in ``test_condition_raw`` duplicates an owner coordinate and makes a
+    build direction look like a test protocol.  Only a complete standalone
+    orientation segment is removed; temperatures, rates, standards, and mixed
+    prose remain untouched.
+    """
+
+    raw = str(condition or "").strip()
+    literal = str(orientation or "").strip()
+    if not raw or not literal:
+        return raw
+    token = re.escape(literal)
+    standalone = re.compile(
+        rf"(?i)^\s*{token}(?:\s+(?:build\s+)?(?:orientation|direction))?\s*$"
+    )
+    segments = [
+        segment.strip()
+        for segment in re.split(r"(?:\r?\n)+|\s*;\s*", raw)
+        if segment.strip()
+    ]
+    cleaned = [segment for segment in segments if standalone.fullmatch(segment) is None]
+    return "; ".join(cleaned)
+
+
+_DENSE_MATERIAL_DESIGNATION = re.compile(
+    r"(?<![A-Za-z0-9])([A-Z][A-Za-z]{2,}\s*[- ]?\s*\d{2,4}[A-Za-z]?)"
+)
+_DENSE_GLOBAL_TREATMENT = re.compile(
+    # Markdown section headings terminate the previous logical block without
+    # adding sentence punctuation.  A newline is therefore a valid boundary
+    # for a source sentence that begins with an explicit universal quantifier.
+    r"(?is)(?P<sentence>(?:^|(?<=[.!?\n]))\s*"
+    r"(?:all|each|every)\b[^.!?]{0,160}\b"
+    r"(?:samples?|specimens?|bars?)\b[^.!?]{0,320}\b"
+    r"(?:underwent|received|were|had\s+been)\b[^.!?]{0,360})"
+)
+_DENSE_GLOBAL_TENSILE_SCOPE = re.compile(
+    r"(?is)\btensile\s+(?:testing|tests?)\b[^.!?]{0,180}\b"
+    r"(?:all|each|every)\b[^.!?]{0,120}\b(?:samples?|specimens?|bars?)\b"
+)
+_DENSE_STATE_PRESENTATION = {
+    "hip": "HIPed",
+    "solution_treated": "solution-treated",
+    "heat_treated": "heat-treated",
+    "aged": "aged",
+    "sintered": "sintered",
+    "as_built": "as-built",
+    "rolled": "rolled",
+    "wrought": "wrought",
+}
+_DENSE_LOCAL_STATE_CUE = re.compile(
+    r"(?ix)\b(?:as[\s-]*(?:built|printed|fabricated|deposited|produced)|"
+    r"heat[\s-]*treated|solution[\s-]*treated|sinter(?:ed|ing)?|"
+    r"aged?|annealed?|hip(?:ed|ped)?|rolled|wrought)\b"
+)
+
+
+def _dense_source_local_states(
+    source_text: str,
+    bases: Sequence[str],
+) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Resolve one explicit preparation state per dense owner from local text."""
+
+    if not source_text or not bases:
+        return {}
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])|\n+", source_text)
+        if sentence.strip()
+    ]
+    result: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for base in bases:
+        candidates: dict[str, tuple[str, ...]] = {}
+        for sentence in sentences:
+            owner_match = re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(str(base).strip())}(?![A-Za-z0-9])",
+                sentence,
+                flags=re.IGNORECASE,
+            )
+            if owner_match is None:
+                continue
+            for match in _DENSE_LOCAL_STATE_CUE.finditer(sentence):
+                # Bind only a cue adjacent to this owner.  A sentence can
+                # legitimately mention ``wrought`` and ``as-built WAAM``;
+                # treating every cue as applicable would make the state
+                # ambiguous and defeat the source-local repair.
+                if abs(match.start() - owner_match.start()) > 36:
+                    continue
+                between = sentence[
+                    min(match.end(), owner_match.end())
+                    : max(match.start(), owner_match.start())
+                ]
+                if re.search(r"[,;]|\b(?:and|or|but)\b", between, flags=re.IGNORECASE):
+                    continue
+                cue = match.group(0).strip(" ,;:")
+                category = (
+                    "as_built"
+                    if re.search(r"(?i)as[\s-]*(?:built|printed|fabricated|deposited|produced)", cue)
+                    else "heat_treated"
+                    if re.search(r"(?i)heat[\s-]*treated", cue)
+                    else "solution_treated"
+                    if re.search(r"(?i)solution[\s-]*treated", cue)
+                    else "sintered"
+                    if re.search(r"(?i)sinter", cue)
+                    else "aged"
+                    if re.search(r"(?i)aged?", cue)
+                    else "annealed"
+                    if re.search(r"(?i)anneal", cue)
+                    else "hip"
+                    if re.search(r"(?i)hip", cue)
+                    else "rolled"
+                    if re.search(r"(?i)roll", cue)
+                    else "wrought"
+                    if re.search(r"(?i)wrought", cue)
+                    else ""
+                )
+                presentation = _DENSE_STATE_PRESENTATION.get(category)
+                if presentation:
+                    candidates.setdefault(presentation, tuple())
+                    candidates[presentation] = tuple(
+                        dict.fromkeys((*candidates[presentation], sentence))
+                    )
+        if len(candidates) == 1:
+            result[normalize_source_alias(base)] = next(iter(candidates.items()))
+    return result
+
+
+def _dense_material_designation(value: Any) -> str:
+    """Return one literal designation from an identity field, if present."""
+
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text or len(text) > 160:
+        return ""
+    match = _DENSE_MATERIAL_DESIGNATION.search(text)
+    if match is not None:
+        return match.group(1).strip()
+    if (
+        _looks_like_composition_designation(text)
+        and _process_family(text) is None
+        and _state_descriptor(text) is None
+    ):
+        return text
+    return ""
+
+
+def _dense_material_candidates(
+    anchors: Sequence[InventoryAnchor], facts: Sequence[AxisFact]
+) -> dict[str, tuple[str, tuple[str, ...]]]:
+    """Collect unique source-literal material designations for owner repair."""
+
+    rows: dict[str, list[tuple[str, tuple[str, ...]]]] = {}
+    for anchor in anchors:
+        if str(anchor.role or "").strip().casefold() != "target":
+            continue
+        for value in (anchor.material_name_raw, anchor.sample_id_raw):
+            designation = _dense_material_designation(value)
+            if designation:
+                rows.setdefault(normalize_source_alias(designation), []).append(
+                    (designation, tuple(anchor.source_evidence))
+                )
+    for fact in facts:
+        if fact.fact_type != "material_identity":
+            continue
+        for key in ("material_name_raw", "designation_raw", "material_family"):
+            designation = _dense_material_designation(fact.data.get(key))
+            if designation:
+                rows.setdefault(normalize_source_alias(designation), []).append(
+                    (designation, tuple(fact.source_evidence))
+                )
+    result: dict[str, tuple[str, tuple[str, ...]]] = {}
+    for key, candidates in rows.items():
+        literal = min(
+            (row[0] for row in candidates),
+            key=lambda value: (len(value), value.casefold(), value),
+        )
+        evidence = tuple(
+            dict.fromkeys(
+                span
+                for _candidate, spans in candidates
+                for span in spans
+                if str(span or "").strip()
+            )
+        )
+        result[key] = (literal, evidence)
+    return result
+
+
+def _dense_global_tensile_state(source_text: str) -> tuple[str, tuple[str, ...]]:
+    """Resolve one treatment explicitly applied to all subsequently tested rows."""
+
+    matches: dict[str, list[str]] = {}
+    positions: dict[str, list[int]] = {}
+    for match in _DENSE_GLOBAL_TREATMENT.finditer(source_text):
+        sentence = match.group("sentence").strip()
+        descriptor = _state_descriptor(sentence)
+        if descriptor is None or descriptor[0] not in _DENSE_STATE_PRESENTATION:
+            continue
+        category = descriptor[0]
+        matches.setdefault(category, []).append(sentence)
+        positions.setdefault(category, []).append(match.end())
+    if len(matches) != 1:
+        return "", ()
+    category = next(iter(matches))
+    if not any(
+        _DENSE_GLOBAL_TENSILE_SCOPE.search(source_text[position:]) is not None
+        for position in positions[category]
+    ):
+        return "", ()
+    return (
+        _DENSE_STATE_PRESENTATION[category],
+        tuple(dict.fromkeys(matches[category])),
+    )
+
+
+def _enrich_dense_tensile_owner_context(
+    anchors: Sequence[InventoryAnchor],
+    facts: Sequence[AxisFact],
+    *,
+    source_text: str,
+) -> tuple[list[InventoryAnchor], list[AxisFact], list[MaterializeIssue]]:
+    """Put material/state/orientation dimensions into dense tensile owners.
+
+    This pass is intentionally fail-closed.  It runs only after exact dense
+    cells have been established, requires both orientation siblings for a base
+    owner, one source-literal material designation, and one treatment that the
+    source explicitly applies to all subsequently tensile-tested specimens.
+    """
+
+    if not source_text:
+        return list(anchors), list(facts), []
+    owners: dict[str, tuple[str, str]] = {}
+    bare_owner_keys: set[str] = set()
+    sibling_orientations: dict[str, set[str]] = {}
+    owner_presentations: dict[str, str] = {}
+    for fact in facts:
+        if not isinstance(fact, PropertyFact):
+            continue
+        owner = str(fact.sample_id_raw or "").strip()
+        if re.search(
+            r"(?i)\btensile\s+specimen\s*\[[^\]]+\]\s*/\s*[XYZ]\s*$",
+            owner,
+        ):
+            # The late idempotent pass sees owners produced by the early pass;
+            # do not wrap an already canonical coordinate a second time.
+            continue
+        match = _EXPLICIT_SLASH_ORIENTATION.fullmatch(owner)
+        decision_key = str(fact.data.get("property_id_candidate") or "").strip()
+        if match is not None:
+            base = match.group(1).strip()
+            orientation = match.group(2).upper()
+        else:
+            # Figure/table sidecars can arrive one stage later with the
+            # orientation in ``test_specimen_raw`` or a bare condition token.
+            # Require a core tensile property and a real chart/table source so
+            # ordinary prose statements such as ``Z-direction`` do not become
+            # dense owner coordinates.
+            # Public owner remapping remains limited to immutable dense-table
+            # coordinates.  Chart sidecars retain their established base owner
+            # (and their X/Y/Z specimen coordinate) because the business GT
+            # treats that owner label as canonical; changing the item key here
+            # would trade a protocol improvement for systematic wrong-owner
+            # errors.
+            if not decision_key.startswith("dense-table-cell:"):
+                continue
+            if not is_core_tensile_property_name(
+                fact.data.get("property_name_raw")
+            ):
+                continue
+            orientation = str(
+                fact.data.get("test_specimen_raw")
+                or fact.data.get("test_condition_raw")
+                or ""
+            ).strip().upper()
+            if not re.fullmatch(r"[XYZ](?:\s*(?:[- ]?direction|orientation))?", orientation):
+                continue
+            evidence = "\n".join(_evidence(fact.data.get("source_evidence")))
+            source_kind = str(fact.data.get("data_source") or "").casefold()
+            if source_kind not in {"table", "figure", "chart", "text", "image_digitized"} and not (
+                "<table" in evidence.casefold() or "data_csv:" in evidence.casefold()
+            ):
+                continue
+            base = owner
+            orientation = re.sub(r"(?i)\s*(?:[- ]?direction|orientation)\s*$", "", orientation)
+        # When the source owner is bare (``WAAM``) the orientation is carried
+        # in the property payload, so include it in the internal key.  A bare
+        # owner must not be remapped three times (X/Y/Z) to whichever cell was
+        # visited last.
+        owner_key = _identity_key(owner)
+        if match is None:
+            owner_key = _identity_key(f"{owner} / {orientation}")
+            bare_owner_keys.add(owner_key)
+        base_key = _identity_key(base)
+        owners[owner_key] = (base, orientation)
+        owner_presentations.setdefault(owner_key, owner)
+        sibling_orientations.setdefault(base_key, set()).add(orientation)
+    owners = {
+        key: coordinate
+        for key, coordinate in owners.items()
+        if len(sibling_orientations.get(_identity_key(coordinate[0]), set())) >= 2
+    }
+    if not owners:
+        return list(anchors), list(facts), []
+
+    material_candidates = _dense_material_candidates(anchors, facts)
+    state, state_evidence = _dense_global_tensile_state(source_text)
+    local_states = _dense_source_local_states(
+        source_text, tuple(dict.fromkeys(base for base, _ in owners.values()))
+    )
+    owner_states: dict[str, tuple[str, tuple[str, ...]]] = {
+        owner_key: ((state, state_evidence) if state else local_states.get(_identity_key(base), ("", ())))
+        for owner_key, (base, _orientation) in owners.items()
+    }
+    if len(material_candidates) != 1 or any(
+        not resolved_state for resolved_state, _evidence in owner_states.values()
+    ):
+        issue = MaterializeIssue(
+            code="dense_tensile_owner_context_ambiguous",
+            sample_id_raw="paper",
+            path="source_tables",
+            message=(
+                "Dense tensile cells retained their literal compact owners because "
+                "the common material or globally applied specimen state was not unique."
+            ),
+            evidence=list(state_evidence),
+            expected={
+                "material_candidate_count": 1,
+                "global_tensile_state_count": 1,
+                "owner_reassigned": False,
+            },
+            actual={
+                "material_candidates": sorted(
+                    (row[0] for row in material_candidates.values()),
+                    key=lambda value: (value.casefold(), value),
+                ),
+                "resolved_state": state or None,
+                "source_local_states": {
+                    key: resolved_state or None
+                    for key, (resolved_state, _evidence) in owner_states.items()
+                },
+                "eligible_owners": [
+                    owner_presentations[key] for key in sorted(owners)
+                ],
+                "owner_reassigned": False,
+            },
+            suggested_action=(
+                "Retain the compact process/orientation owner until one material and "
+                "one all-specimen treatment are explicitly source-proven."
+            ),
+        )
+        return list(anchors), list(facts), [issue]
+
+    material, material_evidence = next(iter(material_candidates.values()))
+    remap: dict[str, str] = {}
+    issues: list[MaterializeIssue] = []
+    for owner_key, (base, orientation) in sorted(owners.items()):
+        owner_state, owner_state_evidence = owner_states[owner_key]
+        specimen = re.sub(
+            r"(?i)\s+tensile\s+specimens?$", "", base
+        ).strip()
+        after = (
+            f"{material} / {specimen} tensile specimen [{owner_state}] / {orientation}"
+        )
+        before = owner_presentations[owner_key]
+        remap[owner_key] = after
+        issues.append(
+            MaterializeIssue(
+                code="dense_tensile_owner_context_reconciled",
+                severity="info",
+                sample_id_raw=after,
+                path=f"items.{after}",
+                message=(
+                    "A compact process/orientation table owner was expanded with the "
+                    "one source-proven material and globally applied specimen state."
+                ),
+                evidence=list(
+                    dict.fromkeys([*material_evidence, *owner_state_evidence])
+                ),
+                expected={
+                    "material_candidate_count": 1,
+                    "global_tensile_state_count": 1,
+                    "orientation_preserved": True,
+                    "composition_fact_created": False,
+                },
+                actual={
+                    "before_owner": before,
+                    "after_owner": after,
+                    "material": material,
+                    "state": owner_state,
+                    "orientation": orientation,
+                },
+                suggested_action=(
+                    "Review the cited global treatment only if the table includes an "
+                    "explicitly untreated subgroup."
+                ),
+            )
+        )
+
+    generated_anchors: list[InventoryAnchor] = []
+    for owner_key, (base, orientation) in sorted(owners.items()):
+        if any(
+            _identity_key(anchor.sample_id_raw) == owner_key
+            for anchor in anchors
+        ):
+            continue
+        # Bare-owner chart sidecars need an explicit inventory node so the
+        # identity router does not collapse all X/Y/Z facts back to ``WAAM``.
+        # This creates no scientific fact; it only records the source-proven
+        # owner coordinate required to keep properties separate.
+        if owner_key not in bare_owner_keys:
+            continue
+        owner_state, owner_state_evidence = owner_states[owner_key]
+        generated_anchors.append(
+            InventoryAnchor(
+                sample_id_raw=remap[owner_key],
+                material_name_raw=material,
+                state_raw=owner_state,
+                role="Target",
+                data_nature="Experimental",
+                source_evidence=list(
+                    dict.fromkeys([*material_evidence, *owner_state_evidence])
+                ),
+                confidence=0.99,
+            )
+        )
+
+    updated_anchors = [
+        anchor.model_copy(
+            update={
+                "sample_id_raw": remap[_identity_key(anchor.sample_id_raw)],
+                "state_raw": owner_states[_identity_key(anchor.sample_id_raw)][0],
+                "source_evidence": list(
+                    dict.fromkeys(
+                        [
+                            *anchor.source_evidence,
+                            *owner_states[_identity_key(anchor.sample_id_raw)][1],
+                        ]
+                    )
+                ),
+            }
+        )
+        if _identity_key(anchor.sample_id_raw) in remap
+        else anchor
+        for anchor in anchors
+    ] + generated_anchors
+    updated_facts: list[AxisFact] = []
+    for fact in facts:
+        fact_key = _identity_key(fact.sample_id_raw)
+        if fact_key not in remap:
+            orientation = str(
+                fact.data.get("test_specimen_raw")
+                or fact.data.get("test_condition_raw")
+                or ""
+            ).strip().upper()
+            orientation = re.sub(
+                r"(?i)\s*(?:[- ]?direction|orientation)\s*$", "", orientation
+            )
+            candidate_key = _identity_key(f"{fact.sample_id_raw} / {orientation}")
+            fact_key = candidate_key if candidate_key in remap else fact_key
+        updated_facts.append(
+            fact.model_copy(update={"sample_id_raw": remap[fact_key]})
+            if fact_key in remap
+            else fact
+        )
+    return updated_anchors, updated_facts, issues
 
 
 def _promote_dense_tensile_tables_v203(
@@ -14835,13 +19221,17 @@ def _promote_dense_tensile_tables_v203(
                 peer
                 for peer in decision.cells
                 if (
-                    core_tensile_subtype(peer.property_name),
-                    normalize_source_alias(peer.value_raw),
+                    _dense_mechanical_property_key(peer.property_name),
+                    normalize_source_alias(
+                        normalize_evidence_text(peer.value_raw)
+                    ),
                     normalize_source_alias(peer.unit_raw),
                 )
                 == (
-                    core_tensile_subtype(cell.property_name),
-                    normalize_source_alias(cell.value_raw),
+                    _dense_mechanical_property_key(cell.property_name),
+                    normalize_source_alias(
+                        normalize_evidence_text(cell.value_raw)
+                    ),
                     normalize_source_alias(cell.unit_raw),
                 )
             ]
@@ -14859,22 +19249,48 @@ def _promote_dense_tensile_tables_v203(
                 None,
             )
             if existing is not None:
+                evidence = list(
+                    dict.fromkeys([*existing.source_evidence, *cell.source_rows])
+                )
+                data = deepcopy(existing.data)
+                before_condition = str(data.get("test_condition_raw") or "").strip()
+                after_condition = _dense_condition_without_orientation(
+                    before_condition, cell.orientation
+                )
+                data["property_id_candidate"] = cell.decision_key
+                data["raw_note"] = cell.owner_literal
+                if not str(data.get("test_specimen_raw") or "").strip():
+                    data["test_specimen_raw"] = cell.orientation
+                if after_condition != before_condition:
+                    data["test_condition_raw"] = after_condition
+                data["source_evidence"] = list(
+                    dict.fromkeys(
+                        [*_evidence(data.get("source_evidence")), *cell.source_rows]
+                    )
+                )
+                enriched = existing.model_copy(
+                    update={"data": data, "source_evidence": evidence}
+                )
+                fact_rows = [
+                    enriched if fact is existing else fact for fact in fact_rows
+                ]
                 issues.append(
                     MaterializeIssue(
-                        code="dense_tensile_table_cell_rejected",
+                        code="dense_tensile_table_cell_recovered",
                         severity="info",
                         sample_id_raw=cell.owner,
                         path=f"items.{cell.owner}.Properties",
                         message=(
-                            "The dense table cell was not completed because an "
-                            "existing Property already owns the same source coordinate."
+                            "An existing Property already owned the dense table "
+                            "cell and was enriched with its immutable source coordinate."
                         ),
                         evidence=list(cell.source_rows),
                         expected={"one_coordinate_one_fact": True},
                         actual={
-                            "reason": "existing_coordinate_owned",
+                            "reason": "existing_coordinate_enriched",
                             "cell": cell.to_dict(),
-                            "existing_fact": existing.model_dump(),
+                            "before": existing.model_dump(),
+                            "after": enriched.model_dump(),
                         },
                         suggested_action=(
                             "Keep the existing grounded fact unless its coordinate "
@@ -14882,6 +19298,37 @@ def _promote_dense_tensile_tables_v203(
                         ),
                     )
                 )
+                if after_condition != before_condition:
+                    issues.append(
+                        MaterializeIssue(
+                            code="dense_tensile_orientation_condition_reconciled",
+                            severity="info",
+                            sample_id_raw=cell.owner,
+                            path=f"items.{cell.owner}.Properties",
+                            message=(
+                                "A source-proven dense-table orientation was kept as "
+                                "the specimen coordinate and removed from the test "
+                                "protocol condition."
+                            ),
+                            evidence=list(cell.source_rows),
+                            expected={
+                                "orientation_field": "test_specimen_raw",
+                                "test_condition_contains_orientation": False,
+                            },
+                            actual={
+                                "before_condition": before_condition,
+                                "after_condition": after_condition,
+                                "test_specimen_raw": cell.orientation,
+                                "fact_before": existing.model_dump(),
+                                "fact_after": enriched.model_dump(),
+                            },
+                            suggested_action=(
+                                "Keep the orientation in the specimen coordinate; "
+                                "restore it to the protocol only if the source defines "
+                                "a distinct loading orientation."
+                            ),
+                        )
+                    )
                 continue
             compatible_existing = (
                 [
@@ -14925,6 +19372,10 @@ def _promote_dense_tensile_tables_v203(
             existing_condition = existing_data.get("test_condition_raw") or ""
             if _dense_condition_is_owner_state(existing_condition, cell.owner):
                 existing_condition = ""
+            before_condition = str(existing_condition).strip()
+            existing_condition = _dense_condition_without_orientation(
+                before_condition, cell.orientation
+            )
             fact = PropertyFact(
                 sample_id_raw=cell.owner,
                 fact_type="property",
@@ -14992,6 +19443,36 @@ def _promote_dense_tensile_tables_v203(
                     ),
                 )
             )
+            if existing_condition != before_condition:
+                issues.append(
+                    MaterializeIssue(
+                        code="dense_tensile_orientation_condition_reconciled",
+                        severity="info",
+                        sample_id_raw=cell.owner,
+                        path=f"items.{cell.owner}.Properties",
+                        message=(
+                            "A source-proven dense-table orientation was kept as the "
+                            "specimen coordinate and removed from the test protocol "
+                            "condition."
+                        ),
+                        evidence=list(cell.source_rows),
+                        expected={
+                            "orientation_field": "test_specimen_raw",
+                            "test_condition_contains_orientation": False,
+                        },
+                        actual={
+                            "before_condition": before_condition,
+                            "after_condition": existing_condition,
+                            "test_specimen_raw": cell.orientation,
+                            "fact_after": fact.model_dump(),
+                        },
+                        suggested_action=(
+                            "Keep the orientation in the specimen coordinate; restore "
+                            "it to the protocol only if the source defines a distinct "
+                            "loading orientation."
+                        ),
+                    )
+                )
     return fact_rows, issues
 
 
@@ -15239,6 +19720,515 @@ def _gate_v202_source_coordinate_facts(
     ], issues
 
 
+def _rebind_logical_table_property_coordinates(
+    index: _IdentityIndex,
+    facts: Sequence[AxisFact],
+    *,
+    source_text: str = "",
+) -> tuple[list[AxisFact], list[MaterializeIssue]]:
+    """Rebind existing Properties to source-proven table state coordinates.
+
+    This pass is intentionally a *rebind*, not a recovery pass: it never
+    creates an item or a scientific value.  A complete logical-table match
+    proves the value cell and the owner column/row; a remaining header token
+    may then select one already indexed state owner.  When that state is not in
+    the inventory, the fact is retained and the literal token is copied only to
+    ``test_condition_raw`` so the public fact count and evidence stay intact.
+    """
+
+    if (
+        not source_text
+        or not owner_state_condition_v202_enabled()
+        or not source_coordinate_precision_v202_enabled()
+    ):
+        return list(facts), []
+
+    updated: list[AxisFact] = []
+    issues: list[MaterializeIssue] = []
+    for fact in facts:
+        if not isinstance(fact, PropertyFact):
+            updated.append(fact)
+            continue
+
+        # A state-qualified owner is still allowed to resolve against its
+        # unqualified table owner (``material [heat treated]`` -> ``material``).
+        owner_labels = [str(fact.sample_id_raw or "").strip()]
+        parent = _existing_identity_parent(owner_labels[0])
+        if parent:
+            for canonical, rows in index.anchors.items():
+                if canonical == parent:
+                    owner_labels.extend(
+                        [str(row.sample_id_raw or "").strip() for row in rows]
+                    )
+        decisions = []
+        seen_decisions: set[str] = set()
+        for label in dict.fromkeys(owner_labels):
+            candidate = fact.model_copy(update={"sample_id_raw": label})
+            decision = resolve_structured_table_record(candidate, source_text)
+            if decision.status != "matched" or decision.decision_key in seen_decisions:
+                continue
+            seen_decisions.add(decision.decision_key)
+            decisions.append(decision)
+        if len(decisions) != 1:
+            updated.append(fact)
+            continue
+        decision = decisions[0]
+        header_path = tuple(
+            str(value or "").strip()
+            for value in decision.column_header_path
+            if str(value or "").strip()
+        )
+        owner_path = tuple(
+            str(value or "").strip()
+            for value in decision.owner_path
+            if str(value or "").strip()
+        )
+        if not header_path or not owner_path:
+            updated.append(fact)
+            continue
+
+        owner_keys = {normalize_source_alias(value) for value in owner_path}
+        property_header_keys = {
+            normalize_source_alias(value)
+            for value in decision.header_path
+            if str(value or "").strip()
+        }
+        owner_variant_token = None
+        if owner_path and normalize_source_alias(owner_path[-1]) != normalize_source_alias(
+            fact.sample_id_raw
+        ):
+            owner_cell = decision.owner_cell or {}
+            owner_variant_token = _owner_cell_condition_suffix(
+                fact.sample_id_raw,
+                owner_cell.get("raw_text") or owner_cell.get("text") or owner_path[-1],
+                fact.data.get("test_condition_raw")
+                or fact.data.get("condition_label_raw")
+                or "",
+            )
+        state_tokens = tuple(
+            dict.fromkeys(
+                value
+                for value in header_path
+                if normalize_source_alias(value) not in owner_keys
+                and normalize_source_alias(value) not in property_header_keys
+                and _state_descriptor(value) is not None
+            )
+        )
+        if owner_variant_token and _state_descriptor(owner_variant_token) is not None:
+            state_tokens = tuple(dict.fromkeys((*state_tokens, owner_variant_token)))
+        # A normal single-level table has no preparation coordinate in the
+        # header or explicit owner-row suffix.  Leave it to the existing
+        # reconciliation paths.
+        if len(state_tokens) == 0:
+            updated.append(fact)
+            continue
+        if len(state_tokens) != 1:
+            updated.append(fact)
+            issues.append(
+                MaterializeIssue(
+                    code="property_table_coordinate_state_ambiguous",
+                    sample_id_raw=fact.sample_id_raw,
+                    path=f"items.{fact.sample_id_raw}.Extracted_Data.Properties",
+                    message=(
+                        "A logical table value had multiple independent state "
+                        "header tokens, so owner/condition rebinding was skipped."
+                    ),
+                    evidence=list(fact.source_evidence),
+                    expected={"state_header_tokens": 1, "fact_preserved": True},
+                    actual={
+                        "state_header_tokens": list(state_tokens),
+                        "decision": decision.to_dict(),
+                        "fact": fact.model_dump(),
+                    },
+                    suggested_action=(
+                        "Review the table's multi-level headers before assigning a "
+                        "formal preparation state."
+                    ),
+                )
+            )
+            continue
+
+        owner_literal = owner_path[-1]
+        owner_targets = set(index.resolve_exact(owner_literal))
+        # If a presentation-qualified fact was matched through its parent,
+        # use its declared owner as a second source-backed route.  We still
+        # fail closed when more than one base remains possible.
+        if not owner_targets:
+            owner_targets.update(_fact_declared_targets(index, fact))
+        base_targets = {
+            index.state_family_base.get(target, target) for target in owner_targets
+        }
+        if len(base_targets) != 1:
+            updated.append(fact)
+            issues.append(
+                MaterializeIssue(
+                    code="property_table_coordinate_owner_ambiguous",
+                    sample_id_raw=fact.sample_id_raw,
+                    path=f"items.{fact.sample_id_raw}.Extracted_Data.Properties",
+                    message=(
+                        "The table owner header resolved to multiple material "
+                        "families, so the existing Property was preserved."
+                    ),
+                    evidence=list(fact.source_evidence),
+                    expected={"base_owner_count": 1, "fact_preserved": True},
+                    actual={
+                        "owner_literal": owner_literal,
+                        "base_targets": sorted(base_targets),
+                        "decision": decision.to_dict(),
+                        "fact": fact.model_dump(),
+                    },
+                    suggested_action=(
+                        "Review the inventory aliases before assigning a table "
+                        "column to one material family."
+                    ),
+                )
+            )
+            continue
+
+        base = next(iter(base_targets))
+        state_token = state_tokens[0]
+        state_key = _table_state_match_key(state_token)
+        state_descriptor = _state_descriptor(state_token)
+        state_targets: set[str] = set()
+        if state_key is not None:
+            for canonical, rows in index.anchors.items():
+                anchor_base = index.state_family_base.get(canonical)
+                if anchor_base is None:
+                    raw_anchor = rows[0].sample_id_raw if rows else ""
+                    bracket_parent = re.match(
+                        r"(?s)^(.+?)\s*\[[^\[\]]+\]\s*$",
+                        str(raw_anchor or "").strip(),
+                    )
+                    anchor_base = (
+                        _identity_key(bracket_parent.group(1))
+                        if bracket_parent is not None
+                        else _existing_identity_parent(raw_anchor)
+                    )
+                if canonical == base or anchor_base != base:
+                    continue
+                if any(
+                    _table_state_match_key(anchor.state_raw) == state_key
+                    or (
+                        state_descriptor is not None
+                        and state_descriptor[1]
+                        and (
+                            anchor_descriptor := _state_descriptor(anchor.state_raw)
+                        )
+                        is not None
+                        and set(state_descriptor[1]).issubset(
+                            set(anchor_descriptor[1])
+                        )
+                        and not anchor_descriptor[0].startswith("raw:")
+                    )
+                    for anchor in rows
+                ):
+                    state_targets.add(canonical)
+
+        before = fact.model_dump()
+        data = deepcopy(fact.data)
+        after_owner = fact.sample_id_raw
+        after_condition = str(data.get("test_condition_raw") or "").strip()
+        if len(state_targets) == 1:
+            after_owner = index.display_label(next(iter(state_targets)))
+        elif len(state_targets) > 1:
+            updated.append(fact)
+            issues.append(
+                MaterializeIssue(
+                    code="property_table_coordinate_state_ambiguous",
+                    sample_id_raw=fact.sample_id_raw,
+                    path=f"items.{fact.sample_id_raw}.Extracted_Data.Properties",
+                    message=(
+                        "The table state header matched multiple existing state "
+                        "owners, so rebinding was skipped."
+                    ),
+                    evidence=list(fact.source_evidence),
+                    expected={"matching_state_owner_count": 1, "fact_preserved": True},
+                    actual={
+                        "state_token": state_token,
+                        "matching_state_owners": [
+                            index.display_label(target) for target in sorted(state_targets)
+                        ],
+                        "decision": decision.to_dict(),
+                        "fact": fact.model_dump(),
+                    },
+                    suggested_action=(
+                        "Review duplicate state anchors before assigning the table "
+                        "cell to one owner."
+                    ),
+                )
+            )
+            continue
+        else:
+            # No existing state anchor is available.  Preserve the fact under
+            # its current owner, but retain the literal coordinate in the
+            # condition if the provider omitted it.  This avoids inventing a
+            # new item while preventing the coordinate from being lost.
+            state_already_in_condition = normalize_source_alias(
+                state_token
+            ) in normalize_source_alias(after_condition)
+            token_descriptor = _state_descriptor(state_token)
+            condition_descriptor = _state_descriptor(after_condition)
+            if (
+                not state_already_in_condition
+                and token_descriptor is not None
+                and condition_descriptor is not None
+                and token_descriptor[1]
+                and set(token_descriptor[1]).issubset(
+                    set(condition_descriptor[1])
+                )
+            ):
+                state_already_in_condition = True
+            if not state_already_in_condition:
+                after_condition = (
+                    f"{after_condition}; {state_token}" if after_condition else state_token
+                )
+                data["test_condition_raw"] = after_condition
+
+        changed = after_owner != fact.sample_id_raw or data != fact.data
+        enriched = fact.model_copy(
+            update={"sample_id_raw": after_owner, "data": data}
+        ) if changed else fact
+        updated.append(enriched)
+        if changed:
+            issues.append(
+                MaterializeIssue(
+                    code=(
+                        "property_table_owner_variant_rebound"
+                        if owner_variant_token and after_owner != fact.sample_id_raw
+                        else "property_table_coordinate_rebound"
+                    ),
+                    severity="info",
+                    sample_id_raw=after_owner,
+                    path=f"items.{after_owner}.Extracted_Data.Properties",
+                    message=(
+                        "An existing Property was rebound to the unique logical "
+                        "table owner/state coordinate without changing its value."
+                    ),
+                    evidence=list(fact.source_evidence),
+                    expected={
+                        "value_unit_evidence_unchanged": True,
+                        "existing_inventory_owner_only": True,
+                    },
+                    actual={
+                        "before": before,
+                        "after": enriched.model_dump(),
+                        "decision": decision.to_dict(),
+                        "owner_literal": owner_literal,
+                        "state_token": state_token,
+                        "owner_variant_token": owner_variant_token,
+                        "state_owner_match_count": len(state_targets),
+                    },
+                    suggested_action=(
+                        "Review the coordinate only if the table header is not the "
+                        "governing state for this value cell."
+                    ),
+                )
+            )
+    return updated, issues
+
+
+_COMPACT_TABLE_TEST_COORDINATE = re.compile(
+    r"(?i)^(?:rt|room\s+temperature|ambient(?:\s+temperature)?)$"
+)
+
+
+def _promote_compact_table_test_coordinate_owners(
+    anchors: Sequence[InventoryAnchor],
+    facts: Sequence[AxisFact],
+    *,
+    source_text: str = "",
+) -> tuple[list[InventoryAnchor], list[AxisFact], list[MaterializeIssue]]:
+    """Preserve explicit non-numeric table owner coordinates such as ``AF-RT``.
+
+    Alpha25 providers commonly emit the base inventory owner (``AF``/``HT``)
+    while the source table row names the tested specimen as ``AF-RT`` or
+    ``HT-RT``.  Losing that row coordinate makes an otherwise correct tensile
+    value look like an unqualified claim and prevents strict owner matching.
+    This pass is intentionally narrower than generic alias recovery:
+
+    * only numeric core-tensile Properties are eligible;
+    * the logical table resolver must prove one owner/property/value/unit cell;
+    * the owner-cell suffix must be an explicit room-temperature token; and
+    * the base owner must resolve to exactly one existing Target anchor.
+
+    No new scientific value is created.  The generated anchor is merely the
+    source-backed sample coordinate, and the original ``RT`` condition is
+    canonicalized to ``room temperature`` without changing its meaning.
+    """
+
+    if (
+        not source_text
+        or not owner_state_condition_v202_enabled()
+        or not source_coordinate_precision_v202_enabled()
+    ):
+        return list(anchors), list(facts), []
+
+    index = _build_identity_index(anchors, facts)
+    anchor_rows = list(anchors)
+    fact_rows = list(facts)
+    existing_keys = {
+        _identity_key(anchor.sample_id_raw)
+        for anchor in anchor_rows
+        if _identity_key(anchor.sample_id_raw)
+    }
+    variants: dict[tuple[str, str], tuple[str, InventoryAnchor, tuple[str, ...]]] = {}
+    issues: list[MaterializeIssue] = []
+
+    for position, fact in enumerate(fact_rows):
+        if not _numeric_core_tensile_fact(fact):
+            continue
+        owner = str(fact.sample_id_raw or "").strip()
+        if not owner:
+            continue
+        targets = index.resolve_exact(owner)
+        if len(targets) != 1:
+            continue
+        target = next(iter(targets))
+        target_anchors = [
+            anchor
+            for anchor in index.anchors.get(target, ())
+            if str(anchor.role or "").strip().casefold() == "target"
+        ]
+        if not target_anchors:
+            continue
+        # The same base owner is often emitted by several chunks.  Multiple
+        # anchors are safe here only when they agree on the preparation-state
+        # category; otherwise an RT row could be attached to the wrong physical
+        # state.  Choose the most explicit/high-confidence representative.
+        state_descriptors = [
+            _state_descriptor(anchor.state_raw) for anchor in target_anchors
+        ]
+        if any(descriptor is None for descriptor in state_descriptors):
+            continue
+        categories = {descriptor[0] for descriptor in state_descriptors if descriptor}
+        if len(categories) != 1:
+            # Short inventory aliases such as ``AF`` may be emitted alongside
+            # the explicit ``as-fabricated`` state.  Treat that raw alias as
+            # the same state only when it is literally the base owner label;
+            # any unrelated raw state keeps the fail-closed behavior.
+            explicit_categories = {
+                category for category in categories if not category.startswith("raw:")
+            }
+            raw_aliases_are_base = all(
+                not descriptor[0].startswith("raw:")
+                or normalize_source_alias(anchor.state_raw) == normalize_source_alias(owner)
+                for anchor, descriptor in zip(target_anchors, state_descriptors)
+            )
+            if len(explicit_categories) != 1 or not raw_aliases_are_base:
+                continue
+        target_anchors = [
+            max(
+                target_anchors,
+                key=lambda anchor: (
+                    not str(anchor.state_raw or "").strip().casefold().startswith("raw:"),
+                    len(str(anchor.state_raw or "")),
+                    float(anchor.confidence),
+                    str(anchor.state_raw or "").casefold(),
+                ),
+            )
+        ]
+        decision = resolve_structured_table_record(fact, source_text)
+        if decision.status != "matched" or len(decision.owner_path) != 1:
+            continue
+        owner_cell = decision.owner_cell or {}
+        owner_literal = str(
+            owner_cell.get("raw_text")
+            or owner_cell.get("text")
+            or decision.owner_path[-1]
+            or ""
+        ).strip()
+        suffix = _owner_cell_condition_suffix(
+            owner,
+            owner_literal,
+            fact.data.get("test_condition_raw")
+            or fact.data.get("condition_label_raw")
+            or "",
+        )
+        if not suffix or not _COMPACT_TABLE_TEST_COORDINATE.fullmatch(suffix.strip()):
+            continue
+        variant_key = (target, normalize_source_alias(suffix))
+        previous = variants.get(variant_key)
+        evidence = tuple(
+            dict.fromkeys(
+                [
+                    *fact.source_evidence,
+                    *decision.source_rows,
+                ]
+            )
+        )
+        if previous is not None and previous[0] != owner_literal:
+            # Two literal labels for the same base/suffix are an unresolved OCR
+            # conflict; leave all facts untouched rather than choosing one.
+            variants.pop(variant_key, None)
+            continue
+        parent = target_anchors[0]
+        variants[variant_key] = (owner_literal, parent, evidence)
+        data = deepcopy(fact.data)
+        before_condition = str(data.get("test_condition_raw") or "").strip()
+        normalized_condition = re.sub(
+            r"(?i)(?<![A-Za-z0-9])rt(?![A-Za-z0-9])",
+            "room temperature",
+            before_condition,
+        )
+        changed = owner_literal != owner or normalized_condition != before_condition
+        if changed:
+            if normalized_condition != before_condition:
+                data["test_condition_raw"] = normalized_condition
+            fact_rows[position] = fact.model_copy(
+                update={"sample_id_raw": owner_literal, "data": data}
+            )
+            issues.append(
+                MaterializeIssue(
+                    code="property_table_compact_test_owner_recovered",
+                    severity="info",
+                    sample_id_raw=owner_literal,
+                    path=f"items.{owner_literal}.Extracted_Data.Properties",
+                    message=(
+                        "A core-tensile Property was rebound to the explicit "
+                        "source table owner/test coordinate (for example AF-RT)."
+                    ),
+                    evidence=list(evidence),
+                    expected={
+                        "owner": "literal source table owner plus RT coordinate",
+                        "value_unit_unchanged": True,
+                        "condition_semantics_unchanged": True,
+                    },
+                    actual={
+                        "before": fact.model_dump(),
+                        "after": fact_rows[position].model_dump(),
+                        "owner_base": owner,
+                        "owner_literal": owner_literal,
+                        "suffix": suffix,
+                        "decision": decision.to_dict(),
+                    },
+                    suggested_action=(
+                        "Review only if the source table uses RT as a non-test "
+                        "label rather than room temperature."
+                    ),
+                )
+            )
+
+    # Add one anchor per proven variant.  Anchors are identity coordinates only;
+    # they do not add composition or property facts by themselves.
+    for owner_literal, parent, evidence in variants.values():
+        key = _identity_key(owner_literal)
+        if not key or key in existing_keys:
+            continue
+        anchor_rows.append(
+            InventoryAnchor(
+                sample_id_raw=owner_literal,
+                material_name_raw=parent.material_name_raw,
+                state_raw=parent.state_raw,
+                role=parent.role,
+                data_nature=parent.data_nature,
+                source_evidence=list(evidence),
+                confidence=max(0.0, min(1.0, float(parent.confidence))),
+            )
+        )
+        existing_keys.add(key)
+    return anchor_rows, fact_rows, issues
+
+
 _QUALITATIVE_TENSILE_COMPARISON = re.compile(
     r"(?ix)\b(?:higher|lower|stronger|weaker|superior|inferior|similar|"
     r"comparable|approximately\s+equal|nearly\s+the\s+same)\b"
@@ -15329,6 +20319,17 @@ def materialize_candidate(
     routing = dict(paper_routing or {})
     anchor_rows = list(anchors)
     input_fact_rows = list(facts)
+    # Remove model-invented bracket qualifiers (e.g. ``A [LPBF]``) before
+    # owner/state reconciliation.  Keeping this identity cleanup at the
+    # materialization boundary makes all downstream gates and the final.json
+    # schema observe one canonical source-named owner.
+    anchor_rows, input_fact_rows, synthetic_owner_issues = (
+        _normalize_synthetic_bracket_owners(
+            anchor_rows,
+            input_fact_rows,
+            source_text=source_text or "",
+        )
+    )
     input_fact_rows, dense_tensile_table_issues = (
         _promote_dense_tensile_tables_v203(
             anchor_rows,
@@ -15336,8 +20337,21 @@ def materialize_candidate(
             source_text=source_text or "",
         )
     )
+    anchor_rows, input_fact_rows, dense_tensile_owner_context_issues = (
+        _enrich_dense_tensile_owner_context(
+            anchor_rows,
+            input_fact_rows,
+            source_text=source_text or "",
+        )
+    )
     input_fact_rows, input_source_coordinate_issues = (
         _gate_v202_source_coordinate_facts(anchor_rows, input_fact_rows)
+    )
+    # Dense-table recovery may create a Property that did not exist in the raw
+    # model response, so owner completeness must be inventoried after that
+    # recovery step.  The audit still precedes every semantic reconciliation.
+    incomplete_property_owners, incomplete_property_owner_issues = (
+        _incomplete_property_owner_audit(input_fact_rows)
     )
     quality_mode = _claim_quality_mode()
     quality_gate = (
@@ -15357,8 +20371,25 @@ def materialize_candidate(
             source_dir=source_dir,
         )
     )
+    # Sidecar/chart recovery can introduce the same dense orientation facts
+    # after the initial table pass.  Re-run the source-local owner/state gate
+    # idempotently so those facts receive the identical audit treatment.
+    (
+        anchor_rows,
+        fact_rows,
+        dense_sidecar_owner_context_issues,
+    ) = _enrich_dense_tensile_owner_context(
+        anchor_rows,
+        fact_rows,
+        source_text=source_text or "",
+    )
     fact_rows, source_coordinate_issues = _gate_v202_source_coordinate_facts(
         anchor_rows, fact_rows
+    )
+    fact_rows, structure_table_coordinate_issues = (
+        _recover_structure_table_feature_coordinates(
+            fact_rows, source_text or ""
+        )
     )
     source_coordinate_issues = [
         *input_source_coordinate_issues,
@@ -15369,6 +20400,12 @@ def materialize_candidate(
     )
     fact_rows, process_environment_issues = (
         _recover_process_environment_conditions(fact_rows, source_text)
+    )
+    fact_rows, preparation_condition_issues = (
+        _isolate_preparation_only_tensile_conditions(
+            fact_rows,
+            source_text=source_text or "",
+        )
     )
     anchor_rows, fact_rows, reference_owner_issues = (
         _recover_cited_nominal_composition_owners(anchor_rows, fact_rows)
@@ -15409,11 +20446,15 @@ def materialize_candidate(
     )
     issues = _chart_quarantine_issues_from_text(source_text)
     issues.extend(dense_tensile_table_issues)
+    issues.extend(dense_tensile_owner_context_issues)
+    issues.extend(dense_sidecar_owner_context_issues)
     issues.extend(discrete_sidecar_issues)
     issues.extend(source_coordinate_issues)
+    issues.extend(structure_table_coordinate_issues)
     issues.extend(semantic_projection_issues)
     issues.extend(literal_tensile_unit_issues)
     issues.extend(process_environment_issues)
+    issues.extend(preparation_condition_issues)
     issues.extend(reference_owner_issues)
     issues.extend(reference_tensile_owner_issues)
     issues.extend(reference_property_owner_issues)
@@ -15423,6 +20464,8 @@ def materialize_candidate(
     issues.extend(microanalysis_owner_issues)
     issues.extend(numeric_microanalysis_owner_issues)
     issues.extend(table_envelope_microanalysis_owner_issues)
+    issues.extend(synthetic_owner_issues)
+    issues.extend(incomplete_property_owner_issues)
     property_context_index = PropertyContextIndex(source_text)
     tensile_protocol_ledger = TensileProtocolLedger(source_text)
     if quality_gate is not None:
@@ -15474,7 +20517,55 @@ def materialize_candidate(
         source_text=source_text or "",
     )
     issues.extend(table_column_anchor_issues)
+    anchor_rows, source_identity_redirects, source_identity_issues = (
+        _quarantine_unsupported_formula_identity_projections(
+            anchor_rows,
+            fact_rows,
+            source_text=source_text or "",
+        )
+    )
+    issues.extend(source_identity_issues)
+    (
+        anchor_rows,
+        fact_rows,
+        compact_table_test_owner_issues,
+    ) = _promote_compact_table_test_coordinate_owners(
+        anchor_rows,
+        fact_rows,
+        source_text=source_text or "",
+    )
+    issues.extend(compact_table_test_owner_issues)
     identity_index = _build_identity_index(anchor_rows, fact_rows)
+    _apply_identity_redirects(identity_index, source_identity_redirects)
+    # Combined chunks can preserve a complete processing table while dropping
+    # its owner. Recover that owner from the table's own caption before routing
+    # facts; ambiguous/multi-owner captions remain unresolved and are audited.
+    fact_rows, process_table_owner_issues = _recover_unowned_process_table_facts(
+        identity_index, fact_rows
+    )
+    issues.extend(process_table_owner_issues)
+    fact_rows, logical_table_coordinate_issues = (
+        _rebind_logical_table_property_coordinates(
+            identity_index,
+            fact_rows,
+            source_text=source_text or "",
+        )
+    )
+    issues.extend(logical_table_coordinate_issues)
+    reference_verification_index = _build_identity_index(
+        anchor_rows,
+        fact_rows,
+        split_citation_reference_states=True,
+    )
+    _apply_identity_redirects(reference_verification_index, source_identity_redirects)
+    fact_rows, reference_assertion_state_issues = (
+        _recover_unique_declared_reference_assertion_owners(
+            reference_verification_index,
+            fact_rows,
+            destination_index=identity_index,
+        )
+    )
+    issues.extend(reference_assertion_state_issues)
     fact_rows, table_column_issues = _reconcile_table_column_facts(
         identity_index,
         fact_rows,
@@ -15498,9 +20589,15 @@ def materialize_candidate(
     )
     issues.extend(numeric_tensile_context_issues)
     fact_rows, shared_owner_projection_issues = (
-        _quarantine_shared_owner_projections(identity_index, fact_rows)
+        _quarantine_shared_owner_projections(
+            identity_index, fact_rows, source_text=source_text or ""
+        )
     )
     issues.extend(shared_owner_projection_issues)
+    fact_rows, precision_first_owner_issues = _precision_first_owner_dedup(
+        identity_index, fact_rows
+    )
+    issues.extend(precision_first_owner_issues)
     fact_rows, tensile_average_orientation_issues = (
         _quarantine_unoriented_tensile_averages(
             identity_index,
@@ -15525,6 +20622,18 @@ def materialize_candidate(
         )
     )
     issues.extend(reference_owner_entity_issues)
+    fact_rows, inventory_state_property_summary_issues = (
+        _recover_inventory_state_linked_property_summary_owners(
+            identity_index, fact_rows, source_text or ""
+        )
+    )
+    issues.extend(inventory_state_property_summary_issues)
+    fact_rows, inventory_state_tensile_summary_issues = (
+        _deduplicate_inventory_state_linked_tensile_summaries(
+            identity_index, fact_rows
+        )
+    )
+    issues.extend(inventory_state_tensile_summary_issues)
     fact_rows, tensile_precision_issues = _deduplicate_tensile_precision_evidence(
         identity_index, fact_rows, source_text or ""
     )
@@ -15549,6 +20658,24 @@ def materialize_candidate(
         )
     )
     issues.extend(same_owner_bundle_issues)
+    # Owner-routing/deduplication can reintroduce a bare chart owner after the
+    # early sidecar pass.  Apply the source-local dense coordinate one final
+    # time immediately before grouping and rebuild the identity index so the
+    # remapped owner is the public item key.
+    anchor_rows, fact_rows, late_dense_owner_context_issues = (
+        _enrich_dense_tensile_owner_context(
+            anchor_rows,
+            fact_rows,
+            source_text=source_text or "",
+        )
+    )
+    issues.extend(late_dense_owner_context_issues)
+    if any(
+        issue.code == "dense_tensile_owner_context_reconciled"
+        for issue in late_dense_owner_context_issues
+    ):
+        identity_index = _build_identity_index(anchor_rows, fact_rows)
+        _apply_identity_redirects(identity_index, source_identity_redirects)
     # A short material descriptor is often repeated in several chunks while a
     # more specific sample code is emitted in another chunk.  When the generic
     # row is semantically identical to an already primary-owned fact, routing it
@@ -15601,6 +20728,103 @@ def materialize_candidate(
                 )
             )
             continue
+        ungrounded_metric_state_targets = tuple(
+            target
+            for target in targets
+            if _metric_state_owner_requires_literal_coordinate(
+                identity_index, target
+            )
+            and not _fact_has_literal_metric_state_coordinate(
+                identity_index, fact, target
+            )
+        )
+        if ungrounded_metric_state_targets:
+            retained_targets = tuple(
+                target
+                for target in targets
+                if target not in ungrounded_metric_state_targets
+            )
+            issues.append(
+                MaterializeIssue(
+                    code="metric_state_owner_without_literal_coordinate_quarantined",
+                    sample_id_raw=str(fact.sample_id_raw or ""),
+                    path=f"items.{fact.sample_id_raw}.Extracted_Data",
+                    message=(
+                        "A fact routed to a measurement-shaped material state was "
+                        "isolated because its own evidence did not name that literal "
+                        "state coordinate."
+                    ),
+                    evidence=list(fact.source_evidence),
+                    expected={
+                        "owner": "one literal numeric preparation-state coordinate",
+                        "cross_chunk_state_projection": False,
+                    },
+                    actual={
+                        "fact": fact.model_dump(),
+                        "quarantined_targets": [
+                            identity_index.display_label(target)
+                            for target in ungrounded_metric_state_targets
+                        ],
+                        "retained_targets": [
+                            identity_index.display_label(target)
+                            for target in retained_targets
+                        ],
+                    },
+                    suggested_action=(
+                        "Restore only when the fact evidence explicitly names the "
+                        "numeric preparation-state owner or carries its table header."
+                    ),
+                )
+            )
+            if not retained_targets:
+                continue
+            targets = retained_targets
+        ungrounded_state_targets = tuple(
+            target
+            for target in targets
+            if identity_index.state_family_base.get(target, target) != target
+            and not _fact_has_literal_state_owner_coordinate(identity_index, fact, target)
+        )
+        if ungrounded_state_targets:
+            retained_targets = tuple(
+                target for target in targets if target not in ungrounded_state_targets
+            )
+            issues.append(
+                MaterializeIssue(
+                    code="state_owner_without_literal_coordinate_quarantined",
+                    sample_id_raw=str(fact.sample_id_raw or ""),
+                    path=f"items.{fact.sample_id_raw}.Extracted_Data",
+                    message=(
+                        "A fact was routed to a state-qualified owner without a "
+                        "literal state/owner coordinate in its own evidence; the "
+                        "state projection was isolated."
+                    ),
+                    evidence=list(fact.source_evidence),
+                    expected={
+                        "state_owner": "one literal fact-local state coordinate",
+                        "cross_chunk_state_projection": False,
+                        "audit_preserved": True,
+                    },
+                    actual={
+                        "fact": fact.model_dump(),
+                        "quarantined_targets": [
+                            identity_index.display_label(target)
+                            for target in ungrounded_state_targets
+                        ],
+                        "retained_targets": [
+                            identity_index.display_label(target)
+                            for target in retained_targets
+                        ],
+                    },
+                    suggested_action=(
+                        "Restore only when the source quote names the exact "
+                        "preparation state or carries a complete table coordinate."
+                    ),
+                )
+            )
+            if not retained_targets:
+                continue
+            targets = retained_targets
         explicit_evidence_targets = _fact_explicit_evidence_targets(
             identity_index, fact
         )
@@ -16041,6 +21265,10 @@ def materialize_candidate(
             )
 
         stages = _deduplicate(grouped_facts.get("process_stage", []))
+        stages, process_stage_dedup_issues = _deduplicate_process_stages(
+            stages, sample_id=sample_id
+        )
+        issues.extend(process_stage_dedup_issues)
         stage_id_map: dict[str, str] = {}
         for stage_index, stage in enumerate(stages, start=1):
             old_id = str(stage.get("candidate_stage_id") or "")
@@ -16056,6 +21284,40 @@ def materialize_candidate(
             stage["parameters_raw"] = _sanitize_parameters(
                 stage.get("parameters_raw"), _evidence(stage.get("source_evidence"))
             )
+            recovered_parameters, recovery_rows = _recover_processing_table_parameters(
+                stage, source_text=source_text
+            )
+            if recovery_rows:
+                stage["parameters_raw"] = _sanitize_parameters(
+                    recovered_parameters, _evidence(stage.get("source_evidence"))
+                )
+                issues.append(
+                    MaterializeIssue(
+                        code="process_table_parameters_recovered",
+                        sample_id_raw=sample_id,
+                        path=f"items.{sample_id}.Processing.Process_Route",
+                        message=(
+                            "Source-literal processing-table rows omitted by a chunk "
+                            "were restored to the uniquely cited process stage."
+                        ),
+                        evidence=_evidence(stage.get("source_evidence")),
+                        expected={
+                            "source_table_rows_only": True,
+                            "existing_parameters_preserved": True,
+                            "owner_invented": False,
+                        },
+                        actual={
+                            "process_family": _processing_table_family(
+                                stage.get("process_name_raw")
+                            ),
+                            "recovery": recovery_rows,
+                        },
+                        suggested_action=(
+                            "Review only if the cited table contains multiple process "
+                            "events for this same process family."
+                        ),
+                    )
+                )
 
         edges = _deduplicate(grouped_facts.get("process_edge", []))
         sanitized_edges: list[dict[str, Any]] = []
@@ -16223,6 +21485,10 @@ def materialize_candidate(
                 owner_labels=selected_context_labels,
                 other_owner_labels=other_context_labels,
             )
+            # Remember this boundary before replacing the recovery decision
+            # with an ``existing`` status below.  The later protocol ledger is
+            # an independent pass and must not undo a shared-scope quarantine.
+            shared_scope_isolated = False
             table_projection_binding = (
                 _property_unique_table_projection(
                     prop,
@@ -16247,6 +21513,23 @@ def materialize_candidate(
             coordinate_decision_key = str(
                 prop.get("property_id_candidate") or ""
             ).strip()
+            assertion_coordinate_candidate = coordinate_decision_key.startswith(
+                "tensile-assertion:"
+            )
+            physical_owner_coordinate_candidate = (
+                coordinate_decision_key.startswith(
+                    "physical-owner-envelope:"
+                )
+            )
+            safe_dense_global_protocol = bool(
+                role != "Reference"
+                and not safe_global_table_protocol
+                and coordinate_decision_key.startswith("dense-table-cell:")
+                and context_decision.status in {"recovered", "augmented"}
+                and len(context_decision.selected) == 1
+                and not context_decision.rejected
+                and has_explicit_global_tensile_scope(context_decision)
+            )
             safe_source_coordinate_protocol = bool(
                 source_coordinate_precision_v202_enabled()
                 and owner_state_condition_v202_enabled()
@@ -16263,8 +21546,14 @@ def materialize_candidate(
                 )
                 and context_decision.shared_scope_risk
                 and not safe_global_table_protocol
+                and not safe_dense_global_protocol
                 and not safe_source_coordinate_protocol
+                and not physical_owner_coordinate_candidate
             ):
+                # A v204 assertion coordinate is itself a source-local
+                # owner/value proof and is intentionally allowed to use the
+                # ledger's local escape hatch.
+                shared_scope_isolated = not assertion_coordinate_candidate
                 # A paper-level tensile method is useful recovery evidence, but
                 # it is not a condition coordinate for a value quote that did
                 # not identify the owner/state locally.  Keep the candidate's
@@ -16328,13 +21617,20 @@ def materialize_candidate(
             if context_decision.status in {"recovered", "augmented"}:
                 original_prop = deepcopy(prop)
                 prop = deepcopy(prop)
-                prop["test_condition_raw"] = context_decision.condition_raw
+                prop["test_condition_raw"] = _merge_condition_preserving_existing(
+                    prop.get("test_condition_raw"),
+                    context_decision.condition_raw,
+                )
                 augmented = context_decision.status == "augmented"
                 issues.append(
                     MaterializeIssue(
                         code=(
                             "tensile_protocol_coordinate_recovered"
                             if safe_source_coordinate_protocol
+                            else "dense_tensile_protocol_recovered"
+                            if safe_dense_global_protocol
+                            else "tensile_physical_owner_protocol_recovered"
+                            if physical_owner_coordinate_candidate
                             else
                             "property_test_context_table_owner_recovered"
                             if safe_global_table_protocol
@@ -16365,6 +21661,10 @@ def materialize_candidate(
                             "binding": (
                                 "one discrete sidecar cell plus one compatible bounded tensile protocol"
                                 if safe_source_coordinate_protocol
+                                else "one immutable dense table cell plus one unique explicitly global tensile protocol"
+                                if safe_dense_global_protocol
+                                else "one source-block physical owner coordinate plus one unique compatible tensile protocol"
+                                if physical_owner_coordinate_candidate
                                 else
                                 "one unique owner/value table row plus one explicitly global tensile protocol"
                                 if safe_global_table_protocol
@@ -16399,7 +21699,10 @@ def materialize_candidate(
                             "owner_invented": False,
                             "decision_key": (
                                 coordinate_decision_key
-                                if safe_source_coordinate_protocol
+                                if (
+                                    safe_source_coordinate_protocol
+                                    or physical_owner_coordinate_candidate
+                                )
                                 else None
                             ),
                             "rejected_candidates": [
@@ -16415,7 +21718,12 @@ def materialize_candidate(
                 )
                 if (
                     context_decision.shared_scope_risk
-                    and not safe_global_table_protocol
+                    and not (
+                        safe_global_table_protocol
+                        or safe_dense_global_protocol
+                        or safe_source_coordinate_protocol
+                        or physical_owner_coordinate_candidate
+                    )
                 ):
                     # Keep the public condition unchanged for compatibility:
                     # a paper-wide tensile protocol can be scientifically
@@ -16527,6 +21835,7 @@ def materialize_candidate(
                 owner_role=role,
                 owner_labels=selected_context_labels,
                 other_owner_labels=other_context_labels,
+                allow_shared_scope=not shared_scope_isolated,
             )
             assertion_protocol_coordinate = (
                 tensile_result_protocol_binding_v204_enabled()
@@ -16537,12 +21846,18 @@ def materialize_candidate(
             if ledger_decision.status == "bound":
                 ledger_before = deepcopy(prop)
                 prop = deepcopy(prop)
-                prop["test_condition_raw"] = ledger_decision.condition_raw
+                prop["test_condition_raw"] = _merge_condition_preserving_existing(
+                    prop.get("test_condition_raw"),
+                    ledger_decision.condition_raw,
+                    separator="; ",
+                )
                 issues.append(
                     MaterializeIssue(
                         code=(
                             "tensile_result_protocol_bound"
                             if assertion_protocol_coordinate
+                            else "tensile_physical_owner_protocol_bound"
+                            if physical_owner_coordinate_candidate
                             else "tensile_protocol_ledger_bound"
                         ),
                         severity="info",
@@ -16616,10 +21931,231 @@ def materialize_candidate(
                         ),
                     )
                 )
+            dense_payload_coordinate = bool(
+                coordinate_decision_key.startswith("dense-table-cell:")
+                or re.fullmatch(
+                    r"(?i).+\btensile\s+specimen\s*\[[^\[\]]+\]\s*/\s*[XYZ]",
+                    sample_id,
+                )
+                is not None
+                or (
+                    str(prop.get("data_source") or "").strip().casefold()
+                    == "table"
+                    and re.fullmatch(
+                        r"(?i)[XYZ]",
+                        str(
+                            prop.get("test_specimen_raw")
+                            or prop.get("raw_note")
+                            or ""
+                        ).strip(),
+                    )
+                    is not None
+                    and any(
+                        "<tr" in str(row or "").casefold()
+                        for row in _evidence(prop.get("source_evidence"))
+                    )
+                )
+            )
+            if dense_payload_coordinate:
+                dense_orientation = str(
+                    prop.get("test_specimen_raw") or prop.get("raw_note") or ""
+                ).strip()
+                before_dense_condition = str(
+                    prop.get("test_condition_raw") or ""
+                ).strip()
+                after_dense_condition = _dense_condition_without_orientation(
+                    before_dense_condition, dense_orientation
+                )
+                if after_dense_condition != before_dense_condition:
+                    prop = deepcopy(prop)
+                    prop["test_condition_raw"] = after_dense_condition
+                    issues.append(
+                        MaterializeIssue(
+                            code="dense_tensile_orientation_condition_reconciled",
+                            severity="info",
+                            sample_id_raw=sample_id,
+                            path=f"items.{sample_id}.Properties",
+                            message=(
+                                "A later protocol-context pass repeated the dense-table "
+                                "specimen orientation in the test condition; the exact "
+                                "specimen coordinate remained authoritative."
+                            ),
+                            evidence=_evidence(prop.get("source_evidence")),
+                            expected={
+                                "orientation_field": "test_specimen_raw",
+                                "test_condition_contains_orientation": False,
+                            },
+                            actual={
+                                "before_condition": before_dense_condition,
+                                "after_condition": after_dense_condition,
+                                "test_specimen_raw": dense_orientation,
+                                "reason": "post_context_coordinate_cleanup",
+                            },
+                            suggested_action=(
+                                "Keep the source-proven build orientation in the "
+                                "specimen coordinate instead of duplicating it as a "
+                                "test-protocol condition."
+                            ),
+                        )
+                    )
+            # A bounded chart sidecar also carries an immutable specimen
+            # direction.  Protocol recovery may echo that direction into the
+            # condition (for example ``X\n\ntensile test``); remove only the
+            # standalone orientation segment and keep the actual test method
+            # and any temperature/rate/standard details.  Without this
+            # cleanup the public normalizer treats X/Y/Z as the whole test
+            # condition, producing avoidable strict condition conflicts.
+            sidecar_payload_coordinate = (
+                str(prop.get("data_source") or "").strip().casefold()
+                == "image_digitized"
+                and is_core_tensile_property_name(
+                    prop.get("property_name_raw")
+                )
+                and re.fullmatch(
+                    r"(?i)[XYZ](?:\s*(?:[- ]?direction|orientation))?",
+                    str(prop.get("test_specimen_raw") or "").strip(),
+                )
+                is not None
+                and any(
+                    "data_csv:" in str(row).casefold()
+                    for row in _evidence(prop.get("source_evidence"))
+                )
+            )
+            if sidecar_payload_coordinate:
+                sidecar_orientation = str(
+                    prop.get("test_specimen_raw") or ""
+                ).strip()
+                before_sidecar_condition = str(
+                    prop.get("test_condition_raw") or ""
+                ).strip()
+                after_sidecar_condition = _dense_condition_without_orientation(
+                    before_sidecar_condition, sidecar_orientation
+                )
+                if not after_sidecar_condition:
+                    after_sidecar_condition = str(
+                        prop.get("test_method_raw") or ""
+                    ).strip()
+                if after_sidecar_condition != before_sidecar_condition:
+                    prop = deepcopy(prop)
+                    prop["test_condition_raw"] = after_sidecar_condition
+                    issues.append(
+                        MaterializeIssue(
+                            code="sidecar_orientation_condition_reconciled",
+                            severity="info",
+                            sample_id_raw=sample_id,
+                            path=f"items.{sample_id}.Properties",
+                            message=(
+                                "A sidecar specimen orientation repeated in the "
+                                "test condition was removed while preserving the "
+                                "independent specimen coordinate."
+                            ),
+                            evidence=_evidence(prop.get("source_evidence")),
+                            expected={
+                                "orientation_field": "test_specimen_raw",
+                                "test_condition_contains_orientation": False,
+                            },
+                            actual={
+                                "before_condition": before_sidecar_condition,
+                                "after_condition": after_sidecar_condition,
+                                "test_specimen_raw": sidecar_orientation,
+                                "reason": "sidecar_coordinate_cleanup",
+                            },
+                            suggested_action=(
+                                "Keep the source-proven direction in the specimen "
+                                "coordinate and review only if it is also a true "
+                                "test-protocol discriminator."
+                            ),
+                        )
+                    )
+            # A specimen/orientation token is a valid public coordinate only
+            # when the value has a source-local condition/owner binding.  If
+            # the tensile protocol was quarantined as paper-shared, keeping
+            # the token in ``test_specimen_raw`` would make the frozen v11
+            # normalizer manufacture ``Test_Condition.specimen_raw`` under a
+            # ``not_reported`` condition, which is both invalid and falsely
+            # suggests that the isolated protocol applies to this property.
+            # Keep the complete candidate in the audit stream and clear only
+            # the public compatibility slot; this does not remove the value
+            # or its source evidence.
+            isolated_specimen = str(
+                prop.get("test_specimen_raw") or ""
+            ).strip()
+            isolated_orientation = str(
+                prop.get("orientation_raw") or ""
+            ).strip()
+            if (
+                shared_scope_isolated
+                and (isolated_specimen or isolated_orientation)
+                and not str(prop.get("test_condition_raw") or "").strip()
+            ):
+                before_specimen_isolation = deepcopy(prop)
+                prop = deepcopy(prop)
+                prop["test_specimen_raw"] = ""
+                # ``orientation_raw`` is an internal provider variant not
+                # present in the public candidate contract, but the frozen
+                # normalizer accepts it when supplied. Clear it for the same
+                # fail-closed reason as test_specimen_raw.
+                if "orientation_raw" in prop:
+                    prop["orientation_raw"] = ""
+                issues.append(
+                    MaterializeIssue(
+                        code="property_test_specimen_shared_scope_quarantined",
+                        sample_id_raw=sample_id,
+                        path=f"items.{sample_id}.Properties",
+                        message=(
+                            "A specimen/orientation token was isolated because its "
+                            "tensile protocol was not source-locally bound; the "
+                            "token is retained in the audit record."
+                        ),
+                        evidence=_evidence(before_specimen_isolation.get("source_evidence")),
+                        expected={
+                            "public_test_specimen_raw": "",
+                            "condition_status": "not_reported",
+                            "audit_preserved": True,
+                        },
+                        actual={
+                            "before": before_specimen_isolation,
+                            "after": deepcopy(prop),
+                            "isolated_specimen_raw": isolated_specimen,
+                            "isolated_orientation_raw": isolated_orientation,
+                            "reason": "shared_scope_protocol_isolated",
+                        },
+                        suggested_action=(
+                            "Restore the specimen/orientation only when the value "
+                            "quote supplies a unique owner/state/condition coordinate."
+                        ),
+                    )
+                )
             invalid_series = _invalid_nonnegative_chart_series(
                 prop,
                 chart_csv_references=chart_csv_references,
             )
+            curve_property = _continuous_curve_property_quarantine(prop)
+            if curve_property is not None and invalid_series is None:
+                issues.append(
+                    MaterializeIssue(
+                        code="continuous_curve_property_quarantined",
+                        sample_id_raw=sample_id,
+                        path=f"items.{sample_id}.Properties",
+                        message=(
+                            "A continuous chart-series summary was isolated from "
+                            "the scalar Property ledger; its full data remains in "
+                            "the preserved chart CSV/evidence."
+                        ),
+                        evidence=curve_property["evidence"],
+                        expected={
+                            "formal_property": "one scalar/range/inequality result",
+                            "continuous_curve_points_in_properties": False,
+                            "audit_preserved": True,
+                        },
+                        actual=curve_property,
+                        suggested_action=(
+                            "Use the preserved chart CSV for curve analysis; restore "
+                            "a Property only when a bounded scalar result is stated."
+                        ),
+                    )
+                )
+                continue
             if invalid_series is not None:
                 issues.append(
                     MaterializeIssue(
@@ -16793,6 +22329,16 @@ def materialize_candidate(
                     suggested_action="Review the associated quarantine issues.",
                 )
             )
+
+    for item in items:
+        if str(item.get("Sample_ID") or "").strip() in incomplete_property_owners:
+            # Keep the already accepted item and every non-Property axis.
+            # This must run after the substantive-item decision: otherwise an
+            # owner that also carries Composition/Structure identity may be
+            # removed merely because its Properties were quarantined.
+            extracted = item.get("Extracted_Data")
+            if isinstance(extracted, dict):
+                extracted["Properties"] = []
 
     for item_index, item in enumerate(items, start=1):
         item["Item_ID"] = f"item_{item_index:03d}"

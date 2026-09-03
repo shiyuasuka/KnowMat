@@ -667,7 +667,7 @@ class SchemaConverter:
         cleaned = self._clean_optional_str(value)
         if cleaned:
             lowered = cleaned.lower()
-            if lowered == "image":
+            if lowered in {"image", "image_digitized"}:
                 return "image"
             if lowered == "text":
                 if has_image_cue and not has_text_cue:
@@ -2225,7 +2225,11 @@ class SchemaConverter:
                         context_text=paris_condition,
                     )
                 )
-            if row.get("fatigue_strength"):
+            # ``_parse_value_with_optional_std`` returns a three-element tuple
+            # even for an empty table cell.  Test the numeric component rather
+            # than tuple truthiness so blank S-direction cells do not become
+            # fabricated fatigue-strength claims.
+            if row.get("fatigue_strength") and row["fatigue_strength"][0] is not None:
                 fatigue_condition = (
                     "Unnotched rotating bending fatigue (RBF), loading axis parallel to build direction (B); "
                     "R=-1; minimum survival 10^7 cycles"

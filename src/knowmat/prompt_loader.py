@@ -8,9 +8,16 @@ from typing import Dict, Iterable
 
 import yaml
 
+from knowmat.alpha25.package import load_alpha25_package
+from knowmat.app_config import settings
+
 
 def _prompts_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "prompts"
+
+
+def _alpha25_package_dir() -> Path:
+    return load_alpha25_package(settings.alpha25_package_root).root
 
 
 @lru_cache(maxsize=64)
@@ -52,8 +59,13 @@ def load_routing_supplement(relative_path: str) -> str:
     str
         The file content, or empty string if the file does not exist.
     """
-    path = _prompts_dir() / "directions" / relative_path
+    path = _alpha25_package_dir() / "references" / "directions" / relative_path
     if not path.is_file():
         return ""
     return path.read_text(encoding="utf-8")
 
+
+@lru_cache(maxsize=16)
+def load_v11_reference(relative_path: str) -> str:
+    """Load a required reference from the validated alpha25 package."""
+    return load_alpha25_package(settings.alpha25_package_root).read_reference(relative_path)

@@ -20,8 +20,75 @@ NOT responsible for:
 """
 
 import json
+from copy import deepcopy
 from typing import Dict, Any, List
 from knowmat.states import KnowMatState, load_run_extraction
+
+
+def _v11_item_key(item: Dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(item.get("Sample_ID") or item.get("Item_ID") or "").strip().casefold(),
+        str(item.get("Role") or "").strip(),
+        str(item.get("Data_Nature") or "").strip(),
+    )
+
+
+def _merge_evidence_records(target: List[Any], incoming: List[Any]) -> int:
+    """Append records whose evidence-aware JSON signature is not already present."""
+    signatures = {json.dumps(row, ensure_ascii=False, sort_keys=True) for row in target}
+    added = 0
+    for row in incoming:
+        signature = json.dumps(row, ensure_ascii=False, sort_keys=True)
+        if signature not in signatures:
+            target.append(deepcopy(row))
+            signatures.add(signature)
+            added += 1
+    return added
+
+
+def _aggregate_v11_runs(sorted_runs: List[dict]) -> tuple[Dict[str, Any], str]:
+    base = deepcopy(load_run_extraction(sorted_runs[0]))
+    merged_items = base.setdefault("items", [])
+    item_map = {_v11_item_key(item): item for item in merged_items}
+    records_added = items_added = 0
+
+    for run in sorted_runs[1:]:
+        document = load_run_extraction(run)
+        for incoming in document.get("items", []) or []:
+            key = _v11_item_key(incoming)
+            if key not in item_map:
+                clone = deepcopy(incoming)
+                merged_items.append(clone)
+                item_map[key] = clone
+                items_added += 1
+                continue
+            target = item_map[key].get("Extracted_Data") or {}
+            source = incoming.get("Extracted_Data") or {}
+            records_added += _merge_evidence_records(
+                (target.get("Composition") or {}).setdefault("Composition_Observations", []),
+                (source.get("Composition") or {}).get("Composition_Observations", []) or [],
+            )
+            records_added += _merge_evidence_records(
+                (target.get("Structure") or {}).setdefault("Structure_Observations", []),
+                (source.get("Structure") or {}).get("Structure_Observations", []) or [],
+            )
+            records_added += _merge_evidence_records(
+                target.setdefault("Properties", []),
+                source.get("Properties", []) or [],
+            )
+            target_route = (target.get("Processing") or {}).get("Process_Route") or {}
+            source_route = (source.get("Processing") or {}).get("Process_Route") or {}
+            records_added += _merge_evidence_records(
+                target_route.setdefault("candidate_stages", []),
+                source_route.get("candidate_stages", []) or [],
+            )
+
+    notes = (
+        f"V11 aggregation used run {sorted_runs[0].get('run_id')} as the base; "
+        f"added {items_added} item(s) and {records_added} evidence record(s) from "
+        f"{len(sorted_runs) - 1} additional run(s) without collapsing sample/state boundaries."
+    )
+    return base, notes
 
 
 def aggregate_runs(state: KnowMatState) -> Dict[str, Any]:
@@ -71,6 +138,12 @@ def aggregate_runs(state: KnowMatState) -> Dict[str, Any]:
         key=lambda r: r.get("confidence_score", 0.0),
         reverse=True
     )
+
+    first_data = load_run_extraction(sorted_runs[0])
+    if isinstance(first_data.get("items"), list):
+        merged, notes = _aggregate_v11_runs(sorted_runs)
+        print(f"  {notes}")
+        return {"aggregated_data": merged, "aggregation_notes": notes}
     
     print(f"\nAggregation Stage 1:")
     print(f"  Merging {len(run_results)} extraction runs...")

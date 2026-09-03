@@ -23,7 +23,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from threading import BoundedSemaphore, Condition, Lock, local
+from threading import BoundedSemaphore, Condition, Event, Lock, Thread, local
 from typing import Any, Dict
 from urllib.parse import urlsplit, urlunsplit
 
@@ -33,20 +33,33 @@ from knowmat.extractors import (
     CompositionList,
     V11CandidateDocument,
     extraction_thinking_mode,
+    extraction_reasoning_effort,
     extraction_extractor,
     get_llm,
     v11_extraction_extractor,
 )
 from knowmat.alpha25.contracts import AxisFact, InventoryAnchor, parse_task_response
 from knowmat.alpha25.coverage import CoverageLedger, IncompleteCoverageError
-from knowmat.alpha25.evidence import gate_task_response
+from knowmat.alpha25.evidence import (
+    gate_task_response,
+    recover_format_mismatch_records,
+)
 from knowmat.alpha25.materialize import (
     dense_tensile_table_completion_v203_enabled,
     materialize_candidate,
     property_coordinate_quarantine_v203_enabled,
 )
 from knowmat.alpha25.property_context import tensile_protocol_ledger_v203_enabled
+from knowmat.alpha25.pre_verifier import (
+    build_pre_verifier_manifest,
+    write_and_gate_pre_verifier_manifest,
+)
 from knowmat.alpha25.promotion import promote_axis_facts
+from knowmat.alpha25.verification_client import (
+    VerificationClient,
+    verifier_configs_from_env,
+)
+from knowmat.alpha25.verification_pipeline import verify_paper_candidates
 from knowmat.alpha25.package import load_alpha25_package
 from knowmat.alpha25.planner import (
     AxisTask,
@@ -70,6 +83,110 @@ from knowmat.app_config import settings
 from knowmat.v11_reconcile import reconcile_v11_candidates
 
 logger = logging.getLogger(__name__)
+
+
+def _invoke_with_hard_timeout(llm: Any, messages: list[dict[str, str]], timeout: float) -> Any:
+    """Invoke an LLM with a wall-clock bound even if HTTP read timeout resets.
+
+    Some OpenAI-compatible gateways keep a response socket alive by emitting
+    heartbeat bytes, so httpx's read timeout never expires.  Run the blocking
+    SDK call in a daemon thread and close its client when the wall-clock limit
+    is reached; this releases the Alpha25 provider slot and lets the caller use
+    the bounded compact-retry path.
+    """
+
+    completed = Event()
+    result: dict[str, Any] = {}
+
+    def invoke() -> None:
+        try:
+            result["value"] = llm.invoke(messages)
+        except BaseException as exc:  # propagate SDK errors to the caller
+            result["error"] = exc
+        finally:
+            completed.set()
+
+    worker = Thread(target=invoke, name="alpha25-llm-call", daemon=True)
+    worker.start()
+    if not completed.wait(timeout=max(0.1, float(timeout))):
+        # Let a response that is already unwinding finish before touching the
+        # transport.  Closing first can race the SDK cleanup and turn all
+        # following compact retries into connection errors.
+        drain_seconds = max(
+            0.0, float(os.getenv("KNOWMAT2_ALPHA25_TIMEOUT_DRAIN_SECONDS", "2"))
+        )
+        if drain_seconds:
+            completed.wait(timeout=drain_seconds)
+        if completed.is_set():
+            raise TimeoutError(
+                f"LLM invocation exceeded hard timeout of {timeout:.1f}s"
+            )
+        # A gateway may leave ``close()`` blocked while the response socket is
+        # still in ``recv``.  Never perform that cleanup synchronously here:
+        # doing so would keep the provider slot occupied forever and make all
+        # following chunks appear hung.  Run each close in a short-lived daemon
+        # thread and move on after a small bounded grace period.
+        close_timeout = max(
+            0.0,
+            float(os.getenv("KNOWMAT2_ALPHA25_TIMEOUT_CLOSE_SECONDS", "0.5")),
+        )
+        for client_name in ("root_client", "root_async_client"):
+            client = getattr(llm, client_name, None)
+            close = getattr(client, "close", None)
+            if not callable(close):
+                continue
+            close_done = Event()
+
+            def close_client(
+                close_fn: Any = close, done: Event = close_done
+            ) -> None:
+                try:
+                    close_fn()
+                except Exception:
+                    logger.debug(
+                        "Failed to close timed-out LLM client", exc_info=True
+                    )
+                finally:
+                    done.set()
+
+            Thread(
+                target=close_client,
+                name=f"alpha25-close-{client_name}",
+                daemon=True,
+            ).start()
+            if close_timeout:
+                close_done.wait(timeout=close_timeout)
+            if not close_done.is_set():
+                logger.debug(
+                    "Timed-out LLM client close exceeded %.2fs; continuing",
+                    close_timeout,
+                )
+        raise TimeoutError(f"LLM invocation exceeded hard timeout of {timeout:.1f}s")
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
+def _alpha25_format_recovery_enabled() -> bool:
+    """Enable deterministic full-paper recovery for task-local formatting loss."""
+
+    raw = os.getenv("KNOWMAT2_ALPHA25_RECOVER_REJECTED", "1")
+    return raw.strip().casefold() not in {"0", "false", "no", "off", "disabled"}
+
+
+def _recover_alpha25_format_mismatches(gate: Any, paper_text: str) -> int:
+    """Move only deterministic format-mismatch rows into the accepted ledger."""
+
+    if not _alpha25_format_recovery_enabled() or not gate.rejected:
+        return 0
+    recovered, audits = recover_format_mismatch_records(gate.rejected, paper_text)
+    if not recovered:
+        return 0
+    recovered_ids = {id(row) for row in recovered}
+    gate.accepted.extend(recovered)
+    gate.rejected[:] = [row for row in gate.rejected if id(row) not in recovered_ids]
+    gate.audit_issues.extend(audits)
+    return len(recovered)
 
 
 _V11_COMPACT_OUTPUT_INSTRUCTION = (
@@ -506,7 +623,7 @@ def _is_provider_option_error(exc: Exception, *option_names: str) -> bool:
 
 
 def _is_transient_alpha25_error(exc: Exception) -> bool:
-    """Return true for transport/service failures that must not split evidence."""
+    """Return true for transport/service failures eligible for bounded retry."""
 
     if _is_quota_error(exc):
         return False
@@ -524,6 +641,21 @@ def _is_transient_alpha25_error(exc: Exception) -> bool:
             "internalserviceerror",
             "internal server error",
         )
+    )
+
+
+def _is_alpha25_timeout_failure(exc: Exception) -> bool:
+    """Return true when a request timed out and its evidence should be split.
+
+    A timeout is different from a rate-limit or connection-reset failure: after
+    bounded compact retries, the most reliable way to preserve coverage is to
+    send smaller grounded source slices.  This stays bounded by the existing
+    split-depth/retry-task ceilings and never fabricates a replacement fact.
+    """
+
+    message = str(exc).casefold()
+    return isinstance(exc, TimeoutError) or any(
+        signal in message for signal in ("timeout", "timed out", "request timed out")
     )
 
 
@@ -553,6 +685,7 @@ def _alpha25_llm_identity(
         "response_mode": response_mode["type"] if response_mode else "text",
         "output_token_budget": int(output_token_budget),
         "thinking_mode": extraction_thinking_mode(model),
+        "reasoning_effort": extraction_reasoning_effort(model),
     }
 
 
@@ -569,12 +702,17 @@ def _invoke_alpha25_task_json(
     _reset_alpha25_request_timing()
     model = str(extraction_model or settings.extraction_model).strip()
     thinking_mode = extraction_thinking_mode(model)
+    reasoning_effort = extraction_reasoning_effort(model)
     response_mode = _v11_json_mode_for_model(model)
+    request_timeout = max(
+        1.0, float(os.getenv("KNOWMAT2_EXTRACTION_TIMEOUT", "180"))
+    )
 
     def bound_llm() -> Any:
         llm = get_llm(
             agent_type="extraction",
             thinking_mode_override=thinking_mode,
+            reasoning_effort_override=reasoning_effort,
             model_override=model,
         )
         bind_options: Dict[str, Any] = {"max_tokens": int(output_token_budget)}
@@ -600,7 +738,22 @@ def _invoke_alpha25_task_json(
         0.0, float(os.getenv("KNOWMAT2_ALPHA25_TRANSIENT_BACKOFF_SECONDS", "2"))
     )
     transient_attempts = 0
+    # Some reasoning providers keep a request open until the completion budget
+    # is exhausted.  After the normal transient retry, progressively lower the
+    # budget for the same grounded evidence instead of replaying an identical
+    # long-running request.  This is bounded and only affects transport
+    # failures; successful/content-recovery paths keep their planned budget.
+    compact_budget_fallbacks = 0
+    compact_budget_floor = max(
+        512,
+        int(os.getenv("KNOWMAT2_ALPHA25_COMPACT_BUDGET_FLOOR", "2048")),
+    )
+    compact_budget_max_fallbacks = max(
+        0,
+        int(os.getenv("KNOWMAT2_ALPHA25_COMPACT_BUDGET_FALLBACKS", "2")),
+    )
     thinking_fallback_used = False
+    reasoning_fallback_used = False
     response_mode_fallback_used = False
     while True:
         _wait_for_alpha25_quota_window()
@@ -612,11 +765,13 @@ def _invoke_alpha25_task_json(
             )
             call_started = time.monotonic()
             try:
-                response = llm.invoke(
+                response = _invoke_with_hard_timeout(
+                    llm,
                     [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
-                    ]
+                    ],
+                    request_timeout,
                 )
             finally:
                 _record_alpha25_request_timing(
@@ -659,6 +814,21 @@ def _invoke_alpha25_task_json(
                 )
                 continue
             if (
+                reasoning_effort != "provider_default"
+                and not reasoning_fallback_used
+                and _is_provider_option_error(
+                    exc, "reasoning_effort", "reasoning effort"
+                )
+            ):
+                reasoning_fallback_used = True
+                reasoning_effort = "provider_default"
+                llm = bound_llm()
+                logger.warning(
+                    "Extraction provider rejected the configured reasoning effort; "
+                    "retrying with provider_default"
+                )
+                continue
+            if (
                 response_mode is not None
                 and not response_mode_fallback_used
                 and _is_provider_option_error(
@@ -692,6 +862,30 @@ def _invoke_alpha25_task_json(
                     exc,
                 )
                 time.sleep(delay)
+                continue
+            if (
+                _is_transient_alpha25_error(exc)
+                and compact_budget_fallbacks < compact_budget_max_fallbacks
+                and output_token_budget > compact_budget_floor
+            ):
+                previous_budget = int(output_token_budget)
+                output_token_budget = max(
+                    compact_budget_floor,
+                    int(output_token_budget) // 2,
+                )
+                if output_token_budget == previous_budget:
+                    output_token_budget = compact_budget_floor
+                compact_budget_fallbacks += 1
+                transient_attempts = 0
+                llm = bound_llm()
+                logger.warning(
+                    "Transient extraction failure; retrying with compact completion "
+                    "budget %d -> %d (%d/%d)",
+                    previous_budget,
+                    output_token_budget,
+                    compact_budget_fallbacks,
+                    compact_budget_max_fallbacks,
+                )
                 continue
             classified = _classify_v11_invoke_error(exc)
             if classified is not None:
@@ -1114,6 +1308,7 @@ def _extract_alpha25_tasks(
     )
     accepted_facts: list[AxisFact] = []
     accepted_fact_task_ids: list[str] = []
+    accepted_fact_task_source_scopes: dict[str, str] = {}
     evidence_issues: list[Dict[str, Any]] = []
     workers = max(
         1,
@@ -1255,6 +1450,7 @@ def _extract_alpha25_tasks(
                     evidence_text=task.evidence_text,
                     structured_source_text=paper_text,
                 )
+                _recover_alpha25_format_mismatches(gate, paper_text)
                 return (
                     response,
                     gate,
@@ -1326,6 +1522,7 @@ def _extract_alpha25_tasks(
             evidence_text=task.evidence_text,
             structured_source_text=paper_text,
         )
+        _recover_alpha25_format_mismatches(gate, paper_text)
         if cache_path is not None:
             response_payload = response.model_dump_json(exclude_none=True, indent=2) + "\n"
             temporary = cache_path.with_suffix(".tmp")
@@ -1333,7 +1530,7 @@ def _extract_alpha25_tasks(
             temporary.replace(cache_path)
             identity_payload = {
                 "cache_record_type": "alpha25_task_identity",
-                "version": 1,
+                "version": 2,
                 "task_identity": _alpha25_task_cache_identity(
                     task=task,
                     system_prompt=system_prompt,
@@ -1344,6 +1541,14 @@ def _extract_alpha25_tasks(
                 "response_sha256": hashlib.sha256(
                     response_payload.encode("utf-8")
                 ).hexdigest(),
+                # Audit-only replay material.  Keep it outside task_identity so
+                # adding source-scope persistence does not invalidate cache keys.
+                "task_source_scope": {
+                    "text": task.source_text,
+                    "sha256": hashlib.sha256(
+                        task.source_text.encode("utf-8")
+                    ).hexdigest(),
+                },
             }
             identity_path = _alpha25_task_identity_path(cache_path)
             identity_temporary = identity_path.with_suffix(".tmp")
@@ -1376,6 +1581,8 @@ def _extract_alpha25_tasks(
             accepted_anchors.extend(anchors)
         accepted_facts.extend(facts)
         accepted_fact_task_ids.extend(task.task_id for _ in facts)
+        if facts:
+            accepted_fact_task_source_scopes[task.task_id] = task.source_text
 
     def execute_phase(tasks: list[AxisTask]) -> None:
         nonlocal retry_tasks_created
@@ -1519,14 +1726,22 @@ def _extract_alpha25_tasks(
                 )
                 content_can_split = (
                     outcome is None
-                    and _is_alpha25_content_failure(exc)
+                    and (
+                        _is_alpha25_content_failure(exc)
+                        # A request that exhausted compact retries can still
+                        # lose an entire source leaf.  Split timeout failures
+                        # so coverage remains complete instead of silently
+                        # accepting a hole in the evidence ledger.
+                        or _is_alpha25_timeout_failure(exc)
+                    )
                     and task.split_depth < failure_split_depth
                     and len(task.evidence_text) >= failure_split_min_chars
                 )
                 # Preserve the three-level source split as a last-resort content
                 # recovery path. A truncated/empty response first retries the
-                # exact same evidence with a larger output budget; transport,
-                # quota, and rate-limit failures never multiply chunk requests.
+                # exact same evidence with a larger output budget; a timed-out
+                # request is split only after its bounded retry/compact path is
+                # exhausted. Quota and rate-limit failures never multiply chunks.
                 children = [budget_child] if budget_child is not None else (
                     split_task_once(
                         task,
@@ -1624,12 +1839,14 @@ def _extract_alpha25_tasks(
     except IncompleteCoverageError as exc:
         raise V11IncompleteCoverageError(str(exc)) from exc
 
+    hierarchical_verification_enabled = os.getenv(
+        "KNOWMAT2_ALPHA25_HIERARCHICAL_VERIFICATION", "0"
+    ).strip().casefold() in {"1", "true", "yes", "on"}
     promotion_enabled = os.getenv(
         "KNOWMAT2_ALPHA25_PROMOTION_ENABLED", "1"
     ).strip().casefold() in {"1", "true", "yes", "on"}
     promotion_started = time.monotonic()
     promotion_issues: list[Dict[str, Any]] = []
-    promoted_fact_count = len(accepted_facts)
     if promotion_enabled:
         promotion = promote_axis_facts(
             accepted_anchors,
@@ -1638,15 +1855,232 @@ def _extract_alpha25_tasks(
             task_ids=accepted_fact_task_ids,
         )
         promoted_facts = list(promotion.accepted)
-        promoted_fact_count = len(promoted_facts)
         promotion_issues = [issue.to_dict() for issue in promotion.issues]
     else:
-        promoted_facts = accepted_facts
+        promoted_facts = list(accepted_facts)
+    promoted_fact_count = len(promoted_facts)
     promotion_elapsed = time.monotonic() - promotion_started
+
+    def fact_evidence_values(fact: AxisFact) -> set[str]:
+        values = set(str(row) for row in (fact.source_evidence or []) if str(row))
+        nested = fact.data.get("source_evidence") if isinstance(fact.data, dict) else None
+        if isinstance(nested, str) and nested:
+            values.add(nested)
+        elif isinstance(nested, list):
+            values.update(str(row) for row in nested if str(row))
+        return values
+
+    original_lineage = [
+        (fact.axis, fact_evidence_values(fact), task_id)
+        for fact, task_id in zip(accepted_facts, accepted_fact_task_ids)
+    ]
+    promoted_task_ids: list[str | None] = []
+    for fact in promoted_facts:
+        evidence = fact_evidence_values(fact)
+        matching_tasks = {
+            task_id
+            for axis, original_evidence, task_id in original_lineage
+            if task_id is not None and axis == fact.axis and evidence & original_evidence
+        }
+        promoted_task_ids.append(
+            next(iter(matching_tasks)) if len(matching_tasks) == 1 else None
+        )
+
+    verification_issues: list[Dict[str, Any]] = []
+    verification_audit_records: list[Dict[str, Any]] = []
+    verification_metrics: Dict[str, Any] = {}
+    facts_for_materialization = list(promoted_facts)
+    pre_verifier_manifest = build_pre_verifier_manifest(
+        promoted_facts,
+        source_text=paper_text,
+        task_cache_dir=cache_dir,
+        planner_config={
+            "task_strategy": task_strategy,
+            "max_evidence_chars": max_initial_evidence_chars,
+            "prose_chars": int(os.getenv("KNOWMAT2_ALPHA25_PROSE_CHARS", "8000")),
+            "table_columns": int(os.getenv("KNOWMAT2_ALPHA25_TABLE_COLUMNS", "8")),
+            "table_rows": int(os.getenv("KNOWMAT2_ALPHA25_TABLE_ROWS", "12")),
+            "verifier_bundle_assertions": int(
+                os.getenv("KNOWMAT2_ALPHA25_VERIFIER_BUNDLE_ASSERTIONS", "12")
+            ),
+            "verifier_bundle_chars": int(
+                os.getenv("KNOWMAT2_ALPHA25_VERIFIER_BUNDLE_CHARS", "12000")
+            ),
+            "verifier_context_radius": int(
+                os.getenv("KNOWMAT2_ALPHA25_VERIFIER_CONTEXT_RADIUS", "500")
+            ),
+        },
+        feature_switches={
+            key: value
+            for key, value in sorted(os.environ.items())
+            if key.startswith("KNOWMAT2_ALPHA25_")
+            and any(
+                token in key
+                for token in (
+                    "PROMOTION",
+                    "RISK_ROUTING",
+                    "RECOVER_",
+                    "TENSILE",
+                    "PROPERTY_",
+                    "STRUCTURE_",
+                    "CHART_",
+                    "OWNER_",
+                    "SOURCE_COORDINATE",
+                    "TABLE_",
+                )
+            )
+        },
+    )
+    pre_verifier_output = (
+        cache_dir.parent / "pre_verifier_manifest.json"
+        if cache_dir is not None
+        else Path("pre_verifier_manifest.json")
+    )
+    expected_pre_verifier = str(
+        os.getenv("KNOWMAT2_ALPHA25_EXPECTED_PRE_VERIFIER_ROOT") or ""
+    ).strip()
+    pre_verifier_manifest = write_and_gate_pre_verifier_manifest(
+        pre_verifier_manifest,
+        output_path=pre_verifier_output,
+        expected_root=(
+            Path(expected_pre_verifier).expanduser()
+            if expected_pre_verifier
+            else None
+        ),
+        paper_key=(
+            cache_dir.parent.parent.name if cache_dir is not None else "paper"
+        ),
+    )
+    if hierarchical_verification_enabled:
+        field_level_verification_enabled = os.getenv(
+            "KNOWMAT2_ALPHA25_VERIFIER_FIELD_LEVEL", "0"
+        ).strip().casefold() in {"1", "true", "yes", "on"}
+        primary_verifier, fallback_verifier = verifier_configs_from_env()
+        configured_verification_cache = str(
+            os.getenv("KNOWMAT2_ALPHA25_VERIFIER_CACHE_DIR") or ""
+        ).strip()
+        verification_cache_dir = (
+            Path(configured_verification_cache).expanduser()
+            if configured_verification_cache
+            else cache_dir.parent / "02b_alpha25_verification"
+            if cache_dir is not None
+            else None
+        )
+        verification_client = VerificationClient(
+            primary_verifier,
+            fallback_verifier,
+            cache_dir=verification_cache_dir,
+            acquire_slot=_acquire_alpha25_provider_slot,
+            release_slot=_release_alpha25_provider_slot,
+            destructive_consensus=os.getenv(
+                "KNOWMAT2_ALPHA25_VERIFIER_DESTRUCTIVE_CONSENSUS", "1"
+            ).strip().casefold()
+            not in {"0", "false", "no", "off"},
+            field_level=field_level_verification_enabled,
+        )
+        verified = verify_paper_candidates(
+            accepted_anchors,
+            promoted_facts,
+            source_text=paper_text,
+            task_ids=promoted_task_ids,
+            task_source_scopes=accepted_fact_task_source_scopes,
+            client=verification_client,
+            max_bundle_assertions=max(
+                1,
+                min(
+                    12,
+                    int(os.getenv("KNOWMAT2_ALPHA25_VERIFIER_BUNDLE_ASSERTIONS", "12")),
+                ),
+            ),
+            max_bundle_source_chars=max(
+                1,
+                min(
+                    12000,
+                    int(os.getenv("KNOWMAT2_ALPHA25_VERIFIER_BUNDLE_CHARS", "12000")),
+                ),
+            ),
+            context_radius=max(
+                0, int(os.getenv("KNOWMAT2_ALPHA25_VERIFIER_CONTEXT_RADIUS", "500"))
+            ),
+            recovery_enabled=(
+                False
+                if field_level_verification_enabled
+                else os.getenv(
+                    "KNOWMAT2_ALPHA25_VERIFIER_RECOVERY", "1"
+                ).strip().casefold()
+                not in {"0", "false", "no", "off"}
+            ),
+            max_recovery_assertions=max(
+                1,
+                min(
+                    10,
+                    int(os.getenv("KNOWMAT2_ALPHA25_RECOVERY_ASSERTIONS", "10")),
+                ),
+            ),
+            workers=max(
+                1,
+                int(
+                    os.getenv(
+                        "KNOWMAT2_ALPHA25_VERIFIER_WORKERS",
+                        os.getenv("KNOWMAT2_ALPHA25_GLOBAL_CONCURRENCY", "6"),
+                    )
+                ),
+            ),
+            bypass_axes=tuple(
+                axis.strip().casefold()
+                for axis in os.getenv(
+                    "KNOWMAT2_ALPHA25_VERIFIER_BYPASS_AXES",
+                    (
+                        "composition"
+                        if field_level_verification_enabled
+                        else "composition,properties"
+                    ),
+                ).split(",")
+                if axis.strip()
+            ),
+            risk_routing_enabled=(
+                field_level_verification_enabled
+                or os.getenv(
+                    "KNOWMAT2_ALPHA25_VERIFIER_RISK_ROUTING", "0"
+                ).strip().casefold()
+                in {"1", "true", "yes", "on"}
+            ),
+            preflight_split_assertions=max(
+                0,
+                int(
+                    os.getenv(
+                        "KNOWMAT2_ALPHA25_VERIFIER_PREFLIGHT_ASSERTIONS", "0"
+                    )
+                ),
+            ),
+        )
+        facts_for_materialization = list(verified.accepted)
+        verification_issues = list(verified.issues)
+        verification_audit_records = list(verified.audit_records)
+        verification_metrics = dict(verified.metrics)
+        logger.warning(
+            "Alpha25 hierarchical verification complete: assertions=%d "
+            "bundles=%d accepted=%d recovered=%d calls=%d fallback=%d "
+            "unresolved=%d risk_routed=%d low_risk_bypass=%d wall=%.1fs",
+            int(verification_metrics.get("verification_assertion_count", 0)),
+            int(verification_metrics.get("verification_bundle_count", 0)),
+            int(verification_metrics.get("accepted_fact_count", 0)),
+            int(verification_metrics.get("recovered_fact_count", 0)),
+            int(verification_metrics.get("provider_calls", 0)),
+            int(verification_metrics.get("fallback_calls", 0)),
+            int(verification_metrics.get("unresolved_bundles", 0)),
+            int(verification_metrics.get("risk_routed_fact_count", 0)),
+            int(
+                verification_metrics.get(
+                    "deterministic_low_risk_bypass_count", 0
+                )
+            ),
+            float(verification_metrics.get("wall_seconds", 0.0)),
+        )
 
     materialized = materialize_candidate(
         accepted_anchors,
-        promoted_facts,
+        facts_for_materialization,
         paper_metadata=paper_metadata,
         paper_routing=paper_routing,
         source_text=paper_text,
@@ -1688,9 +2122,20 @@ def _extract_alpha25_tasks(
             "evidence_issues": evidence_issues,
             "materialization_issues": [
                 *evidence_issues,
+                *verification_issues,
                 *promotion_issues,
                 *(issue.to_dict() for issue in materialized.issues),
             ],
+            "quality_audit_records": verification_audit_records,
+            "hierarchical_verification_enabled": hierarchical_verification_enabled,
+            "verification_metrics": verification_metrics,
+            "verification_issue_count": len(verification_issues),
+            "verification_audit_record_count": len(verification_audit_records),
+            "verification_provider_calls": int(
+                verification_metrics.get("provider_calls", 0)
+            ),
+            "verification_input_stage": "post_promotion",
+            "pre_verifier_manifest": pre_verifier_manifest,
             "promotion_enabled": promotion_enabled,
             "promotion_input_fact_count": len(accepted_facts),
             "promotion_accepted_fact_count": promoted_fact_count,

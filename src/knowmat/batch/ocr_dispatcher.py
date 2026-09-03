@@ -420,6 +420,7 @@ class OCRDispatcher:
         )
         from knowmat.pdf.formula_formatter import format_formula_text
         from knowmat.pdf.doi_extractor import extract_first_doi, extract_first_doi_from_ocr_items
+        from knowmat.pdf.paddleocr_api_result_converter import clean_api_markdown
 
         md_text = extracted_text
         md_text = normalize_leading_masthead_and_title(md_text)
@@ -428,6 +429,7 @@ class OCRDispatcher:
         md_text = normalize_plain_author_superscripts(md_text)
         md_text = normalize_alloy_strings(md_text)
         md_text = format_formula_text(md_text)
+        md_text = clean_api_markdown(md_text)
 
         doi = extract_first_doi_from_ocr_items(ocr_items) or extract_first_doi(md_text[:5000])
         if doi and doi not in md_text:

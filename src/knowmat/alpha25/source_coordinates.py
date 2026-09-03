@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from html import unescape
@@ -115,6 +116,11 @@ class SourceCoordinateDecision:
     logical_row: int | None = None
     logical_column: int | None = None
     header_path: tuple[str, ...] = ()
+    # Full logical header path for the value column.  ``header_path`` remains
+    # the property path for backwards compatibility; this separate field lets
+    # materialization recover a source-literal state/condition such as
+    # ``material / 200 h`` without changing the public coordinate contract.
+    column_header_path: tuple[str, ...] = ()
     owner_path: tuple[str, ...] = ()
     owner_cell: Mapping[str, Any] = field(default_factory=dict)
     value_cell: Mapping[str, Any] = field(default_factory=dict)
@@ -131,6 +137,7 @@ class SourceCoordinateDecision:
             "logical_row": self.logical_row,
             "logical_column": self.logical_column,
             "header_path": list(self.header_path),
+            "column_header_path": list(self.column_header_path),
             "owner_path": list(self.owner_path),
             "owner_cell": dict(self.owner_cell),
             "value_cell": dict(self.value_cell),
@@ -150,6 +157,7 @@ class _StructuredTableMatch:
     owner_cell: LogicalCell
     value_cell: LogicalCell
     header_path: tuple[str, ...]
+    column_header_path: tuple[str, ...]
     owner_path: tuple[str, ...]
     source_row_indexes: tuple[int, ...]
 
@@ -164,6 +172,7 @@ class DiscretePropertyCell:
     value_raw: str
     unit_raw: str
     decision_key: str
+    column_indexes: tuple[int, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -173,6 +182,7 @@ class DiscretePropertyCell:
             "value_raw": self.value_raw,
             "unit_raw": self.unit_raw,
             "decision_key": self.decision_key,
+            "column_indexes": list(self.column_indexes or (self.column_index,)),
         }
 
 
@@ -185,6 +195,7 @@ class DiscreteSidecarRow:
     condition: str
     orientation: str
     properties: tuple[DiscretePropertyCell, ...]
+    material: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -192,6 +203,7 @@ class DiscreteSidecarRow:
             "raw_row": self.raw_row,
             "condition": self.condition,
             "orientation": self.orientation,
+            "material": self.material,
             "properties": [cell.to_dict() for cell in self.properties],
         }
 
@@ -380,6 +392,18 @@ def _infer_header_row_count(rows: Sequence[Sequence[LogicalCell | None]]) -> int
             if cell is not None:
                 distinct.setdefault(cell.origin, cell)
         numeric_cells = sum(bool(_NUMBER.search(cell.text)) for cell in distinct.values())
+        # A blank leading cell followed by numeric-looking labels (e.g.
+        # ``HT | 200 h | 500 h``) is a second header row, not the first data
+        # row.  Waiting for the next row avoids collapsing a rowspan/colspan
+        # condition header into the data grid.
+        leading = next(iter(distinct.values()), None)
+        if (
+            numeric_cells >= 2
+            and leading is not None
+            and not leading.text.strip()
+            and index + 1 < len(rows)
+        ):
+            continue
         if numeric_cells >= 2:
             return index
     return 1 if len(rows) > 1 else 0
@@ -556,6 +580,17 @@ def _all_evidence(value: Any) -> list[str]:
 def _evidence_rows(payload: Mapping[str, Any]) -> tuple[tuple[str, ...], ...]:
     rows: list[tuple[str, ...]] = []
     for evidence in _all_evidence(payload):
+        # Providers often preserve a complete HTML row as evidence while the
+        # source document contains the enclosing ``<table>``.  Recover those
+        # literal cells so owner/header support is still checked locally; no
+        # values are inferred from text outside the row.
+        for raw_row in _ROW.findall(evidence_body(evidence)):
+            cells = tuple(
+                _normalized_cell(match.group(3))
+                for match in _CELL.finditer(raw_row)
+            )
+            if cells:
+                rows.append(cells)
         for line in evidence_body(evidence).splitlines() or [evidence]:
             cells = _markdown_cells(line.strip())
             if cells and not _markdown_separator(cells):
@@ -590,10 +625,90 @@ def _property_header_matches(name: str, unit: str, header: str) -> bool:
     ) is not None
 
 
-def _owner_cells(table: LogicalTable, row_index: int, owner: str) -> tuple[LogicalCell, ...]:
+def _owner_cell_condition_suffix(
+    owner: Any, cell: Any, condition: Any
+) -> str | None:
+    """Return a source owner-cell suffix when it proves one condition.
+
+    Some OCR table renderers flatten ``AF-RT``/``AF-200 °C`` into the owner
+    cell while the provider emits ``sample_id_raw=AF`` and keeps the suffix in
+    ``test_condition_raw``.  This is deliberately narrower than alias
+    matching: the candidate owner must occur as a separated prefix and every
+    meaningful condition token must occur after that prefix.  A bare owner or
+    an unmatched suffix is not accepted.
+    """
+
+    owner_text = str(owner or "").strip()
+    cell_text = str(cell or "").strip()
+    condition_text = str(condition or "").strip()
+    if not owner_text or not cell_text or not condition_text:
+        return None
+    owner_key = re.sub(r"[^a-z0-9]+", "", normalize_evidence_text(owner_text))
+    cell_key = re.sub(r"[^a-z0-9]+", "", normalize_evidence_text(cell_text))
+    if not owner_key or not cell_key or cell_key == owner_key:
+        return None
+
+    # Match the literal owner in the cell, then require a non-alphanumeric
+    # boundary so ``A1`` cannot qualify ``A10``.  The raw suffix is retained
+    # for the audit trail and later owner/state reconciliation.
+    match = re.search(re.escape(owner_text), cell_text, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    boundary = cell_text[match.end() : match.end() + 1]
+    if not boundary or boundary.isalnum():
+        return None
+    suffix = cell_text[match.end() :].strip(" -‐‑‒–—:;,/()[]")
+    if not suffix:
+        return None
+
+    condition_key = normalize_evidence_text(condition_text)
+    suffix_key = normalize_evidence_text(suffix)
+    # Numeric qualifiers are the safest discriminator.  Compare all numeric
+    # tokens, not substrings, so 20 cannot match the 200 row.
+    condition_numbers = tuple(
+        re.findall(r"(?<![A-Za-z0-9])[-+]?\d+(?:\.\d+)?", condition_key)
+    )
+    suffix_numbers = tuple(
+        re.findall(r"(?<![A-Za-z0-9])[-+]?\d+(?:\.\d+)?", suffix_key)
+    )
+    if condition_numbers:
+        if not all(number in suffix_numbers for number in condition_numbers):
+            return None
+        return suffix
+
+    # For compact non-numeric states (e.g. ``AF-RT``), require every
+    # meaningful condition token after the owner prefix.  Presentation words
+    # are ignored, but no fuzzy/partial token match is allowed.
+    condition_tokens = tuple(
+        token
+        for token in re.findall(r"[a-z0-9]+", condition_key.casefold())
+        if len(token) > 1 and token not in {"the", "and", "with", "at"}
+    )
+    suffix_tokens = set(re.findall(r"[a-z0-9]+", suffix_key.casefold()))
+    if condition_tokens and all(token in suffix_tokens for token in condition_tokens):
+        return suffix
+    return None
+
+
+def _owner_cell_matches(
+    owner: Any, cell: Any, condition: Any = ""
+) -> bool:
     normalized_owner = normalize_evidence_text(owner)
+    normalized_cell = normalize_evidence_text(cell)
+    if not normalized_owner or not normalized_cell:
+        return False
+    return normalized_cell == normalized_owner or (
+        _owner_cell_condition_suffix(owner, cell, condition) is not None
+    )
+
+
+def _owner_cells(
+    table: LogicalTable, row_index: int, owner: str, condition: Any = ""
+) -> tuple[LogicalCell, ...]:
     return tuple(
-        cell for cell in table.row_cells(row_index) if cell.text == normalized_owner
+        cell
+        for cell in table.row_cells(row_index)
+        if _owner_cell_matches(owner, cell.text, condition)
     )
 
 
@@ -618,7 +733,10 @@ def _value_cell_matches(
     if not normalized_value or not normalized_cell:
         return False
     if normalized_cell == normalized_value:
-        return not require_cell_local_locator
+        # An exact value cell is already its own local locator.  The
+        # ``require_cell_local_locator`` flag is only needed when a citation or
+        # standard suffix must be stripped from a larger cell.
+        return True
 
     cell_brackets = tuple(re.findall(r"\[[^\[\]]+\]", normalized_cell))
     raw_note = normalize_evidence_text(str(data.get("raw_note") or ""))
@@ -666,11 +784,12 @@ def _row_owner_matches(
     value: str,
     name: str,
     unit: str,
+    condition: str,
     evidence_rows: Sequence[Sequence[str]],
 ) -> list[_StructuredTableMatch]:
     matches: list[_StructuredTableMatch] = []
     for row_index in range(table.header_row_count, len(table.rows)):
-        owner_cells = _unique_cells(_owner_cells(table, row_index, owner))
+        owner_cells = _unique_cells(_owner_cells(table, row_index, owner, condition))
         if len(owner_cells) != 1:
             continue
         row_text = tuple(cell.text for cell in table.row_cells(row_index))
@@ -684,7 +803,7 @@ def _row_owner_matches(
             if not _property_header_matches(name, unit, header):
                 continue
             data_supported = any(
-                normalize_evidence_text(owner) in evidence_row
+                normalize_evidence_text(owner_cells[0].text) in evidence_row
                 and cell.text in evidence_row
                 and len(evidence_row) >= 2
                 and _ordered_projection(evidence_row, row_text)
@@ -706,6 +825,7 @@ def _row_owner_matches(
                         owner_cell=owner_cells[0],
                         value_cell=cell,
                         header_path=header_path,
+                        column_header_path=table.header_path(column),
                         owner_path=(owner_cells[0].text,),
                         source_row_indexes=(row_index,),
                     )
@@ -721,6 +841,7 @@ def _column_owner_matches(
     value: str,
     name: str,
     unit: str,
+    condition: str,
     evidence_rows: Sequence[Sequence[str]],
 ) -> list[_StructuredTableMatch]:
     """Resolve tables whose owners are columns and properties are rows."""
@@ -738,14 +859,55 @@ def _column_owner_matches(
                 for row_index in range(table.header_row_count)
                 if column < len(table.rows[row_index])
                 and table.rows[row_index][column] is not None
-                and table.rows[row_index][column].text == normalized_owner
+                and _owner_cell_matches(
+                    owner, table.rows[row_index][column].text, condition
+                )
             )
         )
+        # HTML tables often encode a column owner as a two-level header, e.g.
+        # ``WAAM`` (colspan) + ``Horizontal``.  The model quite reasonably
+        # copies the rendered coordinate ``WAAM / Horizontal`` as
+        # ``sample_id_raw``; neither token exists as one physical cell, so the
+        # ordinary owner-cell lookup would reject an otherwise exact value
+        # coordinate.  Treat the complete logical header path as one
+        # source-backed owner coordinate only when it uniquely matches the
+        # requested owner.  This is presentation recovery, not owner
+        # invention: all tokens and the value cell still come from the same
+        # table column.
+        if not owner_cells:
+            header_path = table.header_path(column)
+            composite_owner = " / ".join(
+                value for value in header_path if str(value or "").strip()
+            )
+            if len(header_path) >= 2 and _owner_cell_matches(
+                owner, composite_owner, condition
+            ):
+                first = table.rows[0][column]
+                origin = first.origin if first is not None else (0, column)
+                owner_cells = (
+                    LogicalCell(
+                        text=composite_owner,
+                        raw_text=" / ".join(
+                            str(value) for value in header_path if str(value)
+                        ),
+                        origin=origin,
+                        is_header=True,
+                    ),
+                )
         if len(owner_cells) != 1:
             continue
+        owner_literal = normalize_evidence_text(owner_cells[0].text)
         header_supported = any(
-            normalized_owner in evidence_row
-            and _ordered_projection(evidence_row, header_paths)
+            owner_literal in evidence_row
+            and (
+                _ordered_projection(evidence_row, header_paths)
+                # A chunk may preserve only the top header row while the
+                # source document supplies the subordinate state row.  The
+                # owner cell is still source-local and data_supported below
+                # proves the value/property row, so accepting this compact
+                # header shape avoids losing a valid coordinate.
+                or len(evidence_row) >= 2
+            )
             for evidence_row in evidence_rows
         )
         if not header_supported:
@@ -790,6 +952,7 @@ def _column_owner_matches(
                     owner_cell=owner_cells[0],
                     value_cell=value_cell,
                     header_path=(property_cell.text,),
+                    column_header_path=table.header_path(column),
                     owner_path=(owner_cells[0].text,),
                     source_row_indexes=physical_rows,
                 )
@@ -807,6 +970,11 @@ def _record_matches_table(
     value = normalize_evidence_text(str(data.get("value_raw") or ""))
     name = str(data.get("property_name_raw") or "")
     unit = str(data.get("unit_raw") or "")
+    condition = str(
+        data.get("test_condition_raw")
+        or data.get("condition_label_raw")
+        or ""
+    ).strip()
     if not owner or not value or not name or not unit:
         return []
     evidence_rows = _evidence_rows(payload)
@@ -818,6 +986,7 @@ def _record_matches_table(
             value=value,
             name=name,
             unit=unit,
+            condition=condition,
             evidence_rows=evidence_rows,
         ),
         *_column_owner_matches(
@@ -827,6 +996,7 @@ def _record_matches_table(
             value=value,
             name=name,
             unit=unit,
+            condition=condition,
             evidence_rows=evidence_rows,
         ),
     ]
@@ -842,6 +1012,7 @@ def _record_matches_table(
                 match.owner_cell.origin,
                 match.value_cell.origin,
                 match.header_path,
+                match.column_header_path,
                 match.owner_path,
             ),
             match,
@@ -857,6 +1028,7 @@ def _decision_key(table: LogicalTable, match: _StructuredTableMatch) -> str:
         "logical_column": match.logical_column,
         "source_cell": list(match.value_cell.origin),
         "header_path": list(match.header_path),
+        "column_header_path": list(match.column_header_path),
         "owner_path": list(match.owner_path),
         "value": match.value_cell.text,
     }
@@ -913,6 +1085,7 @@ def resolve_structured_table_record(
         logical_row=match.logical_row,
         logical_column=match.logical_column,
         header_path=match.header_path,
+        column_header_path=match.column_header_path,
         owner_path=match.owner_path,
         owner_cell=match.owner_cell.to_dict(),
         value_cell=match.value_cell.to_dict(),
@@ -989,12 +1162,25 @@ def _continuous_sidecar_reason(
     return None
 
 
-def _tensile_header(header: str) -> tuple[str, str] | None:
+@dataclass(frozen=True)
+class _DiscreteTensileHeader:
+    property_name: str
+    unit: str
+    statistic: str = ""
+
+
+def _tensile_header(header: str) -> _DiscreteTensileHeader | None:
     raw = str(header or "").strip()
-    unit_match = re.search(r"(?:_|\s)(MPa|GPa|kPa|Pa|%)\s*$", raw, re.I)
+    unit_match = re.search(
+        r"(?:_|\s)(MPa|GPa|kPa|Pa|%)"
+        r"(?:(?:_|\s|-)+(median|lower|upper))?\s*$",
+        raw,
+        re.I,
+    )
     if unit_match is None:
         return None
     unit_token = unit_match.group(1)
+    statistic = str(unit_match.group(2) or "").casefold()
     unit = "%" if unit_token == "%" else unit_token[0].upper() + unit_token[1:].lower()
     # Restore conventional pressure-unit capitalization.
     unit = {"Mpa": "MPa", "Gpa": "GPa", "Kpa": "kPa", "Pa": "Pa"}.get(
@@ -1004,21 +1190,41 @@ def _tensile_header(header: str) -> tuple[str, str] | None:
     semantic = re.sub(r"\s+", " ", semantic).strip()
     folded = normalize_evidence_text(semantic)
     if "ultimate tensile strength" in folded or re.fullmatch(r"uts", folded):
-        return "Ultimate Tensile Strength", unit
-    if "yield strength" in folded or re.fullmatch(r"(?:0\.2 ?% ?)?ys", folded):
-        return (
-            "0.2% Yield Strength" if "0.2" in folded else "Yield Strength",
-            unit,
+        return _DiscreteTensileHeader(
+            "Ultimate Tensile Strength", unit, statistic
         )
+    if (
+        "yield strength" in folded
+        or "yield stress" in folded
+        or re.fullmatch(r"(?:0\.2 ?% ?)?ys", folded)
+    ):
+        if "0.2" in folded:
+            property_name = "0.2% Yield Strength"
+        elif "yield stress" in folded:
+            property_name = "Yield Stress"
+        else:
+            property_name = "Yield Strength"
+        return _DiscreteTensileHeader(property_name, unit, statistic)
     if "elongation" in folded and unit == "%":
-        return "Elongation", unit
+        return _DiscreteTensileHeader("Elongation", unit, statistic)
     return None
 
 
 def _sidecar_decision_key(
-    content_hash: str, reference: str, row_index: int, column_index: int
+    content_hash: str,
+    reference: str,
+    row_index: int,
+    column_indexes: int | Sequence[int],
 ) -> str:
-    coordinate = f"{content_hash}:{reference}:{row_index}:{column_index}"
+    indexes = (
+        (column_indexes,)
+        if isinstance(column_indexes, int)
+        else tuple(column_indexes)
+    )
+    coordinate = (
+        f"{content_hash}:{reference}:{row_index}:"
+        + ",".join(str(value) for value in indexes)
+    )
     return "sidecar-cell:" + hashlib.sha256(coordinate.encode("utf-8")).hexdigest()
 
 
@@ -1068,7 +1274,7 @@ def _parse_discrete_sidecar(
             nonempty_cell_count=nonempty,
             reason=continuous,
         )
-    property_columns = {
+    property_columns: dict[int, _DiscreteTensileHeader] = {
         column: parsed
         for column, header in enumerate(headers)
         if (parsed := _tensile_header(header)) is not None
@@ -1089,40 +1295,129 @@ def _parse_discrete_sidecar(
         for index, header in enumerate(normalized_headers)
         if header in {"condition", "state", "material state", "sample condition"}
     ]
-    if len(condition_columns) != 1:
+    material_columns = [
+        index
+        for index, header in enumerate(normalized_headers)
+        if header == "material"
+    ]
+    if len(condition_columns) > 1 or len(material_columns) > 1:
+        return _sidecar_rejection(reference, "missing_or_ambiguous_condition_column")
+    if condition_columns and material_columns:
+        return _sidecar_rejection(
+            reference, "ambiguous_condition_and_material_columns"
+        )
+    if not condition_columns and not material_columns:
         return _sidecar_rejection(reference, "missing_or_ambiguous_condition_column")
     orientation_columns = [
         index
         for index, header in enumerate(normalized_headers)
-        if header in {"orientation", "build orientation", "loading orientation"}
+        if header
+        in {"orientation", "build orientation", "loading orientation", "direction"}
     ]
     if len(orientation_columns) > 1:
         return _sidecar_rejection(reference, "ambiguous_orientation_column")
-    condition_column = condition_columns[0]
+    condition_column = condition_columns[0] if condition_columns else None
+    material_column = material_columns[0] if material_columns else None
     orientation_column = orientation_columns[0] if orientation_columns else None
+
+    grouped_columns: dict[
+        tuple[str, str], dict[str, tuple[int, _DiscreteTensileHeader]]
+    ] = {}
+    for column, descriptor in property_columns.items():
+        key = (descriptor.property_name, descriptor.unit)
+        statistic = descriptor.statistic or "value"
+        group = grouped_columns.setdefault(key, {})
+        if statistic in group:
+            return _sidecar_rejection(
+                reference, "duplicate_tensile_statistical_column"
+            )
+        group[statistic] = (column, descriptor)
+
+    property_coordinates: list[
+        tuple[tuple[int, ...], str, str, str]
+    ] = []
+    for (property_name, unit), group in grouped_columns.items():
+        statistics = set(group)
+        if statistics == {"value"}:
+            column = group["value"][0]
+            property_coordinates.append(((column,), property_name, unit, "value"))
+            continue
+        if statistics != {"median", "lower", "upper"}:
+            return _sidecar_rejection(
+                reference, "incomplete_tensile_statistical_columns"
+            )
+        median = group["median"][0]
+        lower = group["lower"][0]
+        upper = group["upper"][0]
+        property_coordinates.extend(
+            (
+                ((median,), f"{property_name} median", unit, "median"),
+                (
+                    (lower, upper),
+                    f"{property_name} lower-upper interval",
+                    unit,
+                    "range",
+                ),
+            )
+        )
+    property_coordinates.sort(key=lambda value: min(value[0]))
+
     recovered_rows: list[DiscreteSidecarRow] = []
     for row_index, row in enumerate(rows, start=1):
-        condition = row[condition_column].strip()
+        condition = (
+            row[condition_column].strip() if condition_column is not None else ""
+        )
+        material = (
+            row[material_column].strip() if material_column is not None else ""
+        )
         orientation = (
             row[orientation_column].strip() if orientation_column is not None else ""
         )
-        if not condition or (orientation_column is not None and not orientation):
+        if (
+            not (condition or material)
+            or (orientation_column is not None and not orientation)
+        ):
             return _sidecar_rejection(reference, "missing_row_condition_or_orientation")
-        properties: list[DiscretePropertyCell] = []
-        for column, (property_name, unit) in sorted(property_columns.items()):
+        numeric_cells: dict[int, float] = {}
+        for column in property_columns:
             value = row[column].strip()
             if _EXACT_NUMBER.fullmatch(value) is None:
                 return _sidecar_rejection(reference, "nonnumeric_tensile_cell")
+            numeric_cells[column] = float(value.replace("−", "-"))
+        for group in grouped_columns.values():
+            if set(group) != {"median", "lower", "upper"}:
+                continue
+            median_value = numeric_cells[group["median"][0]]
+            lower_value = numeric_cells[group["lower"][0]]
+            upper_value = numeric_cells[group["upper"][0]]
+            if lower_value > upper_value:
+                return _sidecar_rejection(
+                    reference, "inverted_tensile_statistical_bounds"
+                )
+            if not lower_value <= median_value <= upper_value:
+                return _sidecar_rejection(
+                    reference, "median_outside_tensile_statistical_bounds"
+                )
+        properties: list[DiscretePropertyCell] = []
+        for columns, property_name, unit, value_kind in property_coordinates:
+            values = tuple(row[column].strip() for column in columns)
+            if value_kind == "range":
+                value = f"{values[0]}–{values[1]}"
+                header_raw = " + ".join(headers[column] for column in columns)
+            else:
+                value = values[0]
+                header_raw = headers[columns[0]]
             properties.append(
                 DiscretePropertyCell(
-                    column_index=column,
-                    header_raw=headers[column],
+                    column_index=columns[0],
+                    header_raw=header_raw,
                     property_name=property_name,
                     value_raw=value,
                     unit_raw=unit,
                     decision_key=_sidecar_decision_key(
-                        content_hash, reference, row_index, column
+                        content_hash, reference, row_index, columns
                     ),
+                    column_indexes=columns,
                 )
             )
         recovered_rows.append(
@@ -1132,6 +1427,7 @@ def _parse_discrete_sidecar(
                 condition=condition,
                 orientation=orientation,
                 properties=tuple(properties),
+                material=material,
             )
         )
     return DiscreteSidecarDecision(
@@ -1177,9 +1473,36 @@ def discrete_tensile_sidecars(
 
 
 def _dense_tensile_header(header: str) -> tuple[str, str] | None:
-    """Resolve one explicit table header to a core tensile semantic and unit."""
+    """Resolve one explicit table header to a tensile-test semantic and unit.
+
+    Elastic modulus is reported in the same owner/orientation matrices as YS,
+    UTS, and elongation. Excluding it from the logical-cell ledger caused an
+    otherwise fully explicit row to fall back to the shared-evidence fan-out
+    gate, which then quarantined every owner-specific value. Keep the parser
+    narrow: only explicit elastic/Young's/modulus-of-elasticity headings with
+    a pressure unit are admitted.
+    """
 
     raw = re.sub(r"\s+", " ", str(header or "")).strip()
+    # Some tensile tables use the percent sign as a leading label rather than
+    # a trailing unit, e.g. ``% Elongation (at break)``.  This is still an
+    # explicit unit/property coordinate; recognize only the narrow tensile
+    # phrase so arbitrary leading-percent columns cannot become Properties.
+    leading_percent_elongation = re.fullmatch(
+        r"(?ix)%\s*(?P<kind>total\s+|uniform\s+)?elongation"
+        r"(?P<failure>\s*\(\s*(?:at|to)\s+(?:break|failure|fracture)\s*\)"
+        r"|\s+(?:at|to)\s+(?:break|failure|fracture))?",
+        raw,
+    )
+    if leading_percent_elongation is not None:
+        kind = (leading_percent_elongation.group("kind") or "").strip().casefold()
+        if kind == "total":
+            return "Total Elongation", "%"
+        if kind == "uniform":
+            return "Uniform Elongation", "%"
+        if leading_percent_elongation.group("failure"):
+            return "Fracture Elongation", "%"
+        return "Elongation", "%"
     unit_match = re.search(
         r"(?ix)(?:\(\s*|\[\s*|/\s*|\s+)"
         r"(MPa|GPa|kPa|Pa|ksi|%)\s*(?:\)|\])?\s*$",
@@ -1208,6 +1531,11 @@ def _dense_tensile_header(header: str) -> tuple[str, str] | None:
             "0.2% Yield Strength" if "0.2" in semantic else "Yield Strength",
             unit,
         )
+    if unit != "%" and re.fullmatch(
+        r"(?:young s|elastic) modulus|modulus of elasticity",
+        semantic,
+    ):
+        return "Elastic Modulus", unit
     if unit == "%" and re.search(
         r"\b(?:total |uniform )?elongation\b|\b(?:eab|te|el)\b", semantic
     ):
@@ -1304,6 +1632,55 @@ def _dense_orientation_header(header_path: Sequence[str]) -> bool:
     )
 
 
+_DENSE_ORIENTATION_TOKEN = re.compile(
+    r"(?:horizontal|vertical|transverse|longitudinal|parallel|"
+    r"perpendicular|build direction|printing direction|x|y|z)"
+)
+
+
+def _dense_explicit_orientation_value(
+    owner: str, header_path: Sequence[str]
+) -> str:
+    """Return the one header orientation already encoded by an owner suffix."""
+
+    header_orientations = {
+        normalized: str(value or "").strip()
+        for value in header_path
+        if (normalized := normalize_evidence_text(value))
+        and _DENSE_ORIENTATION_TOKEN.fullmatch(normalized)
+    }
+    normalized_owner = normalize_evidence_text(owner)
+    owner_match = re.search(
+        r"(?:\s*/\s*|\s+)(horizontal|vertical|transverse|longitudinal|"
+        r"parallel|perpendicular|x|y|z)$",
+        normalized_owner,
+    )
+    if (
+        len(header_orientations) != 1
+        or owner_match is None
+        or owner_match.group(1) not in header_orientations
+    ):
+        return ""
+    owner_literal_match = re.search(
+        r"(?i)(?:\s*/\s*|\s+)(horizontal|vertical|transverse|longitudinal|"
+        r"parallel|perpendicular|x|y|z)$",
+        str(owner or "").strip(),
+    )
+    return (
+        owner_literal_match.group(1)
+        if owner_literal_match is not None
+        else header_orientations[owner_match.group(1)]
+    )
+
+
+def _dense_explicit_orientation_owner(
+    owner: str, header_path: Sequence[str]
+) -> bool:
+    """Require one existing owner whose suffix equals the header coordinate."""
+
+    return bool(_dense_explicit_orientation_value(owner, header_path))
+
+
 def _dense_source_rows(
     table: LogicalTable, owner_cell: LogicalCell, value_cell: LogicalCell
 ) -> tuple[str, ...]:
@@ -1345,6 +1722,7 @@ def _dense_cell(
         owner_cell=owner_cell,
         value_cell=value_cell,
         header_path=header_path,
+        column_header_path=header_path,
         owner_path=(owner_cell.text,),
         source_row_indexes=tuple(
             dict.fromkeys((owner_cell.origin[0], value_cell.origin[0]))
@@ -1470,7 +1848,10 @@ def _column_owner_dense_cells(
         # identity/state ledger.  Creating a material owner from the column
         # path alone raises loose recall but has repeatedly produced wrong-owner
         # strict claims.  Keep the complete table in audit and fail closed.
-        if _dense_orientation_header(header_path):
+        if _dense_orientation_header(header_path) and not (
+            len(owners) == 1
+            and _dense_explicit_orientation_owner(owners[0], header_path)
+        ):
             saw_orientation_owner = True
             continue
         owner_cell = next(
@@ -1522,7 +1903,7 @@ def _column_owner_dense_cells(
                 set(),
             ) or _dense_orientation(
                 row_cells, {property_cell.origin, value_cell.origin}
-            )
+            ) or _dense_explicit_orientation_value(owner, header_path)
             cell = _dense_cell(
                 table,
                 owner=owner,
@@ -1605,6 +1986,37 @@ _ASSERTION_VALUE_WITH_UNIT = re.compile(
     r"(?:\s*(?:±|\+/-)\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
     r"(?:[eE][-+]?\d+)?)?)\s*(?P<unit>gpa|mpa|\\?%)"
 )
+_ASSERTION_COORDINATED_STRENGTHS = re.compile(
+    r"(?ix)"
+    r"(?P<yield_property>\byield)\s+and\s+"
+    r"(?P<tensile_property>(?:ultimate\s+)?tensile)\s+strengths?\s+of\s+"
+    r"(?P<yield_value>(?:[~≈<>≤≥]\s*)?"
+    r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+    r"(?:\s*(?:±|\+/-)\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+    r"(?:[eE][-+]?\d+)?)?)\s*(?:,?\s*and\s+)"
+    r"(?P<tensile_value>(?:[~≈<>≤≥]\s*)?"
+    r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+    r"(?:\s*(?:±|\+/-)\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+    r"(?:[eE][-+]?\d+)?)?)\s*(?P<unit>gpa|mpa)"
+    r"\s*,?\s*respectively\b"
+)
+
+
+def tensile_shared_strength_head_v206_enabled() -> bool:
+    """Return whether explicit shared-head YS/UTS coordinates are enabled."""
+
+    raw = os.getenv(
+        "KNOWMAT2_ALPHA25_TENSILE_SHARED_STRENGTH_HEAD_V206", "1"
+    )
+    return raw.strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "disabled",
+    }
+
+
 _ASSERTION_CONTINUATION = re.compile(
     r"(?ix)^\s*(?:its|their|this|these|the\s+(?:alloy|sample|specimen|material)|"
     r"(?:an?|the)\s+(?:yield|ultimate|tensile|fracture|uniform|total|elongation))\b"
@@ -1746,6 +2158,64 @@ def _assertion_value_mentions(text: str) -> tuple[_AssertionValueMention, ...]:
         )
         for match in _ASSERTION_VALUE_WITH_UNIT.finditer(text)
     )
+
+
+def _assertion_coordinated_strength_pairs(
+    text: str,
+) -> tuple[
+    tuple[tuple[str, str, int, int], _AssertionValueMention], ...
+]:
+    """Expand one explicit shared-head YS/UTS ``respectively`` pair.
+
+    Scientific prose commonly elides the first ``strength`` noun and the
+    first unit: ``yield and tensile strengths of A and B MPa, respectively``.
+    The ordinary mention parser cannot safely infer either omission.  This
+    bounded grammar restores both only when the source itself declares the
+    one-to-one ordering.  It validates existing candidates and never creates
+    a new Property.
+    """
+
+    if not tensile_shared_strength_head_v206_enabled():
+        return ()
+
+    rows: list[
+        tuple[tuple[str, str, int, int], _AssertionValueMention]
+    ] = []
+    for match in _ASSERTION_COORDINATED_STRENGTHS.finditer(text):
+        unit = _assertion_unit(match.group("unit"))
+        rows.extend(
+            (
+                (
+                    (
+                        "yield_strength",
+                        "Yield Strength",
+                        match.start("yield_property"),
+                        match.end("yield_property"),
+                    ),
+                    _AssertionValueMention(
+                        raw=match.group("yield_value").strip(),
+                        unit=unit,
+                        start=match.start("yield_value"),
+                        end=match.end("yield_value"),
+                    ),
+                ),
+                (
+                    (
+                        "ultimate_tensile_strength",
+                        "Ultimate Tensile Strength",
+                        match.start("tensile_property"),
+                        match.end("tensile_property"),
+                    ),
+                    _AssertionValueMention(
+                        raw=match.group("tensile_value").strip(),
+                        unit=unit,
+                        start=match.start("tensile_value"),
+                        end=match.end("tensile_value"),
+                    ),
+                ),
+            )
+        )
+    return tuple(rows)
 
 
 def _assertion_result_condition(text: str) -> str:
@@ -2150,7 +2620,20 @@ def resolve_tensile_assertion_coordinate(
     for segment in _assertion_segments(source_text):
         if not any(needle in segment.text for needle in evidence_needles):
             continue
-        values = _assertion_value_mentions(segment.text)
+        coordinated_pairs = _assertion_coordinated_strength_pairs(segment.text)
+        values_by_key = {
+            (row.start, row.end, row.raw, row.unit): row
+            for row in (
+                *_assertion_value_mentions(segment.text),
+                *(row[1] for row in coordinated_pairs),
+            )
+        }
+        values = tuple(
+            sorted(
+                values_by_key.values(),
+                key=lambda row: (row.start, row.end, row.raw, row.unit),
+            )
+        )
         matching_values = tuple(
             row
             for row in values
@@ -2165,19 +2648,42 @@ def resolve_tensile_assertion_coordinate(
             segment.text, owner_aliases
         )
         for value in matching_values:
-            property_row, property_ambiguous, property_reason = (
-                _assertion_property_for_value(
-                    segment.text,
-                    value,
-                    family,
-                    property_mentions,
-                    values,
-                )
+            coordinated_property = next(
+                (
+                    property_row
+                    for property_row, coordinated_value in coordinated_pairs
+                    if property_row[0] == family
+                    and coordinated_value.start == value.start
+                    and coordinated_value.end == value.end
+                    and coordinated_value.raw == value.raw
+                ),
+                None,
             )
+            if coordinated_property is not None:
+                property_row = coordinated_property
+                property_ambiguous = False
+                property_reason = "coordinated_property_value"
+            else:
+                property_row, property_ambiguous, property_reason = (
+                    _assertion_property_for_value(
+                        segment.text,
+                        value,
+                        family,
+                        property_mentions,
+                        values,
+                    )
+                )
             if property_ambiguous:
                 ambiguity_reasons.add(property_reason)
                 continue
             if property_row is None:
+                continue
+            if coordinated_property is not None and len(
+                {row.owner_key for row in owner_mentions}
+            ) > 1:
+                ambiguity_reasons.add(
+                    "coordinated_properties_with_collective_owners"
+                )
                 continue
             owner, owner_ambiguous, owner_reason = _assertion_owner_for_value(
                 segment.text, value, owner_mentions, values

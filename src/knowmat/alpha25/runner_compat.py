@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import unicodedata
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -46,6 +47,75 @@ _HEAT_TREATMENT_TEMPERATURE = re.compile(
     r"(?ix)^(?:(?:post[\s_-]*)?(?:ht|heat[\s_-]*treatment)|heating)"
     r"[\s_-]*temperature$"
 )
+_TENSILE_VALUE_NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
+_TENSILE_VALUE_WITH_EMBEDDED_UNIT = re.compile(
+    rf"(?ix)^\s*"
+    rf"(?P<central>{_TENSILE_VALUE_NUMBER})\s*"
+    rf"(?P<unit1>MPa|GPa|%|percent)?\s*"
+    rf"(?:\s*(?:±|\+/-|plus\s*/?\s*minus)\s*"
+    rf"(?P<uncertainty>{_TENSILE_VALUE_NUMBER})\s*"
+    rf"(?P<unit2>MPa|GPa|%|percent)?\s*)?$"
+)
+_QUANTITY_NUMBER = re.compile(
+    r"(?<![\w.])[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?(?![\w.])"
+)
+_SOURCE_LITERAL_DERIVED_ENERGY_UNITS = {
+    "line_energy": re.compile(
+        r"(?ix)(?:"
+        r"\bj\s*(?:/|per)\s*mm(?!\s*(?:\^?\s*[-+]?\s*[23]))|"
+        r"\bj\s*(?:[\u00b7*]\s*)?mm\s*(?:\^?\s*-\s*1)"
+        r")"
+    ),
+    "energy_density": re.compile(
+        r"(?ix)(?:"
+        r"\bj\s*(?:/|per)\s*mm\s*(?:\^?\s*3)|"
+        r"\bj\s*(?:[\u00b7*]\s*)?mm\s*(?:\^?\s*-\s*3)"
+        r")"
+    ),
+}
+
+
+def _normalized_quantity_evidence(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = text.replace("−", "-").replace("–", "-").replace("—", "-")
+    text = re.sub(r"\\(?:mathrm|text)\s*\{([^{}]*)\}", r"\1", text)
+    text = text.replace("{", "").replace("}", "").replace("$", "")
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _source_contains_numeric_value(value: Any, evidence: str) -> bool:
+    try:
+        target = float(value)
+    except (TypeError, ValueError):
+        return False
+    if not (target == target and abs(target) != float("inf")):
+        return False
+    for match in _QUANTITY_NUMBER.finditer(evidence):
+        try:
+            candidate = float(match.group(0))
+        except ValueError:
+            continue
+        if candidate == target:
+            return True
+    return False
+
+
+def _derived_energy_is_source_literal(parameter: dict[str, Any]) -> bool:
+    """Require a derived result, not merely its inputs, in cited evidence."""
+
+    code = str(parameter.get("parameter_code") or "").strip().casefold()
+    unit_pattern = _SOURCE_LITERAL_DERIVED_ENERGY_UNITS.get(code)
+    if unit_pattern is None:
+        return True
+    evidence = _normalized_quantity_evidence(parameter.get("source_evidence"))
+    value = parameter.get("canonical_value")
+    if value is None:
+        value = parameter.get("value_raw")
+    return bool(
+        evidence
+        and unit_pattern.search(evidence)
+        and _source_contains_numeric_value(value, evidence)
+    )
 
 
 def property_name_without_unit_suffix(raw_name: Any) -> str:
@@ -75,6 +145,70 @@ def install_property_alias_compat(normalize_tensile: Any) -> None:
 
     compatible_resolver._knowmat_unit_suffix_compat = True  # type: ignore[attr-defined]
     normalize_tensile.resolve_property = compatible_resolver
+
+
+def tensile_value_without_embedded_unit(
+    raw_value: Any, raw_unit: Any
+) -> str | None:
+    """Return a parser-only numeric spelling when the same unit is embedded."""
+
+    unit_aliases = {
+        "%": "%",
+        "percent": "%",
+        "mpa": "MPa",
+        "gpa": "GPa",
+    }
+    declared = unit_aliases.get(str(raw_unit or "").strip().casefold())
+    if declared is None:
+        return None
+    original_text = unicodedata.normalize("NFKC", str(raw_value or "")).strip()
+    text = original_text
+    text = text.replace(r"\%", "%").replace(r"\pm", "±").replace("$", "")
+    text = re.sub(r"\\[,;:! ]", " ", text)
+    match = _TENSILE_VALUE_WITH_EMBEDDED_UNIT.fullmatch(text)
+    if match is None:
+        return None
+    units = {
+        unit_aliases.get(str(raw or "").strip().casefold())
+        for raw in (match.group("unit1"), match.group("unit2"))
+        if raw
+    }
+    if units and units != {declared}:
+        return None
+    if not units and not (r"\pm" in original_text or "$" in original_text):
+        return None
+    central = match.group("central")
+    uncertainty = match.group("uncertainty")
+    return central if uncertainty is None else f"{central} ± {uncertainty}"
+
+
+def install_tensile_value_unit_compat(normalize_tensile: Any) -> None:
+    """Let the frozen parser read repeated literal units without losing raw text."""
+
+    original: Callable[..., tuple[Any, ...]] = normalize_tensile.normalize_tensile_value
+    if getattr(original, "_knowmat_embedded_unit_compat", False):
+        return
+
+    def compatible_value(
+        candidate: dict[str, Any], canonical_property: str, rules: Any
+    ) -> tuple[Any, ...]:
+        parser_value = tensile_value_without_embedded_unit(
+            candidate.get("value_raw"), candidate.get("unit_raw")
+        )
+        if parser_value is None:
+            return original(candidate, canonical_property, rules)
+        semantic_candidate = deepcopy(candidate)
+        semantic_candidate["value_raw"] = parser_value
+        value, issues, audit = original(
+            semantic_candidate, canonical_property, rules
+        )
+        if isinstance(value, dict):
+            value = deepcopy(value)
+            value["value_raw"] = str(candidate.get("value_raw") or "").strip()
+        return value, issues, audit
+
+    compatible_value._knowmat_embedded_unit_compat = True  # type: ignore[attr-defined]
+    normalize_tensile.normalize_tensile_value = compatible_value
 
 
 def structure_unit_without_tex(raw_unit: Any) -> Any:
@@ -124,6 +258,8 @@ def process_parameter_alias(
         return "beam_diameter"
     if key in {"volumetric energy density", "volume energy density"}:
         return "energy_density"
+    if key in {"line energy", "linear energy"}:
+        return "line_energy"
     if key in {
         "build chamber environment",
         "build environment",
@@ -181,6 +317,91 @@ def process_parameter_alias(
         if _MASS_RATE_UNIT.fullmatch(unit):
             return "feed_rate_mass"
     return None
+
+
+def process_energy_value_without_embedded_unit(
+    raw_value: Any,
+    raw_unit: Any,
+    parameter_code: Any,
+) -> str | None:
+    """Return a parser-only number for an explicit energy value with its unit."""
+
+    code = str(parameter_code or "").strip().casefold()
+    unit_pattern = _SOURCE_LITERAL_DERIVED_ENERGY_UNITS.get(code)
+    if unit_pattern is None:
+        return None
+    declared_unit = _normalized_quantity_evidence(raw_unit)
+    if unit_pattern.fullmatch(declared_unit) is None:
+        return None
+    value = _normalized_quantity_evidence(raw_value)
+    match = re.fullmatch(
+        rf"(?ix)\s*(?:approximately|approx\.?|about|around|~|≈)?\s*"
+        rf"(?P<number>{_TENSILE_VALUE_NUMBER})\s*"
+        rf"(?P<unit>.+?)\s*",
+        value,
+    )
+    if match is None or unit_pattern.fullmatch(match.group("unit")) is None:
+        return None
+    return match.group("number")
+
+
+def _reported_auxiliary_energy_parameter(
+    raw: dict[str, Any],
+    *,
+    parameter_code: str,
+    parser_value: str | None,
+    stage_uid: str,
+    rules: Any,
+    normalize_process: Any,
+) -> dict[str, Any] | None:
+    """Build a grounded reported auxiliary record rejected only by profile policy."""
+
+    if parser_value is None:
+        return None
+    catalog = getattr(rules, "parameter_catalog", None)
+    definition = catalog.get(parameter_code) if isinstance(catalog, dict) else None
+    if not isinstance(definition, dict) or not str(
+        definition.get("model_policy") or ""
+    ).startswith("auxiliary_"):
+        return None
+    evidence = _normalized_quantity_evidence(raw.get("source_evidence"))
+    unit_pattern = _SOURCE_LITERAL_DERIVED_ENERGY_UNITS.get(parameter_code)
+    if (
+        unit_pattern is None
+        or unit_pattern.search(evidence) is None
+        or not _source_contains_numeric_value(parser_value, evidence)
+    ):
+        return None
+    routing_class_for_code = getattr(
+        normalize_process, "_routing_class_for_code", None
+    )
+    routing_class = (
+        routing_class_for_code(parameter_code, rules)
+        if callable(routing_class_for_code)
+        else "process_parameter"
+    )
+    try:
+        confidence = min(1.0, max(0.0, float(raw.get("confidence", 0.5))))
+    except (TypeError, ValueError):
+        confidence = 0.5
+    record: dict[str, Any] = {
+        "parameter_code": parameter_code,
+        "routing_class": routing_class,
+        "value_kind": "scalar",
+        "value_raw": str(raw.get("value_raw") or "").strip(),
+        "unit_raw": raw.get("unit_raw"),
+        "canonical_value": float(parser_value),
+        "canonical_unit": definition.get("canonical_unit"),
+        "status": "reported",
+        "normalization_rule_id": "compat.reported_auxiliary_energy.v1",
+        "stage_scope": stage_uid,
+        "source_evidence": str(raw.get("source_evidence") or "").strip(),
+        "confidence": confidence,
+    }
+    condition = str(raw.get("condition_label_raw") or "").strip()
+    if condition:
+        record["condition_label"] = condition
+    return record
 
 
 def _resolved_process(
@@ -562,6 +783,18 @@ def _energy_source_qualifier(raw_key: Any) -> str | None:
     return None
 
 
+def _combine_condition_labels(discriminator: str, existing: Any) -> str:
+    """Preserve an existing process context while adding a collision discriminator."""
+
+    current = str(existing or "").strip()
+    if not current:
+        return discriminator
+    parts = [row.strip() for row in current.split("|") if row.strip()]
+    if discriminator.casefold() in {row.casefold() for row in parts}:
+        return current
+    return f"{discriminator} | {current}"
+
+
 def prepare_process_variant_conditions(
     candidate: dict[str, Any],
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -597,24 +830,26 @@ def prepare_process_variant_conditions(
                 energy_rows.append((parameter_index, raw, qualifier))
         if len({qualifier for _, _, qualifier in energy_rows}) >= 2:
             for parameter_index, raw, qualifier in energy_rows:
-                if raw.get("condition_label_raw"):
+                before = raw.get("condition_label_raw")
+                combined = _combine_condition_labels(qualifier, before)
+                if combined == before:
                     continue
-                raw["condition_label_raw"] = qualifier
+                raw["condition_label_raw"] = combined
                 changes.append(
                     {
                         "path": (
                             f"candidate_stages.{stage_index}.parameters_raw."
                             f"{parameter_index}.condition_label_raw"
                         ),
-                        "before": None,
-                        "after": qualifier,
+                        "before": before,
+                        "after": combined,
                     }
                 )
 
         alias_rows: list[tuple[int, dict[str, Any], str]] = []
         signatures_by_code: dict[str, set[tuple[str, str]]] = {}
         for parameter_index, raw in enumerate(parameters):
-            if not isinstance(raw, dict) or raw.get("condition_label_raw"):
+            if not isinstance(raw, dict):
                 continue
             alias_code = process_parameter_alias(
                 raw.get("parameter_name_raw"),
@@ -646,22 +881,26 @@ def prepare_process_variant_conditions(
             label = _process_variant_label(raw, disambiguate_value=disambiguate)
             if label is None:
                 continue
-            raw["condition_label_raw"] = label
+            before = raw.get("condition_label_raw")
+            combined = _combine_condition_labels(label, before)
+            if combined == before:
+                continue
+            raw["condition_label_raw"] = combined
             changes.append(
                 {
                     "path": (
                         f"candidate_stages.{stage_index}.parameters_raw."
                         f"{parameter_index}.condition_label_raw"
                     ),
-                    "before": None,
-                    "after": label,
+                    "before": before,
+                    "after": combined,
                 }
             )
     return prepared, changes
 
 
 def install_structure_unit_compat(normalize_structure: Any) -> None:
-    """Let the frozen structure normalizer recognize OCR/TeX micrometre units."""
+    """Install lossless compatibility for structure units and raw identities."""
 
     original: Callable[..., Any] = normalize_structure._canonical_unit
     if getattr(original, "_knowmat_tex_unit_compat", False):
@@ -673,6 +912,148 @@ def install_structure_unit_compat(normalize_structure: Any) -> None:
 
     compatible_unit._knowmat_tex_unit_compat = True  # type: ignore[attr-defined]
     normalize_structure._canonical_unit = compatible_unit
+
+    original_entity = getattr(normalize_structure, "_normalize_entity", None)
+    if not callable(original_entity) or getattr(
+        original_entity, "_knowmat_raw_identity_compat", False
+    ):
+        return
+
+    def compatible_entity(
+        candidate: Any,
+        path: str,
+        ontology: dict[str, Any],
+        issues: list[Any],
+        audit: list[Any],
+    ) -> dict[str, Any]:
+        entity = original_entity(candidate, path, ontology, issues, audit)
+        canonical = re.sub(
+            r"[^a-z0-9]+",
+            "",
+            unicodedata.normalize(
+                "NFKC", str(entity.get("canonical_name") or "")
+            ).casefold(),
+        )
+        raw_name = str(entity.get("name_raw") or "").strip()
+        raw_alias = re.sub(
+            r"[^a-z0-9]+",
+            "",
+            unicodedata.normalize("NFKC", raw_name).casefold(),
+        )
+        placeholders = {
+            "unknown",
+            "unknownentity",
+            "notreported",
+            "unspecified",
+        }
+        if canonical in placeholders and raw_name and raw_alias not in placeholders:
+            before = entity.get("canonical_name")
+            entity["canonical_name"] = None
+            audit_factory = getattr(normalize_structure, "_audit", None)
+            if callable(audit_factory):
+                audit.append(
+                    audit_factory(
+                        "compat.structure_raw_identity.v1",
+                        f"{path}.canonical_name",
+                        before,
+                        None,
+                    )
+                )
+        return entity
+
+    compatible_entity._knowmat_raw_identity_compat = True  # type: ignore[attr-defined]
+    normalize_structure._normalize_entity = compatible_entity
+
+
+def _quarantine_ungrounded_derived_energy(
+    route: Any,
+    normalize_process: Any,
+) -> tuple[list[Any], list[Any]]:
+    """Remove only computed energy results absent from their cited evidence."""
+
+    issues: list[Any] = []
+    audit: list[Any] = []
+    if not isinstance(route, dict):
+        return issues, audit
+    stages = route.get("stages")
+    if not isinstance(stages, list):
+        return issues, audit
+
+    issue_factory = getattr(normalize_process, "_issue", None)
+    audit_factory = getattr(normalize_process, "_audit", None)
+    for stage_index, stage in enumerate(stages):
+        if not isinstance(stage, dict):
+            continue
+        parameters = stage.get("parameters")
+        if not isinstance(parameters, list):
+            continue
+        removed_rows: list[tuple[int, dict[str, Any]]] = []
+        for parameter_index, parameter in enumerate(parameters):
+            if not isinstance(parameter, dict):
+                continue
+            code = str(parameter.get("parameter_code") or "").strip().casefold()
+            if (
+                str(parameter.get("status") or "").strip().casefold()
+                != "derived"
+                or code not in _SOURCE_LITERAL_DERIVED_ENERGY_UNITS
+                or _derived_energy_is_source_literal(parameter)
+            ):
+                continue
+            removed_rows.append((parameter_index, deepcopy(parameter)))
+        if not removed_rows:
+            continue
+        removed_indexes = {index for index, _ in removed_rows}
+        retained = [
+            parameter
+            for parameter_index, parameter in enumerate(parameters)
+            if parameter_index not in removed_indexes
+        ]
+        before = deepcopy(parameters)
+        after = deepcopy(retained)
+        stage["parameters"] = retained
+        for _, parameter in removed_rows:
+            code = str(parameter.get("parameter_code") or "derived_energy")
+            path = (
+                f"Process_Route.stages.{stage_index}.parameters.{code}"
+            )
+            if callable(issue_factory):
+                issues.append(
+                    issue_factory(
+                        "promotion_ungrounded_derived_parameter_quarantined",
+                        "review",
+                        path,
+                        (
+                            "A computed process-energy result was absent from its "
+                            "own cited evidence and was isolated without removing "
+                            "the reported input parameters or process stage."
+                        ),
+                        evidence=str(parameter.get("source_evidence") or ""),
+                        expected={
+                            "result_value_and_unit_in_source_evidence": True,
+                            "reported_inputs_preserved": True,
+                        },
+                        actual={
+                            "removed": deepcopy(parameter),
+                            "stage_parameters_before": before,
+                            "stage_parameters_after": after,
+                            "reason": "derived_result_not_source_literal",
+                        },
+                        suggested_action=(
+                            "Restore only when the cited source explicitly reports "
+                            "this result value and unit."
+                        ),
+                    )
+                )
+            if callable(audit_factory):
+                audit.append(
+                    audit_factory(
+                        "compat.ungrounded_derived_parameter_quarantine.v1",
+                        path,
+                        deepcopy(parameter),
+                        None,
+                    )
+                )
+    return issues, audit
 
 
 def install_process_unit_compat(normalize_process: Any) -> None:
@@ -711,15 +1092,56 @@ def install_process_unit_compat(normalize_process: Any) -> None:
             ):
                 alias_raw = deepcopy(raw)
                 alias_raw["parameter_name_raw"] = alias_code
+                parser_value = process_energy_value_without_embedded_unit(
+                    raw.get("value_raw"),
+                    raw.get("unit_raw"),
+                    alias_code,
+                )
+                if parser_value is not None:
+                    alias_raw["value_raw"] = parser_value
                 alias_record, alias_issues, alias_audit = original_parameter(
                     alias_raw, stage_uid, profile, rules
                 )
+                if not (
+                    isinstance(alias_record, dict)
+                    and alias_record.get("parameter_code") == alias_code
+                ):
+                    auxiliary_record = _reported_auxiliary_energy_parameter(
+                        raw,
+                        parameter_code=alias_code,
+                        parser_value=parser_value,
+                        stage_uid=stage_uid,
+                        rules=rules,
+                        normalize_process=normalize_process,
+                    )
+                    if auxiliary_record is not None:
+                        alias_record = auxiliary_record
+                        alias_issues = []
+                        alias_audit = []
                 if (
                     isinstance(alias_record, dict)
                     and alias_record.get("parameter_code") == alias_code
                 ):
+                    if parser_value is not None:
+                        alias_record = deepcopy(alias_record)
+                        alias_record["value_raw"] = str(
+                            raw.get("value_raw") or ""
+                        ).strip()
+                        alias_record["unit_raw"] = raw.get("unit_raw")
                     audit_factory = getattr(normalize_process, "_audit", None)
                     if callable(audit_factory):
+                        if parser_value is not None:
+                            alias_audit.append(
+                                audit_factory(
+                                    "compat.process_embedded_unit_value.v1",
+                                    (
+                                        f"stages.{stage_uid}.parameters."
+                                        f"{raw.get('parameter_name_raw')}.value_raw"
+                                    ),
+                                    raw.get("value_raw"),
+                                    parser_value,
+                                )
+                            )
                         alias_audit.append(
                             audit_factory(
                                 "compat.process_parameter_alias.v1",
@@ -793,6 +1215,12 @@ def install_process_unit_compat(normalize_process: Any) -> None:
                 )
             prepared, changes = prepare_process_variant_conditions(candidate)
             route, issues, audit = original_route(prepared, rules)
+            derived_issues, derived_audit = _quarantine_ungrounded_derived_energy(
+                route,
+                normalize_process,
+            )
+            issues.extend(derived_issues)
+            audit.extend(derived_audit)
             audit_factory = getattr(normalize_process, "_audit", None)
             if callable(audit_factory):
                 audit.extend(
@@ -819,6 +1247,63 @@ def install_process_unit_compat(normalize_process: Any) -> None:
         normalize_process.normalize_route = compatible_route
 
 
+def install_process_validation_compat(validate_v11: Any) -> None:
+    """Honor the ontology's declared reported-or-derived auxiliary policy."""
+
+    original = getattr(validate_v11, "_validate_parameter", None)
+    if not callable(original) or getattr(
+        original, "_knowmat_auxiliary_reported_compat", False
+    ):
+        return
+
+    def compatible_parameter_validation(
+        parameter: Any,
+        path: str,
+        stage_uid: Any,
+        allowed_parameters: set[str],
+        forbidden: set[str],
+        rules: Any,
+        issues: list[Any],
+    ) -> None:
+        issue_start = len(issues)
+        original(
+            parameter,
+            path,
+            stage_uid,
+            allowed_parameters,
+            forbidden,
+            rules,
+            issues,
+        )
+        if not isinstance(parameter, dict) or str(
+            parameter.get("status") or ""
+        ).casefold() != "reported":
+            return
+        catalog = getattr(rules, "parameter_catalog", None)
+        definition = (
+            catalog.get(parameter.get("parameter_code"))
+            if isinstance(catalog, dict)
+            else None
+        )
+        if not isinstance(definition, dict) or definition.get(
+            "model_policy"
+        ) != "auxiliary_derived_or_reported":
+            return
+        retained = [
+            issue
+            for issue in issues[issue_start:]
+            if not (
+                getattr(issue, "code", None)
+                == "parameter_not_allowed_by_profile"
+                and getattr(issue, "path", None) == f"{path}.parameter_code"
+            )
+        ]
+        issues[issue_start:] = retained
+
+    compatible_parameter_validation._knowmat_auxiliary_reported_compat = True  # type: ignore[attr-defined]
+    validate_v11._validate_parameter = compatible_parameter_validation
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Load the frozen runner, install the narrow adapter, and delegate."""
 
@@ -832,10 +1317,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         normalize_process,
         normalize_structure,
         normalize_tensile,
+        validate_v11,
     )
 
     install_property_alias_compat(normalize_tensile)
+    install_tensile_value_unit_compat(normalize_tensile)
     install_process_unit_compat(normalize_process)
+    install_process_validation_compat(validate_v11)
     install_structure_unit_compat(normalize_structure)
     from scripts.run_v11 import main as runner_main  # type: ignore[import-not-found]
 

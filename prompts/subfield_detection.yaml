@@ -23,6 +23,10 @@ prompt_template: |
   - Machining：论文涉及切削/磨削/车削/铣削等加工过程
   - Coating：论文涉及涂层/薄膜/热障涂层/EBC
   - Battery：论文涉及电池/电化学储能
+  - Additive_Manufacturing：论文涉及 LPBF/SLM/EBM/DED/WAAM 等增材制造
+  - Titanium_Alloy：论文核心材料为钛或钛合金
+  - High_Temperature_Alloy：论文核心材料为镍基/钴基高温合金等高温合金
+  - High_Entropy_Alloy：论文核心材料为高熵合金或多主元合金
 
   **patch_tags**（可选，多选，可为空列表）：
   从以下标签中选择适用的：
@@ -36,4 +40,3 @@ prompt_template: |
 
   论文文本：
   {paper_text}
-

@@ -44,6 +44,8 @@ _PROPERTY_ALIASES = {
     "yield_strength": "yield_strength",
     "engineering_yield_strength": "yield_strength",
     "elongation": "elongation",
+    "te": "elongation",
+    "eab": "elongation",
     "total_elongation": "elongation",
     "uniform_elongation": "elongation",
     "fracture_elongation": "elongation",
@@ -54,10 +56,40 @@ _PROPERTY_ALIASES = {
     "young_s_modulus": "elastic_modulus",
     "youngs_modulus": "elastic_modulus",
     "elastic_modulus": "elastic_modulus",
+    "modulus_of_elasticity": "elastic_modulus",
     "vickers_microhardness": "vickers_hardness",
     "microhardness": "vickers_hardness",
     "vickers_hardness": "vickers_hardness",
 }
+
+_CHARACTERIZATION_METHOD_ALIASES = {
+    "sem": "sem",
+    "scanning_electron_microscopy": "sem",
+    "eds": "eds",
+    "edx": "eds",
+    "energy_dispersive_x_ray_spectroscopy": "eds",
+    "ebsd": "ebsd",
+    "electron_backscatter_diffraction": "ebsd",
+    "xrd": "xrd",
+    "x_ray_diffraction": "xrd",
+    "tem": "tem",
+    "transmission_electron_microscopy": "tem",
+    "stem": "stem",
+    "scanning_transmission_electron_microscopy": "stem",
+    "apt": "apt",
+    "atom_probe_tomography": "apt",
+    "tkd": "tkd",
+    "micro_ct": "xct",
+    "microct": "xct",
+    "xct": "xct",
+    "optical_microscopy": "om",
+    "om": "om",
+}
+_RELATIVE_PROPERTY_SEMANTIC = re.compile(
+    r"(?:^|_)(?:retention|relative|difference|change|increase|decrease|"
+    r"increment|decrement|improvement|enhancement|contribution|ratio|delta|"
+    r"reduction|drop|gain|loss)(?:_|$)"
+)
 _PROCESS_PREFIX = re.compile(
     r"^(?:(?:laser_)?powder_bed_fusion|lpbf|pbf_lb|pbf_eb|ebpbf|"
     r"directed_energy_deposition|ded|waam|am)_+"
@@ -171,17 +203,53 @@ def _origin(value: Any, data_nature: Any = None) -> str:
     return "unknown"
 
 
+def _property_origin(prop: dict[str, Any], item: dict[str, Any]) -> str:
+    """Resolve property provenance with the enclosing item's source role.
+
+    A normalized property can retain ``Observation_Origin=unknown`` even when
+    its material item is explicitly a literature Reference.  Conversely, a
+    cited source's own direct experiment is still literature from the current
+    paper's perspective.  Item role therefore has priority for Reference facts;
+    Target facts use property provenance first and item data nature as fallback.
+    """
+
+    role = fold(item.get("Role"))
+    property_nature = prop.get("Data_Nature")
+    if role == "reference":
+        text = fold(property_nature or item.get("Data_Nature"))
+        return (
+            "literature_computation"
+            if any(token in text for token in ("comput", "simulat", "calculat", "derived"))
+            else "literature_experiment"
+        )
+    resolved = _origin(prop.get("Observation_Origin"), property_nature)
+    return resolved if resolved != "unknown" else _origin(item.get("Data_Nature"))
+
+
 def _condition_text(value: Any) -> str:
     if not value:
         return ""
     if isinstance(value, dict):
         preferred = [
-            value.get("original"), value.get("original_excerpt"), value.get("simplified"),
-            value.get("condition_raw"), value.get("test_condition_raw"),
+            # Expert-claim conditions use ``raw`` as the canonical source
+            # spelling, while v11 output uses ``original``.  Treat these as
+            # equivalent presentations of one condition.  Falling through to
+            # ``json.dumps`` here turns temperature/standard/replicate fields
+            # into ordinary tokens (for example ``"replicates": 3``), which
+            # makes a correctly attributed tensile result look like a strict
+            # condition conflict.
+            value.get("raw"), value.get("original"), value.get("condition_raw"),
+            value.get("test_condition_raw"), value.get("original_excerpt"),
+            value.get("simplified"),
         ]
-        text = " | ".join(str(row) for row in preferred if row and str(row).strip())
-        if text:
-            return text
+        # These are alternate presentations of one condition, not independent
+        # dimensions.  Joining all of them made one literal rate appear two or
+        # three times and unfairly converted formatting redundancy into a
+        # condition conflict.  Prefer the source-facing spelling and fall back
+        # only when it is absent.
+        for row in preferred:
+            if row and str(row).strip():
+                return str(row).strip()
         meaningful = {
             key: child
             for key, child in value.items()
@@ -190,10 +258,57 @@ def _condition_text(value: Any) -> str:
         }
         if not meaningful:
             return ""
-        return json.dumps(meaningful, ensure_ascii=False, sort_keys=True)
+        # Some amended expert rows contain only structured dimensions (for
+        # example temperature/rate/environment) and no ``raw`` presentation.
+        # Render those dimensions as condition text instead of serializing the
+        # JSON object, which would expose bookkeeping keys and replicate counts
+        # as if they were scientific coordinates.
+        dimensions = [
+            meaningful.get("temperature_raw"),
+            meaningful.get("time_raw"),
+            meaningful.get("rate_raw"),
+            meaningful.get("environment_raw"),
+        ]
+        details = meaningful.get("details")
+        if isinstance(details, dict):
+            dimensions.append(details.get("standard"))
+        rendered = [str(row).strip() for row in dimensions if str(row or "").strip()]
+        if rendered:
+            return "; ".join(dict.fromkeys(rendered))
+        return ""
     if isinstance(value, list):
         return " | ".join(_condition_text(row) for row in value if row)
     return str(value)
+
+
+_ENRICHED_TENSILE_OWNER = re.compile(
+    r"(?i)^(?P<material>.+?)\s*/\s*"
+    r"(?P<sample>.+?\btensile\s+specimen)\s*"
+    r"\[(?P<state>[^\[\]]+)\]\s*/\s*"
+    r"(?P<orientation>[XYZ])\s*$"
+)
+_COMPACT_ORIENTATION_OWNER = re.compile(
+    r"(?i)^(?P<sample>.+?)\s*/\s*(?P<orientation>[XYZ])\s*$"
+)
+
+
+def _condition_specimen_orientation(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    specimen = value.get("Specimen") or value.get("specimen") or {}
+    candidates = [
+        specimen.get("specimen_raw") if isinstance(specimen, dict) else None,
+        value.get("specimen_raw"),
+        value.get("test_specimen_raw"),
+    ]
+    for candidate in candidates:
+        match = re.fullmatch(
+            r"(?i)\s*([XYZ])(?:\s+(?:build\s+)?(?:orientation|direction))?\s*",
+            str(candidate or ""),
+        )
+        if match is not None:
+            return match.group(1).upper()
+    return ""
 
 
 def _numeric_values(value: dict[str, Any]) -> tuple[float, ...]:
@@ -209,51 +324,342 @@ def _numeric_values(value: dict[str, Any]) -> tuple[float, ...]:
     return tuple(rows)
 
 
-def _value(row: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
-    nested = row.get("Value") if isinstance(row.get("Value"), dict) else {}
-    kind = nested.get("value_kind") or row.get("value_kind") or "unknown"
-    raw_candidates = (
-        nested.get("value_raw"),
-        row.get("value_raw"),
-        row.get("Value_Raw"),
-        row.get("value"),
-        nested.get("canonical_value"),
-        row.get("canonical_value"),
+_RAW_NUMBER = r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?"
+_RAW_UNIT_SUFFIX = r"(?:\s*(?:%|[A-Za-zμµ°][A-Za-z0-9μµ°/%·._^{}\\-]*))?"
+
+
+def _parse_unstructured_numeric_value(raw: Any) -> dict[str, Any] | None:
+    """Parse one unambiguous v11 ``Value_Raw`` numeric expression.
+
+    Final v11 documents intentionally preserve source presentation and can omit
+    a structured ``Value`` object.  The expert ledger is numeric, so treating
+    ``~1148`` or ``595 ± 14`` as categorical text creates false evaluation
+    misses.  This parser accepts only a single complete scalar/range/bound and
+    deliberately rejects multi-value or comparison prose.
+    """
+
+    text = unicodedata.normalize("NFKC", str(raw or "")).strip()
+    text = text.strip("$").strip()
+    text = re.sub(r"\\+,(?=\s|$)", " ", text)
+    text = re.sub(r"\\+(?:mathrm|text)\s*\{([^{}]*)\}", r"\1", text)
+    text = re.sub(r"^\s*(?:approximately|approx\.?|about|ca\.?|~|≈)\s*", "", text, flags=re.I)
+    text = re.sub(r"\\+pm\b", "±", text, flags=re.I)
+    text = re.sub(r"\\+times\b", "×", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return None
+
+    scientific = re.fullmatch(
+        rf"({_RAW_NUMBER})\s*×\s*10\s*\^?\s*\{{?([-+]?\d+)\}}?{_RAW_UNIT_SUFFIX}",
+        text,
     )
-    raw = next((value for value in raw_candidates if value is not None), None)
-    unit = (
-        nested.get("canonical_unit") or nested.get("unit_raw") or row.get("canonical_unit")
-        or row.get("unit_raw") or row.get("Unit_Raw")
+    if scientific:
+        return {
+            "kind": "scalar",
+            "number": float(scientific.group(1)) * (10 ** int(scientific.group(2))),
+            "min": None,
+            "max": None,
+            "operator": None,
+            "bound": None,
+            "stddev": None,
+            "text": None,
+        }
+
+    uncertainty = re.fullmatch(
+        rf"({_RAW_NUMBER})\s*±\s*({_RAW_NUMBER}){_RAW_UNIT_SUFFIX}", text
     )
-    number = nested.get("value_num")
-    if number is None:
-        number = nested.get("canonical_value", row.get("canonical_value"))
-    if not isinstance(number, (int, float)) or isinstance(number, bool):
-        number = row.get("value") if isinstance(row.get("value"), (int, float)) else None
-    if (
-        str(kind).casefold() == "unknown"
-        and unit not in (None, "")
-        and isinstance(raw, (str, int, float))
-        and not isinstance(raw, bool)
-        and re.fullmatch(
-            r"\s*[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?\s*", str(raw)
+    if uncertainty:
+        return {
+            "kind": "scalar",
+            "number": float(uncertainty.group(1)),
+            "min": None,
+            "max": None,
+            "operator": None,
+            "bound": None,
+            "stddev": float(uncertainty.group(2)),
+            "text": None,
+        }
+
+    inequality = re.fullmatch(
+        rf"(<=|>=|<|>|≤|≥)\s*({_RAW_NUMBER}){_RAW_UNIT_SUFFIX}", text
+    )
+    if inequality:
+        operator = {"≤": "<=", "≥": ">="}.get(
+            inequality.group(1), inequality.group(1)
         )
+        return {
+            "kind": "inequality",
+            "number": None,
+            "min": None,
+            "max": None,
+            "operator": operator,
+            "bound": float(inequality.group(2)),
+            "stddev": None,
+            "text": None,
+        }
+
+    value_range = re.fullmatch(
+        rf"({_RAW_NUMBER})\s*(?:–|—|to)\s*({_RAW_NUMBER}){_RAW_UNIT_SUFFIX}",
+        text,
+        flags=re.I,
+    )
+    if value_range:
+        return {
+            "kind": "range",
+            "number": None,
+            "min": float(value_range.group(1)),
+            "max": float(value_range.group(2)),
+            "operator": None,
+            "bound": None,
+            "stddev": None,
+            "text": None,
+        }
+
+    scalar = re.fullmatch(rf"({_RAW_NUMBER}){_RAW_UNIT_SUFFIX}", text)
+    if scalar:
+        return {
+            "kind": "scalar",
+            "number": float(scalar.group(1)),
+            "min": None,
+            "max": None,
+            "operator": None,
+            "bound": None,
+            "stddev": None,
+            "text": None,
+        }
+    return None
+
+
+def _finite_number(value: Any) -> float | None:
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
     ):
-        kind = "scalar"
-        if number is None:
-            number = float(raw)
-    value = {
-        "kind": str(kind),
+        return float(value)
+    return None
+
+
+def _number_text(value: float) -> str:
+    return format(float(value), ".15g")
+
+
+def _numeric_display(
+    *,
+    kind: str,
+    number: float | None = None,
+    minimum: float | None = None,
+    maximum: float | None = None,
+    operator: Any = None,
+    bound: float | None = None,
+    stddev: float | None = None,
+) -> str | None:
+    if kind == "scalar" and number is not None:
+        center = _number_text(number)
+        return (
+            f"{center} ± {_number_text(stddev)}"
+            if stddev is not None
+            else center
+        )
+    if kind == "range" and minimum is not None and maximum is not None:
+        return f"{_number_text(minimum)}–{_number_text(maximum)}"
+    if kind == "inequality" and bound is not None:
+        qualifier = {"≤": "<=", "≥": ">="}.get(str(operator or ""), str(operator or ""))
+        return f"{qualifier}{_number_text(bound)}"
+    return None
+
+
+def _value_field(
+    nested: dict[str, Any], row: dict[str, Any], *names: str
+) -> Any:
+    for source in (nested, row):
+        for name in names:
+            if source.get(name) is not None:
+                return source.get(name)
+    return None
+
+
+def _structured_value(
+    *,
+    kind: str,
+    raw: Any,
+    number: Any = None,
+    minimum: Any = None,
+    maximum: Any = None,
+    operator: Any = None,
+    bound: Any = None,
+    stddev: Any = None,
+) -> dict[str, Any]:
+    number_value = _finite_number(number)
+    minimum_value = _finite_number(minimum)
+    maximum_value = _finite_number(maximum)
+    bound_value = _finite_number(bound)
+    stddev_value = _finite_number(stddev)
+    return {
+        "kind": kind,
         "raw": None if raw is None else str(raw),
-        "number": float(number) if isinstance(number, (int, float)) and not isinstance(number, bool) else None,
-        "min": nested.get("value_min", row.get("value_min")),
-        "max": nested.get("value_max", row.get("value_max")),
-        "operator": nested.get("operator", row.get("operator")),
-        "bound": nested.get("bound_value", row.get("bound_value")),
-        "stddev": nested.get("value_stddev", row.get("value_stddev")),
-        "text": str(raw) if kind in {"categorical", "boolean", "unknown"} and raw is not None else None,
+        "number": number_value,
+        "min": minimum_value,
+        "max": maximum_value,
+        "operator": operator,
+        "bound": bound_value,
+        "stddev": stddev_value,
+        "text": (
+            str(raw)
+            if kind in {"categorical", "boolean", "unknown"} and raw is not None
+            else None
+        ),
     }
-    return value, None if unit is None else str(unit)
+
+
+def _canonical_numeric_value(
+    nested: dict[str, Any], row: dict[str, Any], *, kind: str
+) -> tuple[dict[str, Any], str] | None:
+    """Select one complete canonical numeric payload and its canonical unit."""
+
+    canonical_unit = _value_field(nested, row, "canonical_unit")
+    if canonical_unit in (None, ""):
+        return None
+    canonical_value = _value_field(nested, row, "canonical_value")
+
+    if kind == "range":
+        if (
+            isinstance(canonical_value, (list, tuple))
+            and len(canonical_value) == 2
+        ):
+            minimum = _finite_number(canonical_value[0])
+            maximum = _finite_number(canonical_value[1])
+            if minimum is not None and maximum is not None:
+                display = _numeric_display(
+                    kind=kind, minimum=minimum, maximum=maximum
+                )
+                return (
+                    _structured_value(
+                        kind=kind,
+                        raw=display,
+                        minimum=minimum,
+                        maximum=maximum,
+                    ),
+                    str(canonical_unit),
+                )
+        return None
+
+    if kind == "inequality":
+        bound = _finite_number(canonical_value)
+        if bound is None:
+            return None
+        operator = _value_field(nested, row, "operator", "qualifier")
+        display = _numeric_display(
+            kind=kind, operator=operator, bound=bound
+        )
+        return (
+            _structured_value(
+                kind=kind, raw=display, operator=operator, bound=bound
+            ),
+            str(canonical_unit),
+        )
+
+    # A normalized v11 Property.Value stores its canonical center and spread
+    # in value_num/value_stddev while retaining source presentation separately.
+    nested_number = _finite_number(nested.get("value_num")) if nested else None
+    if nested_number is not None:
+        stddev = _finite_number(nested.get("value_stddev"))
+        display = _numeric_display(
+            kind="scalar", number=nested_number, stddev=stddev
+        )
+        return (
+            _structured_value(
+                kind="scalar", raw=display, number=nested_number, stddev=stddev
+            ),
+            str(canonical_unit),
+        )
+
+    number = _finite_number(canonical_value)
+    if number is None:
+        return None
+    raw_stddev = _finite_number(_value_field(nested, row, "value_stddev"))
+    raw_unit = _value_field(nested, row, "unit_raw", "Unit_Raw")
+    if (
+        raw_stddev is not None
+        and raw_unit not in (None, "")
+        and _unit(raw_unit) != _unit(canonical_unit)
+    ):
+        # The center was converted but the uncertainty was not. Fall back as
+        # one unit-consistent raw observation instead of mixing the layers.
+        return None
+    display = _numeric_display(
+        kind="scalar", number=number, stddev=raw_stddev
+    )
+    return (
+        _structured_value(
+            kind="scalar", raw=display, number=number, stddev=raw_stddev
+        ),
+        str(canonical_unit),
+    )
+
+
+def _value(
+    row: dict[str, Any], *, parse_unstructured_numeric: bool = False
+) -> tuple[dict[str, Any], str | None]:
+    """Return one representation-consistent atomic value/unit pair."""
+
+    nested = row.get("Value") if isinstance(row.get("Value"), dict) else {}
+    declared_kind = str(
+        _value_field(nested, row, "value_kind") or "unknown"
+    ).casefold()
+    canonical = _canonical_numeric_value(
+        nested, row, kind=declared_kind
+    )
+    if canonical is not None:
+        return canonical
+
+    raw = _value_field(nested, row, "value_raw", "Value_Raw", "value")
+    raw_unit = _value_field(nested, row, "unit_raw", "Unit_Raw")
+    number = _finite_number(_value_field(nested, row, "value_num", "value"))
+    minimum = _finite_number(_value_field(nested, row, "value_min"))
+    maximum = _finite_number(_value_field(nested, row, "value_max"))
+    operator = _value_field(nested, row, "operator", "qualifier")
+    bound = _finite_number(_value_field(nested, row, "bound_value"))
+    stddev = _finite_number(_value_field(nested, row, "value_stddev"))
+
+    parsed = _parse_unstructured_numeric_value(raw)
+    parsed_allowed = (
+        declared_kind in {"scalar", "range", "inequality"}
+        or parse_unstructured_numeric
+        or (
+            declared_kind == "unknown"
+            and raw_unit not in (None, "")
+            and parsed is not None
+            and parsed["kind"] == "scalar"
+        )
+    )
+    if parsed is not None and parsed_allowed:
+        if declared_kind == "unknown" or declared_kind == parsed["kind"]:
+            declared_kind = parsed["kind"]
+            if number is None:
+                number = _finite_number(parsed.get("number"))
+            if minimum is None:
+                minimum = _finite_number(parsed.get("min"))
+            if maximum is None:
+                maximum = _finite_number(parsed.get("max"))
+            if operator is None:
+                operator = parsed.get("operator")
+            if bound is None:
+                bound = _finite_number(parsed.get("bound"))
+            if stddev is None:
+                stddev = _finite_number(parsed.get("stddev"))
+
+    value = _structured_value(
+        kind=declared_kind,
+        raw=raw,
+        number=number,
+        minimum=minimum,
+        maximum=maximum,
+        operator=operator,
+        bound=bound,
+        stddev=stddev,
+    )
+    return value, None if raw_unit is None else str(raw_unit)
 
 
 def _owner(
@@ -263,22 +669,38 @@ def _owner(
     state: Any = None,
     region: Any = None,
     location: Any = None,
+    test_condition: Any = None,
 ) -> dict[str, Any]:
     extracted = item.get("Extracted_Data") or {}
     identity = ((extracted.get("Composition") or {}).get("Material_Identity") or {})
+    item_sample = str(item.get("Sample_ID") or "").strip()
     material_name = (
         identity.get("material_name_raw") or identity.get("designation_raw")
         or identity.get("material_family") or item.get("Sample_ID") or "unknown material"
     )
     sample = sample_id if sample_id not in (None, "") else item.get("Sample_ID")
+    owner_state = state
+    orientation = _condition_specimen_orientation(test_condition)
+    enriched = _ENRICHED_TENSILE_OWNER.fullmatch(item_sample)
+    if enriched is not None and sample_id in (None, ""):
+        material_name = enriched.group("material").strip()
+        sample = enriched.group("sample").strip()
+        if owner_state in (None, ""):
+            owner_state = enriched.group("state").strip()
+        orientation = orientation or enriched.group("orientation").upper()
+    elif sample_id in (None, ""):
+        compact = _COMPACT_ORIENTATION_OWNER.fullmatch(item_sample)
+        if compact is not None:
+            sample = compact.group("sample").strip()
+            orientation = orientation or compact.group("orientation").upper()
     return {
         "material_id": str(item.get("Item_ID") or sample or slug(material_name)),
         "material_name": str(material_name),
         "sample_id": None if sample in (None, "") else str(sample),
-        "state": None if state in (None, "") else str(state),
+        "state": None if owner_state in (None, "") else str(owner_state),
         "region": None if region in (None, "") else str(region),
         "location": None if location in (None, "") else str(location),
-        "orientation": None,
+        "orientation": orientation or None,
         "role": str(item.get("Role") or "Target"),
     }
 
@@ -439,7 +861,7 @@ def flatten_v11(document: dict[str, Any], *, source: str, paper_key: str) -> lis
                 if not isinstance(entity, dict):
                     continue
                 entity_name = entity.get("canonical_name") or entity.get("name_raw")
-                if entity_name:
+                if entity_name and not (entity.get("features") or []):
                     presence = {"kind": "categorical", "raw": str(entity.get("name_raw") or entity_name), "number": None, "min": None, "max": None, "operator": None, "bound": None, "stddev": None, "text": str(entity.get("name_raw") or entity_name)}
                     add(
                         axis="Structure", owner=obs_owner, semantic_key=f"{entity_name}_presence",
@@ -461,26 +883,23 @@ def flatten_v11(document: dict[str, Any], *, source: str, paper_key: str) -> lis
                 continue
             char_owner = _owner(item, state=char.get("material_state"), region=char.get("sample_location_raw"))
             method_class = char.get("method_class") or "method"
-            fields = (
-                ("method", char.get("method_raw")),
-                ("instrument", char.get("instrument") or char.get("equipment") or char.get("equipment_raw")),
-                ("standard", char.get("standard_raw")),
-                ("condition", char.get("condition_raw") or char.get("test_condition_raw")),
-                ("sample_preparation", char.get("sample_preparation_raw")),
-                ("sample_location", char.get("sample_location_raw")),
+            method_raw = char.get("method_raw") or method_class
+            # Characterization is one scientific method assertion.  Instrument,
+            # operating condition, preparation, and location are provenance
+            # fields of that assertion, not independent modalities.  Emitting
+            # each nested field as a separate claim made a correctly structured
+            # final.json look like a hallucinated list of methods and unfairly
+            # penalized the production output against the expert ledger.
+            instrument = char.get("instrument") or char.get("equipment") or char.get("equipment_raw")
+            value_text = _condition_text(instrument or method_raw)
+            value = {"kind": "categorical", "raw": value_text, "number": None, "min": None, "max": None, "operator": None, "bound": None, "stddev": None, "text": value_text}
+            add(
+                axis="Characterization", owner=char_owner,
+                semantic_key=f"{method_class}_method", name_raw=method_raw,
+                value=value, unit_raw=None, condition=None,
+                origin=_origin(item.get("Data_Nature")), evidence=_evidence(char),
+                raw_path=f"items[{item_index}].Characterization[{char_index}]", raw=char,
             )
-            for field, content in fields:
-                if content in (None, "", [], {}):
-                    continue
-                raw_text = _condition_text(content)
-                value = {"kind": "categorical", "raw": raw_text, "number": None, "min": None, "max": None, "operator": None, "bound": None, "stddev": None, "text": raw_text}
-                add(
-                    axis="Characterization", owner=char_owner,
-                    semantic_key=f"{method_class}_{field}", name_raw=f"{method_class} {field}",
-                    value=value, unit_raw=None, condition=None,
-                    origin=_origin(item.get("Data_Nature")), evidence=_evidence(char),
-                    raw_path=f"items[{item_index}].Characterization[{char_index}].{field}", raw=char,
-                )
 
         for property_index, prop in enumerate(extracted.get("Properties") or []):
             if not isinstance(prop, dict):
@@ -492,12 +911,14 @@ def flatten_v11(document: dict[str, Any], *, source: str, paper_key: str) -> lis
             )
             if not name:
                 continue
-            value, unit = _value(prop)
+            value, unit = _value(prop, parse_unstructured_numeric=True)
             add(
-                axis="Properties", owner=_owner(item), semantic_key=name,
+                axis="Properties", owner=_owner(
+                    item, test_condition=prop.get("Test_Condition")
+                ), semantic_key=name,
                 name_raw=prop.get("Property_Name_Raw") or name, value=value, unit_raw=unit,
                 condition=prop.get("Test_Condition"),
-                origin=_origin(prop.get("Observation_Origin"), prop.get("Data_Nature")),
+                origin=_property_origin(prop, item),
                 evidence=_evidence(prop), raw_path=f"items[{item_index}].Properties[{property_index}]",
                 raw=prop,
             )
@@ -577,13 +998,65 @@ def _thermal_process_dimension(
 
 
 def _energy_source_condition(claim: dict[str, Any]) -> str | None:
-    return _ENERGY_SOURCE_CONDITIONS.get(fold(claim.get("condition")))
+    condition = fold(claim.get("condition"))
+    exact = _ENERGY_SOURCE_CONDITIONS.get(condition)
+    if exact is not None:
+        return exact
+    # Production conditions may retain both the energy-source discriminator
+    # and a source-backed process environment (for example
+    # ``laser | LHW-DED deposition in inert argon``). Only an exact delimited
+    # segment is treated as the energy source; free-text token containment
+    # would incorrectly classify phrases such as "laser hot-wire process".
+    for segment in re.split(r"\s*[|;]\s*", condition):
+        resolved = _ENERGY_SOURCE_CONDITIONS.get(segment.strip())
+        if resolved is not None:
+            return resolved
+    return None
 
 
 def _matching_condition(claim: dict[str, Any]) -> str:
-    if _energy_source_condition(claim) is not None:
-        return ""
-    return str(claim.get("condition") or "")
+    # Accept both already-flattened strings and structured expert conditions.
+    # Keeping this normalization at the matching boundary prevents callers
+    # that construct claims directly (rather than through ``load_expert_claims``)
+    # from reintroducing Python-dict serialization into condition scoring.
+    condition = _condition_text(claim.get("condition"))
+    if _energy_source_condition(claim) is None:
+        return condition
+    residual = [
+        segment.strip()
+        for segment in re.split(r"\s*[|;]\s*", condition)
+        if segment.strip()
+        and fold(segment) not in _ENERGY_SOURCE_CONDITIONS
+    ]
+    return " | ".join(residual)
+
+
+def _condition_with_owner_dimensions(claim: dict[str, Any]) -> str:
+    """Include source-proven owner dimensions in strict condition matching.
+
+    Digitized tensile rows keep X/Y/Z in the public owner coordinate (and in
+    ``Test_Condition.Specimen``) while the flattened system condition is often
+    just ``tensile test``.  Expert claims may spell the same coordinate as
+    ``tensile test; X orientation``.  Treating the owner coordinate as an
+    equivalent condition dimension avoids false strict conflicts without
+    weakening a real orientation disagreement.
+    """
+
+    condition = _matching_condition(claim)
+    owner = claim.get("owner") or {}
+    orientation = str(owner.get("orientation") or "").strip().upper()
+    if orientation not in {"X", "Y", "Z"}:
+        return condition
+    if re.search(
+        rf"(?i)(?<![A-Z]){orientation}(?:\s+(?:build\s+)?(?:orientation|direction))?(?![A-Z])",
+        condition,
+    ):
+        return condition
+    return (
+        f"{condition}; {orientation} orientation"
+        if condition
+        else f"{orientation} orientation"
+    )
 
 
 def _thermal_variant_temperature(claim: dict[str, Any]) -> float | None:
@@ -627,6 +1100,9 @@ def _canonical_semantic(claim: dict[str, Any]) -> str:
     name = slug(claim.get("name_raw"))
     if claim.get("axis") == "Properties":
         for candidate in (value, name):
+            if _RELATIVE_PROPERTY_SEMANTIC.search(candidate):
+                return candidate
+        for candidate in (value, name):
             if candidate in _PROPERTY_ALIASES:
                 return _PROPERTY_ALIASES[candidate]
             for alias, canonical in _PROPERTY_ALIASES.items():
@@ -640,6 +1116,16 @@ def _canonical_semantic(claim: dict[str, Any]) -> str:
         elements = [row for row in tokens if row not in ignored and 1 <= len(row) <= 3]
         if elements:
             return f"composition_element_{elements[-1]}"
+    if claim.get("axis") == "Characterization":
+        # Expert GT uses descriptive keys (e.g. ``powder_sem_instrument``),
+        # while Alpha25 emits the provider's method class (e.g. ``sem_method``).
+        # Normalize both to the instrument family; model/equipment details stay
+        # in the value and evidence fields and are still checked separately.
+        candidates = [value, name]
+        for candidate in candidates:
+            for alias, family in _CHARACTERIZATION_METHOD_ALIASES.items():
+                if alias in candidate:
+                    return f"{family}_method"
     if claim.get("axis") == "Processing" and not value.startswith("process_stage_"):
         while _PROCESS_PREFIX.match(value):
             value = _PROCESS_PREFIX.sub("", value, count=1)
@@ -743,8 +1229,40 @@ def semantic_score(left: dict[str, Any], right: dict[str, Any]) -> float:
 def _semantic_tokens(claim: dict[str, Any]) -> set[str]:
     value = ""
     if claim.get("axis") in {"Processing", "Structure", "Characterization"}:
-        value = (claim.get("value") or {}).get("text") or (claim.get("value") or {}).get("raw") or ""
+        value = _source_value_raw(claim)
     return _tokens(f"{_canonical_semantic(claim)} {claim.get('name_raw', '')} {value}")
+
+
+def _source_value_raw(claim: dict[str, Any]) -> Any:
+    """Return the literal source presentation retained by one claim.
+
+    Semantic scoring historically included this literal for processing,
+    structure, and characterization records. Canonical numeric display must
+    not silently change that semantic score; numeric scale compatibility is
+    evaluated independently by ``value_score``.
+    """
+
+    raw_record = claim.get("raw")
+    if isinstance(raw_record, dict):
+        nested_value = raw_record.get("Value")
+        if isinstance(nested_value, dict):
+            for key in ("value_raw", "Value_Raw"):
+                if nested_value.get(key) is not None:
+                    return nested_value.get(key)
+            nested_scalar = nested_value.get("value")
+            if not isinstance(nested_scalar, (dict, list, tuple)) and nested_scalar is not None:
+                return nested_scalar
+        for key in ("value_raw", "Value_Raw"):
+            if raw_record.get(key) is not None:
+                return raw_record.get(key)
+        top_level_scalar = raw_record.get("value")
+        if (
+            not isinstance(top_level_scalar, (dict, list, tuple))
+            and top_level_scalar is not None
+        ):
+            return top_level_scalar
+    selected = claim.get("value") or {}
+    return selected.get("text") or selected.get("raw") or ""
 
 
 @lru_cache(maxsize=32768)
@@ -786,7 +1304,7 @@ def _unit(value: Any) -> str:
         "at": "percent", "at percent": "percent", "at pct": "percent", "%": "percent",
         "mpa": "mpa", "gpa": "gpa", "c": "degc", "degree c": "degc", "deg c": "degc",
         "um": "um", "mum": "um", "micron": "um", "microns": "um", "mm": "mm",
-        "w": "w", "kw": "kw",
+        "w": "w", "kw": "kw", "a": "a", "ma": "ma",
     }
     if "%" in raw_compact or raw_compact in {
         "wt", "wtpercent", "wtpct", "at", "atpercent", "atpct", "percent", "pct"
@@ -824,6 +1342,8 @@ def _converted_numbers(claim: dict[str, Any]) -> tuple[tuple[float, ...], str]:
         return tuple(row * 1000.0 for row in numbers), "mpa"
     if unit == "kw":
         return tuple(row * 1000.0 for row in numbers), "w"
+    if unit == "ma":
+        return tuple(row / 1000.0 for row in numbers), "a"
     if unit == "k":
         return tuple(row - 273.15 for row in numbers), "degc"
     if unit == "um":
@@ -833,6 +1353,100 @@ def _converted_numbers(claim: dict[str, Any]) -> tuple[tuple[float, ...], str]:
     if unit == "min":
         return tuple(row * 60.0 for row in numbers), "s"
     return numbers, unit
+
+
+def _numeric_center_and_stddev(claim: dict[str, Any]) -> tuple[float | None, float | None]:
+    """Return the reported numeric center and uncertainty, when present.
+
+    The uncertainty is deliberately kept separate from the value interval.
+    Two measurements with overlapping ``center ± stddev`` intervals are not
+    interchangeable observations: the center identifies the table cell and
+    the uncertainty describes its spread.  The evaluator therefore uses this
+    pair for a conservative center-first comparison whenever both claims
+    report it.
+    """
+
+    value = claim.get("value") or {}
+    numbers, _ = _converted_numbers(claim)
+    center = numbers[0] if numbers and value.get("kind") not in {"range", "inequality"} else None
+    stddev = value.get("stddev")
+    if not isinstance(stddev, (int, float)) or isinstance(stddev, bool):
+        return center, None
+    unit = _unit(claim.get("unit_raw"))
+    converted_stddev = float(stddev)
+    if unit == "gpa":
+        converted_stddev *= 1000.0
+    elif unit == "kw":
+        converted_stddev *= 1000.0
+    elif unit == "ma":
+        converted_stddev /= 1000.0
+    elif unit == "um":
+        converted_stddev /= 1000.0
+    elif unit == "h":
+        converted_stddev *= 3600.0
+    elif unit == "min":
+        converted_stddev *= 60.0
+    return center, converted_stddev
+
+
+def _numeric_rounding_tolerance(claim: dict[str, Any]) -> float:
+    """Return half of the center value's displayed rounding unit.
+
+    A prose value such as ``0.48 ± 0.05`` is a rounded presentation of a
+    more precise table value such as ``0.484 ± 0.052``.  Using the displayed
+    decimal resolution as an absolute tolerance preserves that match without
+    reopening broad percentage-based matches for integer-valued cells.
+    """
+
+    selected_raw = (claim.get("value") or {}).get("raw")
+    source_raw: Any = selected_raw
+    source_unit: Any = claim.get("unit_raw")
+    raw_record = claim.get("raw")
+    if isinstance(raw_record, dict):
+        nested_value = raw_record.get("Value")
+        if isinstance(nested_value, dict):
+            source_raw = (
+                nested_value.get("value_raw")
+                if nested_value.get("value_raw") is not None
+                else source_raw
+            )
+            source_unit = nested_value.get("unit_raw") or source_unit
+        else:
+            source_raw = next(
+                (
+                    raw_record.get(key)
+                    for key in ("value_raw", "Value_Raw")
+                    if raw_record.get(key) is not None
+                ),
+                source_raw,
+            )
+            source_unit = (
+                raw_record.get("unit_raw")
+                or raw_record.get("Unit_Raw")
+                or source_unit
+            )
+    match = re.search(r"[-+]?\d+(?:\.\d+)?", str(source_raw or ""))
+    if not match:
+        return 0.0
+    center_text = match.group(0)
+    if "." not in center_text:
+        tolerance = 0.5
+    else:
+        tolerance = 0.5 * (10 ** -len(center_text.partition(".")[2]))
+    # Source presentation determines resolution. Convert that resolution once
+    # into the same common unit used by _converted_numbers.
+    unit = _unit(source_unit)
+    if unit in {"gpa", "kw"}:
+        tolerance *= 1000.0
+    elif unit == "ma":
+        tolerance /= 1000.0
+    elif unit == "um":
+        tolerance /= 1000.0
+    elif unit == "h":
+        tolerance *= 3600.0
+    elif unit == "min":
+        tolerance *= 60.0
+    return tolerance
 
 
 def value_score(left: dict[str, Any], right: dict[str, Any]) -> float:
@@ -847,6 +1461,34 @@ def value_score(left: dict[str, Any], right: dict[str, Any]) -> float:
         right_kind = fold((right.get("value") or {}).get("kind"))
         if (left_kind == "inequality") != (right_kind == "inequality"):
             return 0.0
+        left_center, left_stddev = _numeric_center_and_stddev(left)
+        right_center, right_stddev = _numeric_center_and_stddev(right)
+        if (
+            left_center is not None
+            and right_center is not None
+            and left_stddev is not None
+            and right_stddev is not None
+        ):
+            # Center values identify the reported table cells.  Do not use
+            # overlapping uncertainty intervals as a substitute for equality:
+            # e.g. 817 ± 8.68 must not pair with 825.3 ± 3.10.  A 0.5%
+            # relative tolerance plus displayed-rounding tolerance still
+            # accepts 0.48 ± 0.05 versus 0.484 ± 0.052 and similar prose/table
+            # presentations.
+            center_closeness = [
+                math.isclose(
+                    a,
+                    b,
+                    rel_tol=0.005,
+                    abs_tol=max(
+                        1e-6,
+                        _numeric_rounding_tolerance(left),
+                        _numeric_rounding_tolerance(right),
+                    ),
+                )
+                for a, b in zip((left_center,), (right_center,))
+            ]
+            return 1.0 if all(center_closeness) else 0.0
         if left_unit == right_unit == "degc":
             closeness = [
                 math.isclose(a, b, rel_tol=0.001, abs_tol=2.0)
@@ -872,6 +1514,23 @@ def value_score(left: dict[str, Any], right: dict[str, Any]) -> float:
     score = _jaccard(left_text, right_text)
     if left_text and right_text and (left_text <= right_text or right_text <= left_text):
         score = max(score, min(len(left_text), len(right_text)) / max(len(left_text), len(right_text)))
+    # Characterization values are often represented at different granularity:
+    # one side keeps the instrument (``Bruker D8 Advanced XRD``), while the
+    # other keeps the method label plus specimen context.  Once the semantic
+    # matcher has established the same modality, a shared distinctive token
+    # (instrument/model or modality) is sufficient for loose compatibility;
+    # strict matching still checks owner/state/condition independently.
+    if (
+        left.get("axis") == right.get("axis") == "Characterization"
+        and _canonical_semantic(left) == _canonical_semantic(right)
+        and left_text
+        and right_text
+    ):
+        shared = {
+            token for token in left_text & right_text if len(token) >= 3
+        }
+        if shared:
+            score = max(score, 0.65)
     return score
 
 
@@ -887,6 +1546,55 @@ def _material_designations(value: Any) -> set[str]:
     }
 
 
+def _reference_author_keys(owner: dict[str, Any]) -> set[str]:
+    """Normalize source-style ``Surname et al.`` and ledger ``Surname2020``."""
+
+    keys: set[str] = set()
+    for value in (owner.get("sample_id"), owner.get("material_id")):
+        text = fold(value)
+        keys.update(
+            match.group(1)
+            for match in re.finditer(r"\b([a-z][a-z.-]{2,})\s+et\s+al\b", text)
+        )
+        keys.update(
+            match.group(1)
+            for match in re.finditer(
+                r"\b([a-z][a-z.-]{2,}?)(?:19|20)\d{2}[a-z]?\b", text
+            )
+        )
+    return keys
+
+
+def _reference_sample_discriminators(
+    owner: dict[str, Any], author_keys: set[str]
+) -> set[str]:
+    """Keep process/state sample tokens while removing citation presentation."""
+
+    tokens: set[str] = set()
+    for token in fold(owner.get("sample_id")).split():
+        token = re.sub(r"(?:19|20)\d{2}[a-z]?$", "", token)
+        if token:
+            tokens.add(token)
+    designation_tokens = {
+        token
+        for designation in _material_designations(owner.get("material_name"))
+        for token in designation.split(":")
+    }
+    return tokens - designation_tokens - author_keys - {
+        "al",
+        "cited",
+        "et",
+        "fabricated",
+        "literature",
+        "printed",
+        "processed",
+        "reference",
+        "reported",
+        "sample",
+        "specimen",
+    }
+
+
 def _reference_designation_alias(
     left_owner: dict[str, Any], right_owner: dict[str, Any]
 ) -> bool:
@@ -896,11 +1604,25 @@ def _reference_designation_alias(
         return False
     left_state = _owner_dimension("state", left_owner.get("state"))
     right_state = _owner_dimension("state", right_owner.get("state"))
-    if not left_state or left_state != right_state:
+    if left_state and right_state and left_state != right_state:
         return False
-    return bool(
+    same_designation = bool(
         _material_designations(left_owner.get("material_name"))
         & _material_designations(right_owner.get("material_name"))
+    )
+    if not same_designation:
+        return False
+    if left_state and right_state:
+        return True
+
+    left_authors = _reference_author_keys(left_owner)
+    right_authors = _reference_author_keys(right_owner)
+    shared_authors = left_authors & right_authors
+    if not shared_authors:
+        return False
+    return bool(
+        _reference_sample_discriminators(left_owner, shared_authors)
+        & _reference_sample_discriminators(right_owner, shared_authors)
     )
 
 
@@ -1019,17 +1741,102 @@ def _owner_dimension(key: str, value: Any) -> str:
 
 
 def condition_score(left: dict[str, Any], right: dict[str, Any]) -> float:
-    a, b = _matching_condition(left), _matching_condition(right)
+    a, b = _condition_with_owner_dimensions(left), _condition_with_owner_dimensions(right)
     a_tokens, b_tokens = _tokens(a), _tokens(b)
     if not a_tokens and not b_tokens:
         return 1.0
     if not a_tokens or not b_tokens:
         return 0.25
-    a_numbers = set(re.findall(r"[-+]?\d+(?:\.\d+)?", a))
-    b_numbers = set(re.findall(r"[-+]?\d+(?:\.\d+)?", b))
-    if a_numbers and b_numbers and not (a_numbers & b_numbers):
+
+    def profile(text: str) -> dict[str, Any]:
+        folded = fold(text)
+        temperatures: set[float | str] = set()
+        if re.search(r"(?i)\b(?:rt|room\s+temperature|ambient\s+temperature)\b", text):
+            temperatures.add("room")
+        for match in re.finditer(
+            r"(?i)([-+]?\d+(?:\.\d+)?)\s*(?:°\s*C|degrees?\s*C|deg\.?\s*C|C)\b",
+            text,
+        ):
+            temperatures.add(round(float(match.group(1)), 3))
+        for match in re.finditer(r"(?i)([-+]?\d+(?:\.\d+)?)\s*K\b", text):
+            temperatures.add(round(float(match.group(1)) - 273.15, 3))
+        times = {
+            (round(float(match.group(1)), 6), match.group(2).casefold()[0])
+            for match in re.finditer(
+                r"(?i)([-+]?\d+(?:\.\d+)?)\s*(h(?:ours?)?|min(?:ute)?s?|s(?:ec(?:ond)?s?)?)\b",
+                text,
+            )
+        }
+        orientations = set(
+            match.group(1).upper()
+            for match in re.finditer(
+                r"(?i)(?<![a-z])([XYZ])\s*(?:build\s+)?(?:orientation|direction)\b",
+                text,
+            )
+        )
+        protocol = bool(
+            re.search(
+                r"(?i)\b(?:tensile|tension|strain\s+rate|test(?:ing)?|specimen|"
+                r"rupture|fracture|universal\s+testing|standard|crosshead|gauge)\b",
+                text,
+            )
+        )
+        preparation = bool(
+            re.search(
+                r"(?i)\b(?:sinter(?:ed|ing)?|heat[-\s]*treat(?:ed|ment)?|"
+                r"hip(?:ed|ping)?|aged?|anneal(?:ed|ing)?|as[-\s]*(?:built|printed|fabricated))\b",
+                text,
+            )
+        )
+        return {
+            "temperatures": temperatures,
+            "times": times,
+            "orientations": orientations,
+            "protocol": protocol,
+            "preparation": preparation,
+            "folded": folded,
+        }
+
+    left_profile, right_profile = profile(a), profile(b)
+    left_temps, right_temps = left_profile["temperatures"], right_profile["temperatures"]
+    if left_temps and right_temps:
+        if "room" in left_temps or "room" in right_temps:
+            if left_temps != right_temps:
+                return 0.0
+        elif not any(
+            isinstance(x, float)
+            and isinstance(y, float)
+            and abs(x - y) <= 2.0
+            for x in left_temps
+            for y in right_temps
+        ):
+            return 0.0
+    left_numbers = set(re.findall(r"[-+]?\d+(?:\.\d+)?", a))
+    right_numbers = set(re.findall(r"[-+]?\d+(?:\.\d+)?", b))
+    if left_numbers and right_numbers and not (left_numbers & right_numbers):
         return 0.0
-    return max(_jaccard(a_tokens, b_tokens), 0.65 if a_numbers & b_numbers else 0.0)
+    base = _jaccard(a_tokens, b_tokens)
+    if left_numbers & right_numbers:
+        base = max(base, 0.65)
+
+    # A detailed source-local tensile procedure and a concise expert label are
+    # compatible when they share a real coordinate (temperature, orientation,
+    # or time).  Conversely, preparation-only text must not masquerade as the
+    # test protocol that produced a result.
+    shared_coordinate = bool(
+        (left_temps and right_temps)
+        or (left_profile["times"] & right_profile["times"])
+        or (left_profile["orientations"] & right_profile["orientations"])
+    )
+    if shared_coordinate and left_profile["protocol"] and right_profile["protocol"]:
+        return max(base, 0.65)
+    if left_profile["protocol"] and right_profile["protocol"]:
+        return max(base, 0.35)
+    if left_profile["preparation"] and right_profile["preparation"]:
+        return max(base, 0.35)
+    if left_profile["preparation"] != right_profile["preparation"]:
+        return min(base, 0.3)
+    return base
 
 
 def deduplicate_claims(claims: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:

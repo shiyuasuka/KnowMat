@@ -44,6 +44,7 @@ ProtocolLedgerStatus = Literal[
 
 ProtocolScope = Literal[
     "owner_local",
+    "source_local",
     "target_global",
     "reference_local",
     "ambiguous",
@@ -68,14 +69,14 @@ _TENSILE_PROPERTY = re.compile(
     r"(?ix)\b(?:"
     r"ultimate\s+tensile\s+strength|tensile\s+strength|yield\s+(?:strength|stress)|"
     r"uniform\s+elongation|total\s+elongation|elongation\s+(?:at|to)\s+(?:break|failure)|"
-    r"elongation|tensile\s+ductility|reduction\s+of\s+area|young'?s\s+modulus"
+    r"elongation|(?:tensile\s+)?ductility|reduction\s+of\s+area|young'?s\s+modulus"
     r")\b"
 )
 _CORE_TENSILE_PROPERTY = re.compile(
     r"(?ix)\b(?:ultimate\s+tensile\s+strength|tensile\s+strength|"
     r"yield\s+(?:strength|stress)|uniform\s+elongation|total\s+elongation|"
     r"elongation\s+(?:at|to)\s+(?:break|failure)|elongation|"
-    r"tensile\s+ductility|reduction\s+of\s+area)\b"
+    r"(?:tensile\s+)?ductility|reduction\s+of\s+area)\b"
 )
 _TENSILE_ABBREVIATION = re.compile(
     r"(?ix)^\s*(?:"
@@ -116,6 +117,7 @@ _MATERIAL_STATE_TEMPERATURE = re.compile(
 _EXPLICIT_TEST_TEMPERATURE = re.compile(
     r"(?ix)\b(?:test(?:ed|ing|s)?|experiment(?:s)?|deform(?:ed|ation))\b"
     r"[^.;]{0,55}\bat\s+(?:RT|room\s+temperature|[-+]?\d+(?:\.\d+)?\s*"
+    r"(?:\\[,;:]\s*)?"
     r"(?:°\s*C|°C|\^?\s*\{?\s*\\circ|K))"
 )
 _OTHER_TEST_FAMILY = re.compile(
@@ -145,6 +147,7 @@ _SPECIMEN_PREPARATION = re.compile(
 _EXPLICIT_GLOBAL_TENSILE_SCOPE = re.compile(
     r"(?ix)(?:"
     r"\b(?:all|each|every)\s+(?:(?:of\s+)?the\s+)?"
+    r"(?:(?:three|four|five|six|seven|eight|nine|ten|\d+)\s+)?"
     r"(?:tensile\s+)?(?:tests?|specimens?|samples?|coupons?)\b"
     r"|\b(?:tensile\s+)?(?:tests?|specimens?|samples?|coupons?)\s+"
     r"(?:were\s+)?(?:all|each)\b"
@@ -163,6 +166,11 @@ _DETAIL_PATTERNS: dict[str, re.Pattern[str]] = {
     "temperature": re.compile(
         r"(?ix)\b(?:RT|(?:room|ambient|elevated|test(?:ing)?|cryogenic)\s+temperature)\b|"
         r"(?<![A-Za-z0-9])[-+]?\d+(?:\.\d+)?\s*"
+        # OCR/Markdown frequently keeps TeX thin-space commands between the
+        # number and ``^{\\circ}C`` (for example ``650\\,^{\\circ}C``).  The
+        # command is presentation-only and must not make a real tensile
+        # temperature disappear from the protocol ledger.
+        r"(?:\\[,;:]\s*)?"
         r"(?:°\s*C|°C|\^?\s*\{?\s*\\circ\s*\}?\s*(?:\\mathrm\s*\{?)?C|K)\b"
     ),
     "standard": re.compile(
@@ -180,8 +188,10 @@ _DETAIL_PATTERNS: dict[str, re.Pattern[str]] = {
         r"servo[\s-]*hydraulic|testing\s+machine|load\s+frame)\b"
     ),
     "strain_measurement": re.compile(
-        r"(?ix)\b(?:extensometer|digital\s+image\s+correlation|\bDIC\b|ARAMIS|"
-        r"strain\s+(?:gauge|images?))\b"
+        r"(?ix)(?:\b[-+]?\d+(?:\.\d+)?\s*(?:mm|cm|m)\s+"
+        r"(?:gauge|gage)\s+length\s+(?:clip[-\s]*on\s+)?extensometer\b|"
+        r"\b(?:extensometer|digital\s+image\s+correlation|\bDIC\b|ARAMIS|"
+        r"strain\s+(?:gauge|images?))\b)"
     ),
     "replicates": re.compile(
         r"(?ix)\b(?:repeat(?:ed|ing)?|replicates?|reproducib(?:le|ility)|"
@@ -203,6 +213,7 @@ _DETAIL_PATTERNS: dict[str, re.Pattern[str]] = {
 _TEMPERATURE_VALUE = re.compile(
     r"(?ix)\b(?:RT|(?:room|ambient|cryogenic)\s+temperature)\b|"
     r"(?<![A-Za-z0-9])[-+]?\d+(?:\.\d+)?\s*"
+    r"(?:\\[,;:]\s*)?"
     r"(?:°\s*C|°C|\^?\s*\{?\s*\\circ\s*\}?\s*(?:\\mathrm\s*\{?)?C|K)\b"
 )
 _STANDARD_VALUE = _DETAIL_PATTERNS["standard"]
@@ -238,6 +249,7 @@ _CONDITION_PREFIX = re.compile(
 )
 _CONDITION_TAIL_NOISE = re.compile(
     r"(?ix)\s+(?:using|with|on)\s+(?:an?|the)\b|"
+    r"\s+and\s+the\s+(?:loading|tensile)\s+direction\b|"
     r"\s+(?:all|the)\s+(?:tensile\s+)?(?:tests?|specimens?|samples?|coupons?)"
     r"\s+(?:were\s+)?(?:repeated|replicated|tested\s+again)\b|"
     r"\s*,?\s*at\s+least\s+(?:three|four|five|six|\d+)\s+"
@@ -252,14 +264,22 @@ _RATE_LITERAL = re.compile(
     # s^-1`` and ``$1\\times10^{-3}\\,\\mathrm{s}^{-1}$`` forms.
     r"(?=[^;.!?]*(?:\d|\\d)).*?"
     r"(?=(?:\s+(?:using|with|on|along|parallel|perpendicular)\b|"
+    r"\s+and\s+the\s+strain\s+was\s+measured\b|"
+    r"\s+and\s+the\s+(?:loading|tensile)\s+direction\b|"
     r"\s*,?\s*at\s+least\s+(?:three|four|five|six|\d+)\s+"
     r"(?:tensile\s+)?(?:specimens?|samples?|coupons?)\b|"
     r"\s+and\s+(?:an?|the)\s+"
     r"(?:experimental\s+)?(?:temperature|environment)\b|;|"
+    r"\s+and\s+(?:the\s+)?(?:results?|data|values?|properties)\b|"
     r"[.!?](?:\s|$)|$))|"
     r"[-+]?\d+(?:\.\d+)?\s*(?:mm\s*/\s*min|%\s*/\s*min|"
     r"mm\s*min\s*\^?\s*[-−]?\s*1|min\s*\^?\s*[-−]?\s*1|"
     r"s\s*\^?\s*[-−]?\s*1)\b)"
+)
+_EXTENSOMETER_GAUGE_LITERAL = re.compile(
+    r"(?ix)(?:\b[-+]?\d+(?:\.\d+)?\s*(?:mm|cm|m)\s+"
+    r"(?:gauge|gage)\s+length\s+(?:clip[-\s]*on\s+)?"
+    r"extensometer\b|\b(?:clip[-\s]*on\s+)?extensometer\b)"
 )
 _ORIENTATION_PHRASE = re.compile(
     r"(?ix)(?:\b(?:horizontal|vertical|transverse|longitudinal|parallel|"
@@ -1375,11 +1395,21 @@ class PropertyContextIndex:
                     for candidate in all_candidates
                 )
             )
+            dense_global_protocol_coordinate = bool(
+                _protocol_coordinate_present(row)
+                and len(all_candidates) == 1
+                and all(
+                    candidate.explicit_global_scope
+                    and not candidate.foreign_global_scope_evidence
+                    for candidate in all_candidates
+                )
+            )
             if (
                 other_owner_labels
                 and not _property_is_core_tensile(row)
                 and not other_owned
                 and not matrix_qualifier
+                and not dense_global_protocol_coordinate
                 and not any(
                     _property_evidence_matches_candidate(row, candidate)
                     for candidate in all_candidates
@@ -1709,6 +1739,15 @@ def _protocol_dimensions(text: str) -> tuple[TensileProtocolDimension, ...]:
             )
             if specific:
                 literals = specific
+        if name == "specimen" and literals and _EXTENSOMETER_GAUGE_LITERAL.search(text):
+            # A gauge length used by an extensometer is a measurement setup,
+            # not specimen geometry to project into a Property condition.
+            literals = tuple(
+                literal
+                for literal in literals
+                if re.search(r"(?i)\b(?:gauge|gage)\s+length\b", literal)
+                is None
+            )
         if literals:
             dimensions.append(
                 TensileProtocolDimension(name=name, literals=literals)
@@ -1760,12 +1799,80 @@ def _event_identity(candidate: TestContextCandidate) -> tuple[Any, ...]:
 def _protocol_coordinate_present(row: dict[str, Any]) -> bool:
     decision_key = str(row.get("property_id_candidate") or "").strip()
     if decision_key.startswith(
-        ("table-cell:", "sidecar-cell:", "dense-table-cell:")
+        (
+            "table-cell:",
+            "sidecar-cell:",
+            "dense-table-cell:",
+            "tensile-process-owner-v205:",
+        )
     ):
         return True
     return (
         tensile_result_protocol_binding_v204_enabled()
         and decision_key.startswith("tensile-assertion:")
+    )
+
+
+def _multi_owner_target_protocol_allowed(
+    row: dict[str, Any],
+    selected: Sequence[TestContextCandidate],
+    *,
+    owner_role: str | None,
+    owner_labels: Sequence[str],
+    other_owner_labels: Sequence[str],
+) -> bool:
+    """Allow one tensile method shared by explicit sibling owners.
+
+    This is narrower than the paper-global exception: the selected event must
+    be unique, every condition dimension must be unique, and both the current
+    owner and at least one sibling Target owner must be named in the same
+    source event.  A separate fatigue/creep sentence in the surrounding
+    paragraph is ignored; a mixed sentence remains ambiguous.
+    """
+
+    if (
+        _fold(owner_role) != "target"
+        or len(selected) != 1
+        or not owner_labels
+        or not other_owner_labels
+        or not _protocol_coordinate_present(row)
+    ):
+        return False
+    candidate = selected[0]
+    if not _TENSILE_TEST_EVENT.search(candidate.text):
+        return False
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])|\n+", candidate.text)
+        if sentence.strip()
+    ]
+    tensile_sentences = [
+        sentence
+        for sentence in sentences
+        if _TENSILE_TEST_EVENT.search(sentence) and _protocol_detail_count(sentence)
+    ]
+    if not tensile_sentences:
+        return False
+    # A tensile proposition that also names fatigue/creep is not a safe shared
+    # scope.  Independent neighboring sentences are allowed.
+    if any(_OTHER_TEST_FAMILY.search(sentence) for sentence in tensile_sentences):
+        return False
+    dimensions = _protocol_dimensions(candidate.text)
+    discriminating = {
+        "temperature",
+        "rate",
+        "standard",
+        "orientation",
+        "environment",
+    }
+    if not dimensions or any(
+        dimension.name in discriminating and len(dimension.literals) != 1
+        for dimension in dimensions
+    ):
+        return False
+    return (
+        any(_mentions_any_owner(candidate, (label,)) for label in owner_labels)
+        and any(_mentions_any_owner(candidate, (label,)) for label in other_owner_labels)
     )
 
 
@@ -1785,6 +1892,14 @@ def _selected_protocol_scope(
     foreign_mentions = any(
         _mentions_any_owner(candidate, other_owner_labels) for candidate in selected
     )
+    if foreign_mentions and _multi_owner_target_protocol_allowed(
+        row,
+        selected,
+        owner_role=owner_role,
+        owner_labels=owner_labels,
+        other_owner_labels=other_owner_labels,
+    ):
+        return "target_global"
     if current_mentions and not foreign_mentions:
         return "owner_local"
     if foreign_mentions:
@@ -1818,6 +1933,21 @@ def _dimension_already_present(
                 set(_temperature_keys("; ".join(literals)))
                 & set(_temperature_keys(condition))
             )
+        if name == "orientation":
+            # ``along the BD`` is a source-literal orientation phrase but is
+            # intentionally not reduced to the generic horizontal/vertical
+            # token set above.  Check the phrase directly to avoid appending
+            # it a second time after the context pass already projected it.
+            candidate_phrases = {
+                _fold(match.group(0))
+                for match in _ORIENTATION_PHRASE.finditer("; ".join(literals))
+            }
+            existing_phrases = {
+                _fold(match.group(0))
+                for match in _ORIENTATION_PHRASE.finditer(condition)
+            }
+            if candidate_phrases & existing_phrases:
+                return True
         return bool(set(candidate.get(name, ())) & set(existing.get(name, ())))
     folded_condition = _fold(condition)
     return all(_fold(literal) in folded_condition for literal in literals)
@@ -1864,13 +1994,20 @@ def _unique_dense_target_protocol(
 
     decision_key = str(row.get("property_id_candidate") or "").strip()
     dense_coordinate = decision_key.startswith("dense-table-cell:")
+    orientation_owner_coordinate = decision_key.startswith(
+        "tensile-process-owner-v205:"
+    )
     assertion_coordinate = (
         tensile_result_protocol_binding_v204_enabled()
         and decision_key.startswith("tensile-assertion:")
     )
     if (
         _fold(owner_role) != "target"
-        or not (dense_coordinate or assertion_coordinate)
+        or not (
+            dense_coordinate
+            or assertion_coordinate
+            or orientation_owner_coordinate
+        )
         or len(events) != 1
         or rejected_events
     ):
@@ -1892,6 +2029,7 @@ class TensileProtocolLedger:
 
     def __init__(self, source_text: str | None) -> None:
         self._enabled = tensile_protocol_ledger_v203_enabled()
+        self._source_text = source_text or ""
         self._index = PropertyContextIndex(source_text)
         self._candidate_by_identity = {
             _event_identity(candidate): candidate for candidate in self._index.candidates
@@ -1928,6 +2066,132 @@ class TensileProtocolLedger:
             is not None
         )
 
+    def _source_local_owner_protocol_allowed(
+        self,
+        row: dict[str, Any],
+        selected_events: Sequence[TensileProtocolEvent],
+        rejected_events: Sequence[TensileProtocolEvent],
+        *,
+        owner_role: str | None,
+        owner_labels: Sequence[str],
+        other_owner_labels: Sequence[str],
+    ) -> bool:
+        """Authorize one source-local result owner against one tensile event.
+
+        This is intentionally narrower than a paper-level global binding.  It
+        only handles the common chunk-loss shape where a result quote retains
+        one literal current owner, while the methods paragraph contains one
+        tensile event beside an unrelated fatigue/creep sentence.  The result
+        quote must itself occur in the source text; synthetic/table evidence
+        absent from the source cannot unlock this escape hatch.
+        """
+
+        if (
+            _fold(owner_role) != "target"
+            or len(selected_events) != 1
+            or rejected_events
+            or not owner_labels
+            or not self._source_text
+        ):
+            return False
+        event = selected_events[0]
+        # Foreign global scope is safe to ignore only when it belongs to a
+        # different sentence from the tensile event.  A competing cue inside
+        # the event itself remains fail-closed.
+        if not _TENSILE_TEST_EVENT.search(event.text):
+            return False
+        if _foreign_global_scope_evidence(event.text):
+            return False
+        discriminating = {"temperature", "rate", "standard", "orientation", "environment"}
+        if not event.dimensions or any(
+            dimension.name in discriminating and len(dimension.literals) != 1
+            for dimension in event.dimensions
+        ):
+            return False
+
+        evidence_rows = row.get("source_evidence")
+        if isinstance(evidence_rows, list):
+            evidence = tuple(str(value or "").strip() for value in evidence_rows)
+        else:
+            evidence = (str(evidence_rows or "").strip(),)
+        source_folded = _fold(self._source_text)
+        property_name = str(row.get("property_name_raw") or "")
+        value_tokens = tuple(
+            token
+            for token in re.findall(r"\d+(?:\.\d+)?", str(row.get("value_raw") or ""))
+            if token
+        )
+        if not _TENSILE_PROPERTY.search(property_name) or not value_tokens:
+            return False
+        for quote in evidence:
+            if not quote:
+                continue
+            # Table cells already have a dedicated coordinate gate.  Letting
+            # a table row unlock a paper-level methods event would recreate
+            # the exact fatigue-all-specimens fan-out this rule is meant to
+            # avoid.
+            if _is_table_or_figure(quote) or "|" in quote or "<table" in quote.casefold():
+                continue
+            current_mentions = [
+                label for label in owner_labels if _owner_label_in_text(label, quote)
+            ]
+            foreign_mentions = [
+                label
+                for label in other_owner_labels
+                if _owner_label_in_text(label, quote)
+            ]
+            if len(set(current_mentions)) != 1 or foreign_mentions:
+                continue
+            # OCR/Markdown normalization can rewrite TeX symbols (``\sigma``
+            # vs ``σ``), so the complete quote is not required to be a byte-
+            # identical source substring.  The immutable owner and at least
+            # one literal numeric token must both be present in the paper.
+            current_owner = current_mentions[0]
+            if not _owner_label_in_text(current_owner, self._source_text):
+                continue
+            if not any(_fold(token) in source_folded for token in value_tokens):
+                continue
+            return True
+        return False
+
+    @staticmethod
+    def _physical_owner_protocol_allowed(
+        row: dict[str, Any],
+        selected_events: Sequence[TensileProtocolEvent],
+        rejected_events: Sequence[TensileProtocolEvent],
+        *,
+        owner_role: str | None,
+    ) -> bool:
+        """Honor a source-block physical-owner coordinate from promotion."""
+
+        coordinate = str(row.get("property_id_candidate") or "").strip()
+        if (
+            not coordinate.startswith("physical-owner-envelope:")
+            or _fold(owner_role) != "target"
+            or len(selected_events) != 1
+            or rejected_events
+        ):
+            return False
+        event = selected_events[0]
+        if (
+            not _TENSILE_TEST_EVENT.search(event.text)
+            or _foreign_global_scope_evidence(event.text)
+            or not event.dimensions
+        ):
+            return False
+        discriminating = {
+            "temperature",
+            "rate",
+            "standard",
+            "orientation",
+            "environment",
+        }
+        return not any(
+            dimension.name in discriminating
+            and len(dimension.literals) != 1
+            for dimension in event.dimensions
+        )
+
     def bind(
         self,
         row: dict[str, Any],
@@ -1935,6 +2199,7 @@ class TensileProtocolLedger:
         owner_role: str | None = None,
         owner_labels: Sequence[str] = (),
         other_owner_labels: Sequence[str] = (),
+        allow_shared_scope: bool = True,
     ) -> TensileProtocolLedgerDecision:
         original_condition = str(row.get("test_condition_raw") or "").strip()
         if not self._enabled:
@@ -1955,6 +2220,25 @@ class TensileProtocolLedger:
         selected_events = self._events_for(base.selected)
         candidate_events = self._events_for(base.candidates) or self._events
         rejected_events = self._events_for(base.rejected)
+
+        # The materializer may already have made a precision-first decision
+        # that this value quote lacks a local owner/state coordinate.  Do not
+        # let the independent ledger pass re-select the same paper-level
+        # protocol merely because the method text happens to mention one of
+        # the owner's aliases.  This explicit hand-off keeps the public value
+        # intact while preventing a quarantined condition from re-entering
+        # ``test_condition_raw`` downstream.
+        if not allow_shared_scope and base.shared_scope_risk:
+            return TensileProtocolLedgerDecision(
+                "ambiguous",
+                "paper-level tensile protocol was isolated because the property lacked a local owner or state coordinate",
+                condition_raw=original_condition or None,
+                scope="ambiguous",
+                selected_events=selected_events,
+                candidate_events=candidate_events,
+                rejected_events=rejected_events,
+                base_status=base.status,
+            )
 
         if base.status == "reference":
             return TensileProtocolLedgerDecision(
@@ -2009,7 +2293,23 @@ class TensileProtocolLedger:
             other_owner_labels=other_owner_labels,
         )
         if scope == "ambiguous":
-            if _unique_dense_target_protocol(
+            if self._physical_owner_protocol_allowed(
+                row,
+                selected_events,
+                rejected_events,
+                owner_role=owner_role,
+            ):
+                scope = "source_local"
+            elif self._source_local_owner_protocol_allowed(
+                row,
+                selected_events,
+                rejected_events,
+                owner_role=owner_role,
+                owner_labels=owner_labels,
+                other_owner_labels=other_owner_labels,
+            ):
+                scope = "source_local"
+            elif _unique_dense_target_protocol(
                 row,
                 selected_events,
                 rejected_events,
@@ -2068,7 +2368,12 @@ class TensileProtocolLedger:
             )
         return TensileProtocolLedgerDecision(
             "bound",
-            "one compatible source-proven tensile protocol event supplied missing dimensions",
+            (
+                "one source-local result owner was paired with the unique tensile "
+                "protocol event"
+                if scope == "source_local"
+                else "one compatible source-proven tensile protocol event supplied missing dimensions"
+            ),
             condition_raw=condition,
             scope=scope,
             selected_events=selected_events,

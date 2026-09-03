@@ -64,6 +64,104 @@ measured by digital image correlation and three specimens were tested.
     )
 
 
+def test_v203_protocol_ledger_recovers_tex_thin_space_temperature(monkeypatch):
+    """A TeX spacing command must not hide the tensile test temperature."""
+
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
+    source = r"""
+## Tensile testing
+
+The tensile tests were conducted on a self-developed testing machine at a
+strain rate of $5 \times 10^{-3}\,s^{-1}$ and the loading direction along the
+BD at $650\,^{\circ}C$.
+"""
+
+    ledger = TensileProtocolLedger(source)
+    assert len(ledger.events) == 1
+    temperature = next(
+        row for row in ledger.events[0].dimensions if row.name == "temperature"
+    )
+    assert temperature.literals == (r"650\,^{\circ}C",)
+
+    decision = ledger.bind(
+        _property(),
+        owner_role="Target",
+        owner_labels=("HA1065",),
+    )
+    assert decision.status == "bound"
+    assert r"650\,^{\circ}C" in (decision.condition_raw or "")
+
+
+def test_v204_source_local_owner_binds_unique_method_event_next_to_other_test(
+    monkeypatch,
+):
+    """A source-grounded owner may use one unique tensile event only."""
+
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
+    source = (
+        "The tensile tests were conducted on a self-developed testing machine "
+        "at a strain rate of 5 mm/min and the loading direction along the BD "
+        "at 650 °C. In addition, fatigue testing of all the specimens was "
+        "performed at 1 Hz.\n\n"
+        "The average ultimate tensile strength was 1215 MPa for the HA1065 specimen."
+    )
+    decision = TensileProtocolLedger(source).bind(
+        _property(
+            value_raw="1215",
+            source_evidence=[
+                "The average ultimate tensile strength was 1215 MPa for the HA1065 specimen."
+            ]
+        ),
+        owner_role="Target",
+        owner_labels=("HA1065",),
+        other_owner_labels=("HA1100",),
+    )
+
+    assert decision.status == "bound"
+    assert decision.scope == "source_local"
+    assert "650 °C" in (decision.condition_raw or "")
+    assert "loading direction" not in next(
+        row.literals[0]
+        for row in decision.selected_events[0].dimensions
+        if row.name == "rate"
+    )
+    assert "source-local" in decision.reason
+
+
+def test_v204_source_local_owner_does_not_unlock_absent_synthetic_quote(
+    monkeypatch,
+):
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
+    source = "Rate controlled tensile tests at 5 mm/min were performed."
+    decision = TensileProtocolLedger(source).bind(
+        _property(source_evidence=["| Ti64-H | UTS (MPa) | 781 |"]),
+        owner_role="Target",
+        owner_labels=("Ti64-H",),
+        other_owner_labels=("Ti64-V",),
+    )
+    assert decision.status == "ambiguous"
+
+
+def test_protocol_projection_separates_rate_from_loading_direction(monkeypatch):
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
+    source = (
+        "The tensile tests were conducted on a self-developed testing machine "
+        "at a strain rate of 5 mm/min and the loading direction along the BD "
+        "at 650 °C. HA1065 had an ultimate tensile strength of 1215 MPa."
+    )
+    decision = TensileProtocolLedger(source).bind(
+        _property(
+            value_raw="1215",
+            source_evidence=["HA1065 had an ultimate tensile strength of 1215 MPa."],
+        ),
+        owner_role="Target",
+        owner_labels=("HA1065",),
+    )
+    assert decision.status == "bound"
+    rate = next(row for row in decision.selected_events[0].dimensions if row.name == "rate")
+    assert rate.literals == ("strain rate of 5 mm/min",)
+
+
 def test_v203_explicit_global_protocol_requires_a_property_coordinate(monkeypatch):
     monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
     source = """
@@ -98,6 +196,55 @@ of 5 × 10^-3 s^-1 with the loading direction parallel to the build direction.
     assert uncoordinated.condition_raw is None
 
 
+def test_v205_numbered_all_samples_scope_and_rate_tail_are_source_bounded(
+    monkeypatch,
+):
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
+    source = """
+## Tensile testing
+
+Tensile testing was performed on all six samples fabricated with all three
+technologies. Specimens were tested using a strain rate of 0.005 mm/min/min
+and results were calculated based on the measured gauge section.
+"""
+
+    ledger = TensileProtocolLedger(source)
+    assert len(ledger.events) == 1
+    assert ledger.events[0].explicit_global_scope is True
+    rate = next(
+        row for row in ledger.events[0].dimensions if row.name == "rate"
+    )
+    assert rate.literals == ("strain rate of 0.005 mm/min/min",)
+
+    decision = ledger.bind(
+        _property(),
+        owner_role="Target",
+        owner_labels=("LPBF / Z",),
+        other_owner_labels=("LPBF / X", "EPBF / Z"),
+    )
+
+    assert decision.status == "bound"
+    assert decision.scope == "target_global"
+    assert decision.condition_raw is not None
+    assert "strain rate of 0.005 mm/min/min" in decision.condition_raw
+    assert "results were calculated" not in decision.condition_raw
+
+    oriented = ledger.bind(
+        _property(
+            property_id_candidate="tensile-process-owner-v205:literal",
+            test_condition_raw="Z orientation",
+        ),
+        owner_role="Target",
+        owner_labels=("LPBF / Z",),
+        other_owner_labels=("LPBF / X", "EPBF / Z"),
+    )
+    assert oriented.status == "bound"
+    assert oriented.scope == "target_global"
+    assert oriented.condition_raw is not None
+    assert "Z orientation" in oriented.condition_raw
+    assert "strain rate of 0.005 mm/min/min" in oriented.condition_raw
+
+
 def test_v203_unique_protocol_binds_only_to_dense_target_coordinate(monkeypatch):
     monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
     source = """
@@ -124,6 +271,61 @@ Rate controlled tensile tests at 5 mm/min were performed using an MTS 880.
     assert bound.scope == "target_global"
     assert bound.condition_raw == "at 5 mm/min"
     assert uncoordinated.status == "ambiguous"
+
+
+def test_v203_shared_scope_quarantine_cannot_be_rebound_by_ledger(monkeypatch):
+    """A materializer hand-off must keep an isolated paper protocol isolated."""
+
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
+    source = (
+        "## Tensile testing\n\n"
+        "Uniaxial tensile tests were conducted at a constant strain rate of "
+        "5 × 10^-4 s^-1 using an Instron testing machine."
+    )
+    ledger = TensileProtocolLedger(source)
+    decision = ledger.bind(
+        _property(
+            value_raw="900",
+            source_evidence=[
+                "The alloy showed an ultimate tensile strength of 900 MPa."
+            ],
+        ),
+        owner_role="Target",
+        owner_labels=("Alloy-B",),
+        other_owner_labels=("Alloy-A",),
+        allow_shared_scope=False,
+    )
+
+    assert decision.status == "ambiguous"
+    assert decision.scope == "ambiguous"
+    assert decision.condition_raw is None
+    assert "isolated" in decision.reason
+
+
+def test_unique_tensile_protocol_can_be_shared_by_explicit_sibling_owners(
+    monkeypatch,
+):
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_TENSILE_PROTOCOL_LEDGER_V203", "1")
+    source = (
+        "Tensile tests for WAAM and EBAM specimens were performed according to "
+        "ASTM E8 at a crosshead speed of 1 mm/min. Fatigue tests on all specimens "
+        "used a separate loading schedule."
+    )
+    decision = TensileProtocolLedger(source).bind(
+        _property(
+            property_id_candidate="dense-table-cell:waam-x",
+            source_evidence=["| WAAM / X | UTS | 900 |"],
+        ),
+        owner_role="Target",
+        owner_labels=("WAAM",),
+        other_owner_labels=("EBAM",),
+    )
+
+    assert decision.status == "bound"
+    assert decision.scope == "target_global"
+    assert decision.condition_raw is not None
+    assert "ASTM E8" in decision.condition_raw
+    assert "1 mm/min" in decision.condition_raw
 
 
 def test_v204_unique_protocol_binds_to_source_assertion_coordinate(monkeypatch):
@@ -512,10 +714,14 @@ def test_v203_dense_completion_does_not_duplicate_existing_coordinate(monkeypatc
     issue = next(
         row
         for row in result.issues
-        if row.code == "dense_tensile_table_cell_rejected"
-        and row.actual.get("reason") == "existing_coordinate_owned"
+        if row.code == "dense_tensile_table_cell_recovered"
+        and row.actual.get("reason") == "existing_coordinate_enriched"
     )
-    assert issue.actual["existing_fact"]["data"]["value_raw"] == "781"
+    assert issue.actual["before"] == fact.model_dump()
+    assert issue.actual["after"]["data"]["value_raw"] == "781"
+    assert issue.actual["after"]["data"]["property_id_candidate"].startswith(
+        "dense-table-cell:"
+    )
 
 
 def test_v203_dense_cell_migrates_alias_duplicates_and_clears_owner_state_condition(

@@ -48,7 +48,10 @@ dependencies = [
   "pandas>=2.0",
   "pillow>=10.0",
   "markdownify>=0.13",
-  
+
+  # Chart digitization (line-chart color splitting)
+  "opencv-python-headless>=4.8",
+
   # Composition parsing
   "pymatgen",
 ]

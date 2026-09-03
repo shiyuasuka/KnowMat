@@ -1,12 +1,23 @@
 import json
+from dataclasses import replace
 
 from knowmat.alpha25.contracts import PropertyFact
 from knowmat.alpha25.verification_client import (
+    COMPACT_REVIEW_SYSTEM_PROMPT,
+    CONFIRMATION_SYSTEM_PROMPT,
+    FIELD_SYSTEM_PROMPT,
     VerificationClient,
     VerificationClientError,
     VerifierRoleConfig,
     RECOVERY_SYSTEM_PROMPT,
+    _compact_label_prompt,
+    _default_invoke_responses,
     verifier_configs_from_env,
+)
+from knowmat.alpha25.verification import required_scientific_fields
+from knowmat.alpha25.verification_contracts import (
+    COMPACT_REVIEW_PROTOCOL_VERSION,
+    FIELD_VERIFICATION_PROTOCOL_VERSION,
 )
 from knowmat.alpha25.verification_inventory import (
     build_recovery_requests,
@@ -72,6 +83,87 @@ def _config(role, model):
     )
 
 
+def _responses_config(role, model):
+    return VerifierRoleConfig(
+        role=role,
+        model=model,
+        endpoint="https://example.invalid/v1",
+        thinking_mode="provider_default",
+        api_mode="responses",
+    )
+
+
+def test_compact_review_default_budget_is_1024(monkeypatch):
+    monkeypatch.delenv(
+        "KNOWMAT2_ALPHA25_VERIFIER_COMPACT_MAX_TOKENS", raising=False
+    )
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        field_level=True,
+    )
+
+    assert client.compact_output_token_budget == 1024
+
+
+def test_direct_responses_transport_uses_output_text_and_keeps_key_out_of_metadata(
+    monkeypatch,
+):
+    import openai
+
+    observed = {}
+
+    class FakeResponse:
+        status = "completed"
+        output_text = '["S"]'
+        id = "response-a"
+        incomplete_details = None
+        output = []
+        usage = {"input_tokens": 10, "output_tokens": 2}
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            observed["request"] = kwargs
+            return FakeResponse()
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            observed["client"] = kwargs
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    monkeypatch.setenv("LLM_API_KEY", "secret-key")
+    config = _responses_config("fallback", "model-b")
+    config = config.__class__(
+        **{
+            **config.__dict__,
+            "reasoning_effort": "low",
+            "output_token_budget": 1024,
+        }
+    )
+    slots = []
+
+    output, metadata = _default_invoke_responses(
+        config,
+        "system",
+        "user",
+        acquire_slot=lambda: slots.append("acquire"),
+        release_slot=lambda: slots.append("release"),
+    )
+
+    assert output == '["S"]'
+    assert observed["request"]["max_output_tokens"] == 1024
+    assert observed["request"]["reasoning"] == {
+        "effort": "low",
+        "summary": "concise",
+    }
+    assert observed["client"]["api_key"] == "secret-key"
+    assert "secret-key" not in json.dumps(metadata)
+    assert metadata["response_status"] == "completed"
+    assert slots == ["acquire", "release"]
+
+
 def _accept(bundle):
     return {
         "protocol_version": bundle.protocol_version,
@@ -113,15 +205,72 @@ def _quarantine(bundle):
 
 def _requested_bundle(template, user):
     payload = json.loads(user)
+    assertions = payload.get("assertions")
+    if assertions is None:
+        assertions = [payload["assertion"]]
     return type(template)(
         protocol_version=payload["protocol_version"],
         bundle_id=payload["bundle_id"],
         axis=payload["axis"],
-        assertions=payload["assertions"],
-        entities=payload["inventory_entities"],
+        assertions=assertions,
+        entities=payload.get("inventory_entities", []),
         evidence=payload["evidence"],
         source_char_count=sum(len(row["text"]) for row in payload["evidence"]),
     )
+
+
+def _field_supported(payload, *, owner_verdict="supported"):
+    decisions = []
+    for assertion in payload["assertions"]:
+        fields = []
+        for field in payload["required_fields"][assertion["assertion_id"]]:
+            fields.append(
+                {
+                    "field": field,
+                    "verdict": (
+                        owner_verdict if field == "owner" else "supported"
+                    ),
+                    "evidence_ids": assertion["evidence_ids"],
+                    "selected_entity_id": None,
+                    "selected_text": None,
+                }
+            )
+        decisions.append(
+            {
+                "assertion_id": assertion["assertion_id"],
+                "fields": fields,
+                "reason_code": "FIELD_REVIEW_COMPLETE",
+                "rationale": "Every required field was reviewed independently.",
+            }
+        )
+    return {
+        "protocol_version": FIELD_VERIFICATION_PROTOCOL_VERSION,
+        "bundle_id": payload["bundle_id"],
+        "decisions": decisions,
+    }
+
+
+def _compact_review(payload, *, verdict="all_fields_supported"):
+    return {
+        "protocol_version": COMPACT_REVIEW_PROTOCOL_VERSION,
+        "bundle_id": payload["bundle_id"],
+        "decisions": [
+            {
+                "assertion_id": assertion["assertion_id"],
+                "verdict": verdict,
+                "evidence_ids": assertion["evidence_ids"],
+                "failed_fields": (
+                    [] if verdict == "all_fields_supported" else ["owner"]
+                ),
+                "reason_code": (
+                    "ALL_FIELDS_SUPPORTED"
+                    if verdict == "all_fields_supported"
+                    else "OWNER_NOT_PROVEN"
+                ),
+            }
+            for assertion in payload["assertions"]
+        ],
+    }
 
 
 def test_primary_success_uses_one_call_and_no_fallback(tmp_path):
@@ -177,10 +326,14 @@ def test_destructive_consensus_quarantines_only_when_both_roles_agree():
     inventory, bundle = _bundle()
     observed_timeouts = []
     observed_output_budgets = []
+    observed_system_prompts = []
+    observed_payloads = []
 
-    def invoke(config, _system, user):
+    def invoke(config, system, user):
         observed_timeouts.append(config.timeout_seconds)
         observed_output_budgets.append(config.output_token_budget)
+        observed_system_prompts.append(system)
+        observed_payloads.append(json.loads(user))
         requested = _requested_bundle(bundle, user)
         return _quarantine(requested), {"provider_calls": 1}
 
@@ -200,8 +353,70 @@ def test_destructive_consensus_quarantines_only_when_both_roles_agree():
     assert result.applied.issues[0]["code"] == "verifier_quarantine_consensus"
     assert observed_timeouts == [180, 321]
     assert observed_output_budgets == [4096, 777]
+    assert observed_system_prompts[1] == CONFIRMATION_SYSTEM_PROMPT
+    assert "assertion" in observed_payloads[1]
+    assert "assertions" not in observed_payloads[1]
+    assert "inventory_entities" not in observed_payloads[1]
+    assert (
+        observed_payloads[1]["response_shape"]["decisions"][0]["decision"]
+        == "accept|quarantine|unresolved"
+    )
     assert result.metrics["destructive_confirmation_calls"] == 1
     assert result.metrics["confirmed_quarantine_count"] == 1
+
+
+def test_confirmation_budget_is_independent_from_primary_bundle_budget():
+    inventory, bundle = _bundle()
+    observed_output_budgets = []
+
+    def invoke(config, _system, user):
+        observed_output_budgets.append(config.output_token_budget)
+        requested = _requested_bundle(bundle, user)
+        return _quarantine(requested), {"provider_calls": 1}
+
+    primary = _config("primary", "model-a")
+    primary = VerifierRoleConfig(
+        **{**primary.__dict__, "output_token_budget": 768}
+    )
+    client = VerificationClient(
+        primary,
+        _config("fallback", "model-b"),
+        invoke_json=invoke,
+        destructive_consensus=True,
+        confirmation_output_token_budget=2048,
+    )
+
+    result = client.verify_bundle(bundle, inventory)
+
+    assert result.metrics["confirmed_quarantine_count"] == 1
+    assert observed_output_budgets == [768, 2048]
+
+
+def test_confirmation_defaults_to_low_reasoning_effort_independent_from_primary_role(
+    monkeypatch,
+):
+    monkeypatch.delenv(
+        "KNOWMAT2_ALPHA25_VERIFIER_CONFIRMATION_REASONING_EFFORT", raising=False
+    )
+    inventory, bundle = _bundle()
+    observed_reasoning_efforts = []
+
+    def invoke(config, _system, user):
+        observed_reasoning_efforts.append(config.reasoning_effort)
+        requested = _requested_bundle(bundle, user)
+        return _quarantine(requested), {"provider_calls": 1}
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        invoke_json=invoke,
+        destructive_consensus=True,
+    )
+
+    result = client.verify_bundle(bundle, inventory)
+
+    assert result.metrics["confirmed_quarantine_count"] == 1
+    assert observed_reasoning_efforts == ["provider_default", "low"]
 
 
 def test_destructive_consensus_preserves_when_confirmation_fails():
@@ -389,12 +604,51 @@ def test_env_configuration_has_no_model_name_behavior(monkeypatch):
     monkeypatch.setenv("KNOWMAT2_ALPHA25_VERIFIER_MODEL", "future-primary")
     monkeypatch.setenv("KNOWMAT2_ALPHA25_VERIFIER_FALLBACK_MODEL", "future-fallback")
     monkeypatch.setenv("KNOWMAT2_ALPHA25_VERIFIER_THINKING", "disabled")
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_VERIFIER_REASONING_EFFORT", "low")
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_VERIFIER_API_MODE", "chat_completions"
+    )
+    monkeypatch.setenv(
+        "KNOWMAT2_ALPHA25_VERIFIER_FALLBACK_API_MODE", "responses"
+    )
     primary, fallback = verifier_configs_from_env()
     assert primary.model == "future-primary"
     assert fallback.model == "future-fallback"
     assert primary.thinking_mode == "disabled"
+    assert primary.reasoning_effort == "low"
+    assert primary.api_mode == "chat_completions"
+    assert fallback.api_mode == "responses"
     assert primary.endpoint == "https://example.test/v1"
     assert "secret" not in json.dumps(primary.identity())
+
+
+def test_api_mode_is_role_config_not_model_behavior(monkeypatch):
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_VERIFIER_MODEL", "model-one")
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_VERIFIER_FALLBACK_MODEL", "model-two")
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_VERIFIER_API_MODE", "responses_api")
+    monkeypatch.delenv(
+        "KNOWMAT2_ALPHA25_VERIFIER_FALLBACK_API_MODE", raising=False
+    )
+
+    primary, fallback = verifier_configs_from_env()
+
+    assert primary.api_mode == fallback.api_mode == "responses"
+    assert primary.identity()["api_mode"] == "responses"
+    assert fallback.identity()["api_mode"] == "responses"
+
+
+def test_fallback_defaults_to_low_reasoning_without_model_name_behavior(monkeypatch):
+    monkeypatch.delenv("KNOWMAT2_ALPHA25_VERIFIER_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv(
+        "KNOWMAT2_ALPHA25_VERIFIER_FALLBACK_REASONING_EFFORT", raising=False
+    )
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_VERIFIER_MODEL", "future-primary")
+    monkeypatch.setenv("KNOWMAT2_ALPHA25_VERIFIER_FALLBACK_MODEL", "future-fallback")
+
+    primary, fallback = verifier_configs_from_env()
+
+    assert primary.reasoning_effort == "provider_default"
+    assert fallback.reasoning_effort == "low"
 
 
 def test_recovery_requires_a_separate_verification_call(tmp_path):
@@ -501,6 +755,7 @@ def test_effective_capability_is_reused_across_bundle_calls():
             "provider_calls": 1,
             "capability_fallback_count": 1 if len(observed) == 1 else 0,
             "effective_thinking_mode": "provider_default",
+            "effective_reasoning_effort": "provider_default",
             "effective_response_mode": "json_object",
         }
 
@@ -540,3 +795,591 @@ def test_failed_provider_attempts_remain_in_metrics():
     assert result.metrics["provider_calls"] == 4
     assert result.metrics["provider_call_seconds"] == 6.0
     assert result.metrics["retry_count"] == 2
+
+
+def _risk_bundle(bundle, severity):
+    return bundle.model_copy(
+        update={
+            "assertions": [
+                row.model_copy(
+                    update={
+                        "risk_severity": severity,
+                        "risk_codes": [f"{severity}_test_risk"],
+                    }
+                )
+                for row in bundle.assertions
+            ]
+        }
+    )
+
+
+def test_field_level_hard_risk_uses_blind_independent_roles():
+    inventory, raw_bundle = _bundle()
+    bundle = _risk_bundle(raw_bundle, "hard")
+    observed = []
+
+    def invoke(config, system, user):
+        payload = json.loads(user)
+        observed.append((config.role, system, payload))
+        response = (
+            _compact_review(payload)
+            if payload["protocol_version"] == COMPACT_REVIEW_PROTOCOL_VERSION
+            else _field_supported(payload)
+        )
+        return response, {"provider_calls": 1}
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        invoke_json=invoke,
+        field_level=True,
+    )
+    result = client.verify_bundle(bundle, inventory)
+
+    assert result.applied.accepted == (inventory.facts_by_assertion_id[bundle.assertions[0].assertion_id],)
+    by_role = {row[0]: row for row in observed}
+    assert set(by_role) == {"primary", "fallback"}
+    assert by_role["primary"][1] == FIELD_SYSTEM_PROMPT
+    assert "nested value_raw/unit_raw" in FIELD_SYSTEM_PROMPT
+    assert "region" in FIELD_SYSTEM_PROMPT
+    assert by_role["fallback"][1] == COMPACT_REVIEW_SYSTEM_PROMPT
+    assert by_role["primary"][2]["protocol_version"] == FIELD_VERIFICATION_PROTOCOL_VERSION
+    assert by_role["primary"][2]["required_fields"][bundle.assertions[0].assertion_id] == [
+        "semantic",
+        "value",
+        "unit",
+        "owner",
+    ]
+    assert by_role["fallback"][2]["protocol_version"] == (
+        COMPACT_REVIEW_PROTOCOL_VERSION
+    )
+    assert "primary" not in json.dumps(by_role["fallback"][2]).casefold()
+    assert result.metrics["field_primary_calls"] == 1
+    assert result.metrics["field_secondary_calls"] == 1
+    assert result.metrics["compact_secondary_calls"] == 1
+    assert result.metrics["field_hard_assertion_count"] == 1
+
+
+def test_field_level_hard_primary_finishes_before_compact_review_starts():
+    inventory, raw_bundle = _bundle()
+    bundle = _risk_bundle(raw_bundle, "hard")
+    observed = []
+
+    def invoke(config, _system, user):
+        payload = json.loads(user)
+        observed.append((config.role, payload["protocol_version"]))
+        response = (
+            _compact_review(payload)
+            if payload["protocol_version"] == COMPACT_REVIEW_PROTOCOL_VERSION
+            else _field_supported(payload)
+        )
+        return response, {"provider_calls": 1}
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        invoke_json=invoke,
+        field_level=True,
+    )
+
+    result = client.verify_bundle(bundle, inventory)
+
+    assert result.applied.accepted
+    assert observed == [
+        ("primary", FIELD_VERIFICATION_PROTOCOL_VERSION),
+        ("fallback", COMPACT_REVIEW_PROTOCOL_VERSION),
+    ]
+    assert result.metrics["provider_calls"] == 2
+
+
+def test_field_level_primary_and_compact_review_both_pack_related_assertions():
+    inventory, raw_bundle = _two_fact_bundle()
+    bundle = _risk_bundle(raw_bundle, "hard")
+    observed = []
+
+    def invoke(config, _system, user):
+        payload = json.loads(user)
+        observed.append((config.role, len(payload["assertions"])))
+        response = (
+            _compact_review(payload)
+            if payload["protocol_version"] == COMPACT_REVIEW_PROTOCOL_VERSION
+            else _field_supported(payload)
+        )
+        return response, {"provider_calls": 1}
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        invoke_json=invoke,
+        field_level=True,
+    )
+
+    result = client.verify_bundle(bundle, inventory)
+
+    assert len(result.applied.accepted) == 2
+    assert observed.count(("primary", 2)) == 1
+    assert observed.count(("fallback", 2)) == 1
+    assert result.metrics["field_primary_calls"] == 1
+    assert result.metrics["field_secondary_calls"] == 1
+    assert result.metrics["provider_calls"] == 2
+
+
+def test_field_level_invalid_sibling_does_not_poison_valid_primary_decision():
+    inventory, raw_bundle = _two_fact_bundle()
+    bundle = _risk_bundle(raw_bundle, "hard")
+    invalid_id = bundle.assertions[0].assertion_id
+
+    def invoke(config, _system, user):
+        payload = json.loads(user)
+        if payload["protocol_version"] == COMPACT_REVIEW_PROTOCOL_VERSION:
+            return _compact_review(payload), {"provider_calls": 1}
+        response = _field_supported(payload)
+        if config.role == "primary":
+            invalid = next(
+                row
+                for row in response["decisions"]
+                if row["assertion_id"] == invalid_id
+            )
+            invalid["fields"][0]["evidence_ids"] = ["invented-evidence"]
+        return response, {"provider_calls": 1}
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        invoke_json=invoke,
+        field_level=True,
+    )
+
+    result = client.verify_bundle(bundle, inventory)
+
+    assert len(result.applied.accepted) == 1
+    accepted_id = result.applied.accepted_assertion_ids[0]
+    assert accepted_id != invalid_id
+    audits = {row["assertion_id"]: row for row in result.applied.audit_records}
+    assert audits[invalid_id]["formal_action"] == "isolate"
+    assert audits[accepted_id]["formal_action"] == "accept"
+
+
+def test_field_level_invalid_soft_sibling_is_preserved_without_bundle_failure():
+    inventory, raw_bundle = _two_fact_bundle()
+    bundle = _risk_bundle(raw_bundle, "soft")
+    invalid_id = bundle.assertions[0].assertion_id
+
+    def invoke(_config, _system, user):
+        payload = json.loads(user)
+        response = _field_supported(payload)
+        invalid = next(
+            row
+            for row in response["decisions"]
+            if row["assertion_id"] == invalid_id
+        )
+        invalid["fields"][0]["evidence_ids"] = ["invented-evidence"]
+        return response, {"provider_calls": 1}
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        invoke_json=invoke,
+        field_level=True,
+    )
+
+    result = client.verify_bundle(bundle, inventory)
+
+    assert len(result.applied.accepted) == 2
+    audits = {row["assertion_id"]: row for row in result.applied.audit_records}
+    assert audits[invalid_id]["formal_action"] == "preserve"
+    assert audits[invalid_id]["primary_field_review"]["decision"] == (
+        "technical_failure"
+    )
+    assert result.applied.issues[0]["code"] == "verifier_soft_risk_preserved"
+
+
+def test_field_response_repairs_inactive_targets_and_audits_them(tmp_path):
+    inventory, raw_bundle = _bundle()
+    bundle = _risk_bundle(raw_bundle, "hard")
+
+    def invoke(_config, _system, user):
+        payload = json.loads(user)
+        if payload["protocol_version"] == COMPACT_REVIEW_PROTOCOL_VERSION:
+            return _compact_review(payload), {"provider_calls": 1}
+        response = _field_supported(payload)
+        owner = next(
+            row
+            for row in response["decisions"][0]["fields"]
+            if row["field"] == "owner"
+        )
+        owner["selected_entity_id"] = "inactive-entity"
+        owner["selected_text"] = "inactive text"
+        return response, {"provider_calls": 1}
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        cache_dir=tmp_path,
+        invoke_json=invoke,
+        field_level=True,
+    )
+
+    result = client.verify_bundle(bundle, inventory)
+
+    assert result.applied.accepted
+    assert result.metrics["field_shape_normalization_count"] == 1
+    audit = result.applied.audit_records[0]
+    assert audit["primary_response_normalizations"][0]["code"] == (
+        "inactive_correction_target_removed"
+    )
+    assert audit["secondary_response_normalizations"] == []
+    field_rows = [
+        json.loads(path.read_text()) for path in tmp_path.glob("*_field/*.json")
+    ]
+    compact_rows = [
+        json.loads(path.read_text())
+        for path in tmp_path.glob("*_compact/*.json")
+    ]
+    assert len(field_rows) == len(compact_rows) == 1
+    assert field_rows[0]["raw_response"]
+    assert field_rows[0]["response_normalizations"]
+
+
+def test_field_response_normalizations_are_scoped_to_their_assertion():
+    inventory, raw_bundle = _two_fact_bundle()
+    bundle = _risk_bundle(raw_bundle, "hard")
+    normalized_id = bundle.assertions[0].assertion_id
+
+    def invoke(_config, _system, user):
+        payload = json.loads(user)
+        if payload["protocol_version"] == COMPACT_REVIEW_PROTOCOL_VERSION:
+            return _compact_review(payload), {"provider_calls": 1}
+        response = _field_supported(payload)
+        for decision in response["decisions"]:
+            if decision["assertion_id"] != normalized_id:
+                continue
+            owner = next(
+                row for row in decision["fields"] if row["field"] == "owner"
+            )
+            owner["selected_entity_id"] = "inactive-entity"
+            owner["selected_text"] = "inactive text"
+        return response, {"provider_calls": 1}
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        invoke_json=invoke,
+        field_level=True,
+    )
+
+    result = client.verify_bundle(bundle, inventory)
+
+    audits = {row["assertion_id"]: row for row in result.applied.audit_records}
+    normalized = audits[normalized_id]
+    untouched = next(
+        row for assertion_id, row in audits.items() if assertion_id != normalized_id
+    )
+    assert normalized["primary_response_normalizations"]
+    assert normalized["secondary_response_normalizations"] == []
+    assert untouched["primary_response_normalizations"] == []
+    assert untouched["secondary_response_normalizations"] == []
+
+
+def test_field_level_soft_supported_fact_skips_second_role():
+    inventory, raw_bundle = _bundle()
+    bundle = _risk_bundle(raw_bundle, "soft")
+    calls = []
+
+    def invoke(config, _system, user):
+        calls.append(config.role)
+        return _field_supported(json.loads(user)), {"provider_calls": 1}
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        invoke_json=invoke,
+        field_level=True,
+    )
+    result = client.verify_bundle(bundle, inventory)
+
+    assert len(result.applied.accepted) == 1
+    assert calls == ["primary"]
+    assert result.metrics["field_secondary_calls"] == 0
+
+
+def test_field_level_hard_disagreement_isolates_formal_fact():
+    inventory, raw_bundle = _bundle()
+    bundle = _risk_bundle(raw_bundle, "hard")
+
+    def invoke(config, _system, user):
+        payload = json.loads(user)
+        if payload["protocol_version"] == COMPACT_REVIEW_PROTOCOL_VERSION:
+            return _compact_review(payload, verdict="not_proven"), {
+                "provider_calls": 1
+            }
+        return _field_supported(payload), {"provider_calls": 1}
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        invoke_json=invoke,
+        field_level=True,
+    )
+    result = client.verify_bundle(bundle, inventory)
+
+    assert result.applied.accepted == ()
+    assert result.applied.issues[0]["code"] == "verifier_hard_risk_isolated"
+    assert result.metrics["field_isolated_assertion_count"] == 1
+
+
+def test_compact_review_truncation_splits_multi_assertion_bundle_once():
+    inventory, raw_bundle = _two_fact_bundle()
+    bundle = _risk_bundle(raw_bundle, "hard")
+    fallback_sizes = []
+
+    def invoke(_config, _system, user):
+        payload = json.loads(user)
+        if payload["protocol_version"] == COMPACT_REVIEW_PROTOCOL_VERSION:
+            fallback_sizes.append(len(payload["assertions"]))
+            if len(payload["assertions"]) > 1:
+                raise VerificationClientError(
+                    "output_truncated",
+                    metrics={"provider_calls": 1},
+                )
+            return _compact_review(payload), {"provider_calls": 1}
+        return _field_supported(payload), {"provider_calls": 1}
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        invoke_json=invoke,
+        field_level=True,
+        compact_split_limit=1,
+    )
+
+    result = client.verify_bundle(bundle, inventory)
+
+    assert len(result.applied.accepted) == 2
+    assert fallback_sizes == [2, 1, 1]
+    assert result.metrics["compact_split_count"] == 1
+    assert result.metrics["compact_truncation_count"] == 1
+    assert result.metrics["provider_calls"] == 4
+
+
+def test_compact_singleton_truncation_is_not_retried_or_expanded():
+    inventory, raw_bundle = _bundle()
+    bundle = _risk_bundle(raw_bundle, "hard")
+    calls = []
+
+    def invoke(config, _system, user):
+        payload = json.loads(user)
+        calls.append(config.role)
+        if payload["protocol_version"] == COMPACT_REVIEW_PROTOCOL_VERSION:
+            raise VerificationClientError(
+                "output_truncated",
+                metrics={"provider_calls": 1},
+            )
+        return _field_supported(payload), {"provider_calls": 1}
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        invoke_json=invoke,
+        field_level=True,
+        compact_split_limit=1,
+    )
+
+    result = client.verify_bundle(bundle, inventory)
+
+    assert calls == ["primary", "fallback"]
+    assert result.applied.accepted == ()
+    assert result.metrics["compact_split_count"] == 0
+    assert result.metrics["compact_truncation_count"] == 1
+    assert result.metrics["provider_calls"] == 2
+
+
+def test_field_level_hard_double_failure_isolates_with_complete_audit():
+    inventory, raw_bundle = _bundle()
+    bundle = _risk_bundle(raw_bundle, "hard")
+    calls = []
+
+    def invoke(config, _system, _user):
+        calls.append(config.role)
+        raise VerificationClientError("provider_timeout", config.role)
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        invoke_json=invoke,
+        field_level=True,
+    )
+    result = client.verify_bundle(bundle, inventory)
+
+    assert calls == ["primary"]
+    assert result.applied.accepted == ()
+    assert result.applied.issues[0]["code"] == "verifier_technical_failure_isolated"
+    assert result.applied.audit_records[0]["primary_field_review"]["error"]
+    compact = result.applied.audit_records[0]["secondary_compact_review"]
+    assert compact["decision"] == "skipped"
+    assert compact["reason_code"] == "SECONDARY_SKIPPED_PRIMARY_NONPOSITIVE"
+    assert compact["bundle_id"] is None
+    assert compact["cache_hit"] is False
+    assert compact["status"] == "skipped"
+
+
+def test_field_level_cache_identity_is_separate_from_v1(tmp_path):
+    _inventory, bundle = _bundle()
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _config("fallback", "model-b"),
+        cache_dir=tmp_path,
+        field_level=True,
+        invoke_json=lambda *_args: ({}, {}),
+    )
+
+    assert client._field_cache_path(client.primary, bundle) != client._cache_path(
+        client.primary, bundle
+    )
+
+
+def test_paper_field_phase_packs_primary_positive_hard_assertions_into_one_label_call():
+    inventory, _bundle = _two_fact_bundle()
+    inventory = replace(
+        inventory,
+        assertions=tuple(
+            row.model_copy(update={"risk_severity": "hard"})
+            for row in inventory.assertions
+        ),
+    )
+    source = " ".join(row.text for row in inventory.evidence)
+    bundles = build_verification_bundles(
+        inventory, source_text=source, max_assertions=1
+    )
+    events = []
+    observed_label_payloads = []
+
+    def invoke_json(_config, _system, user):
+        payload = json.loads(user)
+        events.append(("primary", payload["bundle_id"]))
+        return _field_supported(payload), {"provider_calls": 1}
+
+    def invoke_responses(_config, _system, user):
+        payload = json.loads(user)
+        events.append(("label", payload["bundle_id"]))
+        observed_label_payloads.append(payload)
+        return json.dumps(["S"] * payload["label_count"]), {
+            "provider_calls": 1,
+            "api_mode": "responses",
+            "response_status": "completed",
+            "usage": {"output_tokens": 3},
+        }
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _responses_config("fallback", "model-b"),
+        invoke_json=invoke_json,
+        invoke_responses=invoke_responses,
+        field_level=True,
+    )
+    result = client.verify_field_bundles(bundles, inventory, workers=2)
+
+    assert len(result.applied.accepted) == 2
+    assert [row[0] for row in events] == ["primary", "primary", "label"]
+    assert result.metrics["provider_calls"] == 3
+    assert result.metrics["compact_secondary_calls"] == 1
+    assert observed_label_payloads[0]["label_count"] == 2
+    assert all(
+        "assertion_id" not in row
+        for row in observed_label_payloads[0]["assertions"]
+    )
+    assert all(
+        audit["secondary_label_review"]["label"] == "S"
+        for audit in result.applied.audit_records
+    )
+
+
+def test_compact_label_prompt_drops_verbose_candidate_mirrors_but_keeps_evidence():
+    _inventory, bundle = _bundle()
+    payload = json.loads(_compact_label_prompt(bundle))
+    candidate = payload["assertions"][0]["candidate"]
+    data = candidate["data"]
+    assert "original" not in data
+    assert "simplified" not in data
+    assert "raw_note" not in data
+    assert "source_evidence" not in data
+    assert payload["evidence"][0]["text"] == bundle.evidence[0].text
+
+
+def test_paper_label_cardinality_failure_splits_once_and_maps_by_position():
+    inventory, _bundle = _two_fact_bundle()
+    inventory = replace(
+        inventory,
+        assertions=tuple(
+            row.model_copy(update={"risk_severity": "hard"})
+            for row in inventory.assertions
+        ),
+    )
+    source = " ".join(row.text for row in inventory.evidence)
+    bundles = build_verification_bundles(
+        inventory, source_text=source, max_assertions=1
+    )
+    label_sizes = []
+
+    def invoke_json(_config, _system, user):
+        payload = json.loads(user)
+        return _field_supported(payload), {"provider_calls": 1}
+
+    def invoke_responses(_config, _system, user):
+        payload = json.loads(user)
+        label_sizes.append(payload["label_count"])
+        return json.dumps(["S"]), {"provider_calls": 1}
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _responses_config("fallback", "model-b"),
+        invoke_json=invoke_json,
+        invoke_responses=invoke_responses,
+        field_level=True,
+        compact_split_limit=1,
+    )
+    result = client.verify_field_bundles(bundles, inventory, workers=1)
+
+    assert len(result.applied.accepted) == 2
+    assert label_sizes == [2, 1, 1]
+    assert result.metrics["compact_split_count"] == 1
+    assert result.metrics["compact_secondary_calls"] == 3
+
+
+def test_paper_label_transport_failure_never_switches_to_chat_and_fails_closed():
+    inventory, raw_bundle = _bundle()
+    inventory = replace(
+        inventory,
+        assertions=tuple(
+            row.model_copy(update={"risk_severity": "hard"})
+            for row in inventory.assertions
+        ),
+    )
+    bundle = raw_bundle.model_copy(update={"assertions": list(inventory.assertions)})
+    chat_calls = []
+
+    def invoke_json(_config, _system, user):
+        payload = json.loads(user)
+        chat_calls.append(payload["bundle_id"])
+        return _field_supported(payload), {"provider_calls": 1}
+
+    def invoke_responses(_config, _system, _user):
+        raise VerificationClientError(
+            "provider_timeout", metrics={"provider_calls": 1}
+        )
+
+    client = VerificationClient(
+        _config("primary", "model-a"),
+        _responses_config("fallback", "model-b"),
+        invoke_json=invoke_json,
+        invoke_responses=invoke_responses,
+        field_level=True,
+    )
+    result = client.verify_field_bundles((bundle,), inventory)
+
+    assert len(chat_calls) == 1
+    assert not result.applied.accepted
+    assert result.applied.audit_records[0]["formal_action"] == "isolate"
+    assert result.applied.audit_records[0]["secondary_label_review"][
+        "failure_code"
+    ] == "provider_timeout"

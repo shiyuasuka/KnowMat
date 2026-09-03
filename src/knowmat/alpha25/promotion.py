@@ -16,7 +16,7 @@ import re
 from collections import Counter
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal, Sequence
+from typing import Any, Iterable, Literal, Mapping, Sequence
 
 from bs4 import BeautifulSoup
 
@@ -86,6 +86,27 @@ def tensile_result_protocol_binding_v204_enabled() -> bool:
     }
 
 
+def global_precision_release_gate_v207_enabled() -> bool:
+    """Return whether the final source-local precision gate is enabled.
+
+    Alpha25 intentionally keeps the model as a high-recall candidate
+    generator.  This final gate is model-neutral and runs after all
+    existing routing and deduplication passes.  It only removes candidates
+    whose numeric payload cannot be found in one atomic source assertion;
+    Composition is explicitly excluded because its established precision
+    path has different semantics.
+    """
+
+    raw = os.getenv("KNOWMAT2_ALPHA25_GLOBAL_PRECISION_RELEASE_GATE", "1")
+    return raw.strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "disabled",
+    }
+
+
 def structure_assertion_atomicity_v205_enabled() -> bool:
     """Return whether source-atomic Structure projection gates are enabled."""
 
@@ -135,6 +156,76 @@ def unique_material_owner_convergence_v205_enabled() -> bool:
     raw = os.getenv(
         "KNOWMAT2_ALPHA25_UNIQUE_MATERIAL_OWNER_CONVERGENCE_V205", "1"
     )
+    return raw.strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "disabled",
+    }
+
+
+def structure_qualitative_direct_v206_enabled() -> bool:
+    """Return whether directly observed qualitative Structure payloads survive.
+
+    The legacy precision path treated every non-numeric nested feature as a
+    descriptive shadow of its parent entity.  That is safe for projections,
+    but it also removed legitimate source assertions such as ``columnar
+    morphology`` or ``lamellar structure``.  The v206 switch admits only a
+    feature with a local direct assertion; comparative, inferential and
+    owner-ambiguous text remains on the existing quarantine path.
+    """
+
+    raw = os.getenv("KNOWMAT2_ALPHA25_STRUCTURE_QUALITATIVE_DIRECT_V206", "0")
+    return raw.strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "disabled",
+    }
+
+
+def characterization_source_block_recovery_v206_enabled() -> bool:
+    """Return whether a unique source-local method declaration may recover a result alias."""
+
+    raw = os.getenv(
+        "KNOWMAT2_ALPHA25_CHARACTERIZATION_SOURCE_BLOCK_RECOVERY_V206", "0"
+    )
+    return raw.strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "disabled",
+    }
+
+
+def characterization_source_method_recovery_v229_enabled() -> bool:
+    """Return whether deterministic source-wide method recovery is enabled.
+
+    The recovery path is intentionally opt-in: offline evaluation showed that
+    source paragraphs can contain multiple owner/state mentions that are
+    difficult to align with the expert ledger, so the precision-first default
+    keeps the model's explicit candidates only.
+    """
+
+    raw = os.getenv(
+        "KNOWMAT2_ALPHA25_CHARACTERIZATION_SOURCE_METHOD_RECOVERY_V229", "0"
+    )
+    return raw.strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+        "disabled",
+    }
+
+
+def cross_chunk_source_span_dedup_v206_enabled() -> bool:
+    """Return whether identical source-span projections are deduplicated across chunks."""
+
+    raw = os.getenv("KNOWMAT2_ALPHA25_CROSS_CHUNK_SOURCE_SPAN_DEDUP_V206", "1")
     return raw.strip().casefold() not in {
         "0",
         "false",
@@ -988,6 +1079,61 @@ def _same_projection(left: PromotionRecord, right: PromotionRecord) -> bool:
     )
 
 
+def _cross_chunk_semantic_projection_key(fact: AxisFact) -> str:
+    """Return a semantic key that ignores chunk-local presentation fields."""
+
+    ignored = {
+        "source_evidence",
+        "confidence",
+        "original",
+        "simplified",
+        "original_excerpt",
+        "observation_id",
+        "characterization_id",
+        "property_id_candidate",
+        "candidate_stage_id",
+        "stage_index_candidate",
+    }
+
+    def clean(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: clean(child)
+                for key, child in sorted(value.items())
+                if key not in ignored
+            }
+        if isinstance(value, list):
+            return [clean(child) for child in value]
+        if isinstance(value, str):
+            return _scientific_fold(value)
+        return value
+
+    return json.dumps(
+        [fact.axis, fact.fact_type, clean(fact.data)],
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _same_cross_chunk_projection(
+    left: PromotionRecord, right: PromotionRecord
+) -> bool:
+    if _identity_text(left.explicit_owner) != _identity_text(right.explicit_owner):
+        return False
+    if _cross_chunk_semantic_projection_key(left.fact) != _cross_chunk_semantic_projection_key(
+        right.fact
+    ):
+        return False
+    left_evidence = _evidence_blob(left)
+    right_evidence = _evidence_blob(right)
+    return bool(left_evidence and right_evidence) and (
+        left_evidence == right_evidence
+        or left_evidence in right_evidence
+        or right_evidence in left_evidence
+    )
+
+
 def _assertion_group_id(
     source_block_key: str,
     records: Sequence[PromotionRecord],
@@ -1197,6 +1343,82 @@ def deduplicate_source_assertions(
     return PromotionResult(accepted=tuple(accepted), issues=tuple(issues))
 
 
+def deduplicate_cross_chunk_source_spans(
+    facts: Iterable[AxisFact],
+    *,
+    source_text: str,
+    task_ids: Sequence[str | None] | None = None,
+) -> PromotionResult:
+    """Merge exact same-owner projections whose evidence spans cross chunk boundaries.
+
+    ``deduplicate_source_assertions`` intentionally keys on a parsed source
+    block.  Overlapping planner units can nevertheless produce two literal
+    quotes that straddle a Markdown/prose block boundary (or differ only by a
+    clipped prefix/suffix), leaving both claims in the materializer.  This
+    second pass uses the stricter same-owner + same semantic signature and
+    evidence containment relation, independent of the block key.  Distinct
+    values, conditions, states, owners, or non-overlapping evidence remain
+    separate by construction.
+    """
+
+    rows = list(facts)
+    if not cross_chunk_source_span_dedup_v206_enabled() or len(rows) < 2:
+        return PromotionResult(accepted=tuple(rows), issues=())
+    records = build_promotion_records(rows, task_ids=task_ids)
+    accepted_records: list[PromotionRecord] = []
+    issues: list[PromotionIssue] = []
+    for record in records:
+        merged_into: PromotionRecord | None = None
+        for existing in accepted_records:
+            if not _same_cross_chunk_projection(record, existing):
+                continue
+            # Require either a literal containment relation (the normal
+            # clipped-overlap case) or exact evidence.  Semantic equality alone
+            # is intentionally insufficient because two separate experiments
+            # can report the same value under omitted context.
+            merged_into = existing
+            break
+        if merged_into is None:
+            accepted_records.append(record)
+            continue
+        members = [merged_into, record]
+        survivor = max(members, key=_survivor_rank)
+        survivor_index = accepted_records.index(merged_into)
+        survivor_fact = _with_merged_evidence(survivor, members, source_text)
+        survivor_record = build_promotion_records([survivor_fact])[0]
+        accepted_records[survivor_index] = survivor_record
+        issues.append(
+            PromotionIssue(
+                code="promotion_cross_chunk_duplicate_merged",
+                sample_id_raw=survivor_fact.sample_id_raw,
+                message=(
+                    "The same owner-qualified source assertion was emitted by "
+                    "overlapping chunks and merged once before materialization."
+                ),
+                evidence=list(survivor_fact.source_evidence),
+                expected={
+                    "same_owner": True,
+                    "same_semantic_signature": True,
+                    "evidence_equal_or_contained": True,
+                    "distinct_values_preserved": True,
+                },
+                actual={
+                    "removed": record.fact.model_dump(),
+                    "survivor_before": merged_into.fact.model_dump(),
+                    "survivor_after": survivor_fact.model_dump(),
+                    "task_ids": [merged_into.task_id, record.task_id],
+                },
+                suggested_action=(
+                    "Review only if the two clipped spans represent independent "
+                    "measurements with omitted condition context."
+                ),
+            )
+        )
+    accepted = [record.fact for record in accepted_records]
+    accepted.sort(key=lambda fact: _fact_output_key(fact, source_text))
+    return PromotionResult(accepted=tuple(accepted), issues=tuple(issues))
+
+
 _UNREPORTED = {
     "",
     "n a",
@@ -1343,11 +1565,45 @@ _CHARACTERIZATION_STRONG_DECLARATION = re.compile(
     r"\b(?:was|were|is|are|has\s+been|have\s+been)\s+(?:also\s+)?"
     r"(?:performed|conducted|acquired|characteri[sz]ed|examined|"
     r"analy[sz]ed|measured|tested|utili[sz]ed|employed|used|recorded|"
-    r"collected|operated)\b|"
+    r"collected|operated|carried\s+out|undertaken|completed|done)\b|"
     r"\b(?:performed|conducted|acquired|characteri[sz]ed|examined|"
     r"analy[sz]ed|measured|tested|utili[sz]ed|employed|used|recorded|"
-    r"collected|operated)\s+(?:using|by|with|via|on)\b"
+    r"collected|operated|carried\s+out|undertaken|completed|done)\s+"
+    r"(?:using|by|with|via|on|to)\b|"
+    r"\b(?:imaged|scanned|mapped|visuali[sz]ed|taken|acquired|recorded|"
+    r"obtained|captured)\s+(?:using|by|with|via)\b|"
+    # Common methods prose places the instrument before ``was used to`` or
+    # uses an introductory ``using/utilizing`` participle before the acquired
+    # image/measurement.  These are performed acquisitions, not bare result
+    # captions, when the candidate's method family is source-grounded.
+    r"\b(?:was|were|is|are)\s+used\s+to\b|"
+    # Scientific methods prose frequently uses passive reporting verbs that
+    # are not literal synonyms of ``performed``.  These still assert an
+    # acquisition/measurement event (for example ``phases were identified by
+    # XRD`` or ``mis-orientations were evaluated using KAM``), whereas a bare
+    # figure caption does not contain the ``<verb> by/using`` construction.
+    r"\b(?:identified|evaluated|investigated|determined|quantified|assessed|"
+    r"characterized|examined|measured|analyzed|observed)\s+"
+    r"(?:using|by|with|via)\b|"
+    r"\b(?:using|utili[sz]ing)\b[^.\n]{0,120}\b(?:was|were|is|are)\s+"
+    r"(?:obtained|acquired|recorded|performed|collected)\b"
     r")"
+)
+# Compact methods declarations are common in extracted prose/tables: a
+# modality followed by its instrument/model or an explicit acquisition setup,
+# without a full finite-verb sentence (e.g. ``transmission electron
+# microscopy (TEM, Tecnai G2 F30)``).  They are accepted only when the same
+# evidence span contains a single known modality and a setup cue.  Result-only
+# captions such as ``TEM images``/``EBSD maps`` have neither a setup cue nor a
+# declaration and remain quarantined.
+_CHARACTERIZATION_SETUP_CUE = re.compile(
+    r"(?ix)\b(?:"
+    r"microscop(?:e|y)|diffractometer|spectrometer|detector|analy[sz]er|"
+    r"instrument|equipment|system|facility|model|probe|"
+    r"accelerating\s+voltage|step\s*size|resolution|scan(?:ning)?\s+"
+    r"(?:range|speed)|\b(?:kv|kev|ev|nm|um|μm|µm)\b|"
+    r"astm\s+(?:standard\s+)?[a-z]?\s*[- ]?\d"
+    r")\b"
 )
 # A compact method row in an extracted Markdown table is a valid method
 # assertion even when it does not use prose verbs (for example ``SEM: Zeiss
@@ -1407,6 +1663,7 @@ _REGION_SCOPED_PROPERTY_COORDINATE = re.compile(
     r"(?ix)\b(?:"
     r"(?:fine|coarse|certain|selected|local|specific)\s+regions?\b|"
     r"regions?\b|zones?\b|areas?\b|locations?\b|"
+    r"melt[-\s]*pool\s+(?:boundar(?:y|ies)|interiors?)\b|"
     r"rosette(?:\s+(?:region|regions|microstructure))?\b|"
     r"micropillars?\b|micro[-\s]*pillars?\b|"
     r"phase[-\s]+specific\b|region[-\s]+specific\b"
@@ -1613,6 +1870,26 @@ _PROCESS_EXPLICIT_TREATMENT_REFERENCE = re.compile(
     r"forg(?:e|ed|ing)|roll(?:ed|ing)|extrud(?:e|ed|ing)"
     r")\b"
 )
+# Adjectival treatment labels describe the state of a specimen (``heat-treated
+# alloys T0 and T5``), not an executed processing event.  They must not keep a
+# process-stage candidate alive unless the same evidence also contains an
+# explicit event (``alloys were heat-treated`` / ``heat treatment was applied``)
+# or a source-literal parameter.
+_PROCESS_STATE_ONLY_TREATMENT_REFERENCE = re.compile(
+    r"(?ix)\b(?:heat[\s-]*treated|solution[\s-]*treated|annealed|aged|"
+    r"sintered|forged|rolled|extruded)\s+"
+    r"(?:alloys?|samples?|specimens?|powders?|walls?|materials?|parts?)\b"
+)
+# Contrast markers delimit the subject that owns a process parameter from the
+# comparator subject.  A whole chunk often contains both sides of the sentence
+# (for example ``... gas atomized powder ..., in contrast to ... water
+# atomized powder``); treating the complete chunk as one owner scope projects
+# the first parameter onto the second owner.
+_PROCESS_OWNER_CONTRAST_BOUNDARY = re.compile(
+    r"(?ix)\b(?:in\s+contrast\s+to|in\s+contrast|whereas|while|"
+    r"unlike|as\s+opposed\s+to|rather\s+than|compared\s+(?:to|with)|"
+    r"versus|vs\.?|v\.?s\.?)\b"
+)
 _PROCESS_HEAT_TREATMENT_STAGE_NAME = re.compile(
     r"(?ix)\b(?:post[\s-]*ht|heat[\s-]*treat(?:ed|ment|ing)?|"
     r"solution[\s-]*(?:treat(?:ed|ment|ing)?|anneal(?:ed|ing)?)|"
@@ -1652,6 +1929,23 @@ _PROCESS_NUMERIC_PARAMETER_NAME = re.compile(
     r"number\s+of\s+beads|no\.\s+of\s+beads|printing\s+direction|"
     r"build\s+(?:plate|platform)\s+temperature"
     r")\b"
+)
+# A high-recall extractor occasionally places a purpose/result sentence in the
+# parameter slot, especially when a chunk contains an otherwise valid heat
+# treatment stage (for example ``HT2 aimed to realize a bi-modular size
+# distribution`` or ``HT3 was chosen to evaluate the effect of aging``).  These
+# are process rationale statements, not process coordinates.  Keep the rule
+# deliberately verb-heavy and only apply it to non-table, unitless values so a
+# categorical process method (``air cooling``) and a source table label remain
+# eligible.
+_PROCESS_NARRATIVE_PARAMETER_VALUE = re.compile(
+    r"(?ix)\b(?:aim(?:ed|s|ing)?|chosen|select(?:ed|ion)?|design(?:ed|ing)?|"
+    r"intend(?:ed|s|ing)?|use(?:d|s|ing)?|utiliz(?:ed|es|ing)?|"
+    r"evaluat(?:e|ed|es|ing)|assess(?:ed|es|ing)?|investigat(?:e|ed|es|ing)|"
+    r"characteriz(?:e|ed|es|ing)|compar(?:e|ed|es|ing)|"
+    r"realiz(?:e|ed|es|ing)|achiev(?:e|ed|es|ing)|"
+    r"demonstrat(?:e|ed|es|ing)|determin(?:e|ed|es|ing)|"
+    r"examin(?:e|ed|es|ing)|stud(?:y|ied|ies|ying))\b"
 )
 _WRONG_AXIS_PROPERTY = re.compile(
     r"(?ix)^\s*(?:"
@@ -1693,6 +1987,24 @@ _COMPARATIVE_TENSILE_PROPERTY = re.compile(
     r"contribut(?:e|ed|ion)|per\b|higher|lower|change|"
     r"at\s+given\s+strain|strengthening"
     r")"
+)
+_NONEXPERIMENTAL_TENSILE_ORIGINS = {
+    "calculated",
+    "computed",
+    "derived",
+    "estimated",
+    "modelled",
+    "modeled",
+    "predicted",
+    "simulated",
+    "simulation",
+    "theoretical",
+}
+_NONEXPERIMENTAL_TENSILE_CUE = re.compile(
+    r"(?ix)\b(?:calculat(?:e|ed|ing|ion)|comput(?:e|ed|ing|ation)|"
+    r"deriv(?:e|ed|ing|ation)|estimat(?:e|ed|ing|ion)|"
+    r"model(?:led|ed|ling|ing)|predict(?:ed|ing|ion)|"
+    r"simulat(?:e|ed|ing|ion)|theoretical(?:ly)?)\b"
 )
 # A Property candidate can be source-grounded and still be the wrong scientific
 # object: high-recall extraction commonly turns a comparison, improvement, or
@@ -1739,6 +2051,25 @@ _COMPARATIVE_PROPERTY_VALUE = re.compile(
     # only the unqualified comparative forms below are projections.
     r"more(?!\s+than)|less(?!\s+than))\b"
     r")"
+)
+_RELATIVE_CORE_TENSILE_DELTA_VALUE = re.compile(
+    r"(?ix)(?:[-+]?\d+(?:\.\d+)?|\.\d+)\s*"
+    r"(?:gpa|mpa|kpa|pa|%)?\s*"
+    r"(?:above|below|higher\s+than|lower\s+than|greater\s+than|less\s+than)"
+    r"\s+(?:the\s+)?(?![-+]?(?:\d|\.\d))[a-z]"
+)
+# A prose comparison can report a delta as if it were an absolute tensile
+# result (for example ``increase ... by 69.3 MPa in terms of UTS``).  The
+# numeric value is source-grounded, but its lexical role is a change amount,
+# not the owner's UTS/YS/elongation.  Restrict this cue to a short forward
+# window from the value so ordinary sentences such as ``increased to 718 MPa``
+# remain valid absolute results.
+_RELATIVE_CORE_TENSILE_EVIDENCE_VALUE = re.compile(
+    r"(?ix)(?P<value>[-+]?\d+(?:\.\d+)?|\.\d+)\s*"
+    r"(?:gpa|mpa|kpa|pa|%)?\s+(?:increased?|decreased?|changed?|"
+    r"(?:in|as)\s+terms\s+of|(?:for|in)\s+terms\s+of)\b"
+    r".{0,24}\b(?:uts|ys|yield\s+strength|tensile\s+strength|"
+    r"elongation|te)\b"
 )
 _NON_RESULT_TABLE_FIRST_COLUMN = {
     "process",
@@ -2580,6 +2911,10 @@ _SCIENTIFIC_CONDITION_CUE_V205 = re.compile(
     r"(?:°\s*C|\bK\b|\bs\s*\^?\s*-?1\b|\b1\s*/\s*s\b)"
     r")"
 )
+_CONDITION_WRAPPER_V205 = re.compile(
+    r"(?ix)^\s*(?P<label>(?:test[_\s-]*)?condition|(?:test[_\s-]*)?method)"
+    r"\s*:\s*(?P<payload>.*?)\s*$"
+)
 
 
 def _scientific_fold(value: Any) -> str:
@@ -2628,6 +2963,32 @@ def _numeric_tokens(value: Any) -> tuple[str, ...]:
             _scientific_fold(value),
         )
     )
+
+
+def _signed_numeric_tokens(value: Any) -> tuple[str, ...]:
+    """Extract numeric tokens while preserving a source minus sign.
+
+    ``_numeric_tokens`` intentionally folds punctuation for equality checks,
+    which also removes the distinction between ``390`` and ``-390``.  A few
+    physical Structure quantities are intrinsically non-negative, so their
+    publication gate needs this narrower, sign-preserving view of the literal
+    source text.
+    """
+
+    tokens: list[str] = []
+    pattern = re.compile(
+        r"(?<![A-Za-z0-9])(?P<sign>[+\-\u2212\u2013\u2014]?)\s*"
+        r"(?P<number>\d+(?:\.\d+)?(?:[eE][+\-\u2212\u2013\u2014]?\d+)?)"
+    )
+    for match in pattern.finditer(str(value or "")):
+        sign = match.group("sign")
+        number = match.group("number").replace("−", "-").replace("–", "-").replace("—", "-")
+        exponent = number.casefold()
+        if sign in {"-", "−", "–", "—"}:
+            tokens.append("-" + exponent)
+        else:
+            tokens.append(exponent)
+    return tuple(tokens)
 
 
 def _tensile_unit_key(value: Any) -> str:
@@ -2872,6 +3233,64 @@ def _payload_grounded(value: Any, evidence: Sequence[str]) -> bool:
     return bool(words) and len(words) >= 3 and (
         sum(word in source_words for word in words) / len(words) >= 0.85
     )
+
+
+def _source_local_evidence_spans(evidence: Sequence[str]) -> tuple[str, ...]:
+    """Return atomic source spans suitable for numeric grounding.
+
+    Candidate evidence is frequently an entire chunk assembled from several
+    sentences (or a complete Markdown table).  Grounding a value against the
+    joined envelope lets one sentence donate a number to another sentence's
+    claim.  Keep table rows intact, but split prose at sentence/line
+    boundaries so every numeric payload has to be supported by one local
+    assertion.
+    """
+
+    spans: list[str] = []
+    for raw in evidence:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if _is_table_evidence_row(line):
+                spans.append(line)
+                continue
+            spans.extend(
+                part.strip()
+                for part in re.split(r"(?<=[.!?])\s+|;\s+", line)
+                if part.strip()
+            )
+    return tuple(dict.fromkeys(spans))
+
+
+def _source_local_payload_grounded(
+    value: Any,
+    evidence: Sequence[str],
+    *,
+    strict_text: bool = False,
+) -> bool:
+    """Require a numeric payload to occur in one source-local assertion.
+
+    Textual/categorical payloads retain the established conservative envelope
+    gate unless ``strict_text`` is requested.  Numeric payloads are always
+    stricter: all value tokens and their lexical qualifiers must be present in
+    the same sentence or table row.  Structure prose features opt into the
+    same sentence-local rule because a chunk-wide lexical envelope can stitch
+    together unrelated qualitative claims and manufacture a supported-looking
+    projection.  This is a fail-closed precision guard and never reconstructs
+    a value from adjacent chunks.
+    """
+
+    if not _numeric_tokens(value):
+        if strict_text:
+            spans = _source_local_evidence_spans(evidence)
+            return any(_payload_grounded(value, (span,)) for span in spans)
+        return _payload_grounded(value, evidence)
+    spans = _source_local_evidence_spans(evidence)
+    return any(_payload_grounded(value, (span,)) for span in spans)
 
 
 def _fact_evidence(fact: AxisFact) -> list[str]:
@@ -3234,6 +3653,20 @@ def _property_comparative_projection_reason(fact: PropertyFact) -> str | None:
     value = str(fact.data.get("value_raw") or "").strip()
     if _COMPARATIVE_PROPERTY_VALUE.search(value):
         return "comparative_value_literal"
+    if (
+        is_core_tensile_property_name(name)
+        and _RELATIVE_CORE_TENSILE_DELTA_VALUE.search(value)
+    ):
+        # ``0.03 GPa above EPBF`` is a measured difference, not an absolute
+        # strength result for the current owner.  An absolute threshold such
+        # as ``above 0.80 GPa`` does not match because its cue precedes a
+        # numeric bound rather than a named comparator.
+        return "relative_core_tensile_delta"
+    evidence_text = "\n".join(_fact_evidence(fact))
+    if is_core_tensile_property_name(name) and _RELATIVE_CORE_TENSILE_EVIDENCE_VALUE.search(
+        evidence_text
+    ):
+        return "relative_core_tensile_evidence_delta"
     if _PROPERTY_PROCESS_PARAMETER_NAME.search(name):
         return "process_parameter_name"
     if _property_evidence_is_non_result_table(fact):
@@ -3453,6 +3886,12 @@ def _processing_stage_has_direct_assertion(
         return True
     if _PROCESS_DIRECT_EVENT_ASSERTION.search(joined):
         return True
+    if _PROCESS_STATE_ONLY_TREATMENT_REFERENCE.search(joined):
+        # ``heat-treated alloys`` is a result/state descriptor.  It is only a
+        # process event when an independent direct-event or parameter cue is
+        # present in the same evidence span; otherwise the candidate belongs
+        # in the audit stream rather than the formal Processing ledger.
+        return False
     # Compact treatment references such as ``aging heat treatment`` are valid
     # only when they are not hypothetical.  Do not use the broader treatment
     # vocabulary here: it includes generic AM labels such as ``build`` and
@@ -3750,16 +4189,40 @@ def _quarantine_processing_metadata_parameters(
             evidence = _feature_evidence(parameter, fallback)
             table_bound = _has_table_evidence(evidence)
             numeric_coordinate = bool(_PROCESS_NUMERIC_PARAMETER_NAME.search(name))
-            if (
+            value = str(parameter.get("value_raw") or "").strip()
+            unit = str(parameter.get("unit_raw") or "").strip()
+            raw_unmapped = bool(
+                re.fullmatch(r"(?ix)raw[_ -]?unmapped[_ -]?parameter", name)
+            )
+            narrative_projection = bool(
+                not table_bound
+                and not numeric_coordinate
+                and not unit
+                and len(value) >= 12
+                and _PROCESS_NARRATIVE_PARAMETER_VALUE.search(value)
+                and (
+                    raw_unmapped
+                    or _PROCESS_NARRATIVE_PARAMETER_VALUE.search(
+                        f"{name} {value}"
+                    )
+                )
+            )
+            metadata_projection = bool(
                 not table_bound
                 and not numeric_coordinate
                 and _PROCESS_METADATA_PARAMETER.fullmatch(name)
-            ):
+            )
+            if metadata_projection or narrative_projection:
+                reason = (
+                    "prose_narrative_parameter_without_coordinate"
+                    if narrative_projection
+                    else "prose_metadata_subfield_without_coordinate"
+                )
                 removed.append(
                     {
                         "parameter": deepcopy(parameter),
                         "parameter_name_raw": name,
-                        "reason": "prose_metadata_subfield_without_coordinate",
+                        "reason": reason,
                         "evidence": evidence,
                     }
                 )
@@ -3780,15 +4243,25 @@ def _quarantine_processing_metadata_parameters(
             issues.append(
                 _promotion_issue(
                     fact,
-                    code="promotion_processing_metadata_parameter_quarantined",
+                    code=(
+                        "promotion_processing_narrative_parameter_quarantined"
+                        if row["reason"]
+                        == "prose_narrative_parameter_without_coordinate"
+                        else "promotion_processing_metadata_parameter_quarantined"
+                    ),
                     message=(
-                        "A prose-only Processing equipment/environment/technique "
+                        "A prose rationale/result sentence was isolated from the "
+                        "formal Processing parameter ledger; the complete "
+                        "candidate and source evidence remain in audit."
+                        if row["reason"]
+                        == "prose_narrative_parameter_without_coordinate"
+                        else "A prose-only Processing equipment/environment/technique "
                         "label was isolated from the formal parameter ledger; the "
                         "complete candidate and source evidence remain in audit."
                     ),
                     expected={
                         "independent_numeric_or_table_coordinate": True,
-                        "metadata_subfield_only": False,
+                        "metadata_or_narrative_projection": False,
                         "audit_preserved": True,
                     },
                     actual={
@@ -4022,6 +4495,16 @@ _STRUCTURE_FORMULA_EVIDENCE = re.compile(
     r"(?ix)\b(?:equation|relation(?:ship)?|coefficient|formula|"
     r"where\s+[a-z]\s*=|[a-z]\s*=\s*[a-z0-9])\b"
 )
+_STRUCTURE_EXPLICIT_DERIVATION_EVIDENCE = re.compile(
+    r"(?ix)\b(?:can|could|may|might)\s+be\s+"
+    r"(?:calculated|derived|estimated)\b|"
+    r"\b(?:calculated|derived|estimated)\s+from\b|"
+    r"\baccording\s+to\s+(?:the\s+)?(?:equation|formula|relation)\b"
+)
+_STRUCTURE_CAUSAL_PROJECTION_EVIDENCE = re.compile(
+    r"(?ix)\b(?:due\s+to|caused\s+by|result(?:ing|ed)?\s+from|"
+    r"align(?:s|ed|ing)?\s+with|in\s+line\s+with)\b"
+)
 _STRUCTURE_COEFFICIENT_ASSIGNMENT = re.compile(
     r"(?ix)^\s*(?P<variable>[a-z])\s*=\s*"
     r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?\s*$"
@@ -4031,6 +4514,17 @@ _STRUCTURE_PHYSICAL_SIZE_NAME = re.compile(
     r"\b(?:size|diameter|width|length|thickness|spacing)\b|"
     r"\b(?:size|diameter|width|length|thickness|spacing)\b.*"
     r"\b(?:grain|pore|particle|precipitate|lath|cell)\b"
+)
+# These Structure measurements represent inherently non-negative physical
+# quantities.  A leading minus sign in the source is therefore a useful
+# precision signal (typically a formula-variable or OCR projection), but the
+# rule is deliberately limited to this semantic family so signed orientations
+# and other legitimate signed quantities are left untouched.
+_STRUCTURE_NONNEGATIVE_FEATURE_NAME = re.compile(
+    r"(?ix)\b(?:grain|pore|particle|precipitate|lath|cell|"
+    r"size|diameter|width|length|thickness|spacing|distance|"
+    r"density|porosity|fraction|volume\s+fraction|area\s+fraction|"
+    r"count|number|population)\b"
 )
 _STRUCTURE_POWDER_SIZE_COMPARISON = re.compile(
     r"(?ixs)\bgrains?\b.{0,120}?\b(?:comparable|similar)\s+to\b"
@@ -4061,7 +4555,8 @@ _STRUCTURE_COMPOSITION_FIELD_NAME = re.compile(
 )
 _STRUCTURE_COMPOSITION_EVIDENCE = re.compile(
     r"(?ix)\b(?:at\.?\s*%|wt\.?\s*%|weight\s+percent|atomic\s+percent|"
-    r"element(?:al|al\s+analysis)?|stoichiometr|enriched\s+in|depleted\s+in)\b"
+    r"element(?:al|al\s+analysis)?|stoichiometr|enriched\s+in|depleted\s+in|"
+    r"[a-z][a-z0-9]*\s*[- ](?:enriched|depleted)\b)"
 )
 _STRUCTURE_FIGURE_ARTIFACT_VALUE = re.compile(
     r"(?ix)\b(?:sem|tem|ebsd|xrd)?\s*(?:image|images|map|maps|"
@@ -4223,6 +4718,61 @@ def _structure_feature_precision_risk(
     name = str(feature.get("feature_name_raw") or "")
     value = str(feature.get("value_raw") or "")
     joined = "\n".join(str(row or "") for row in evidence)
+
+    # A negative literal cannot be a physical grain/pore/particle size,
+    # density, fraction, spacing, or count.  Only quarantine when the signed
+    # value is present in the candidate *and* in its copied source evidence;
+    # this avoids treating an unrelated negative number elsewhere in a chunk as
+    # proof against an otherwise valid observation.  Signed orientations and
+    # other non-listed quantities remain on their existing precision paths.
+    negative_value_tokens = {
+        token
+        for token in _signed_numeric_tokens(value)
+        if token.startswith("-")
+    }
+    if (
+        negative_value_tokens
+        and _STRUCTURE_NONNEGATIVE_FEATURE_NAME.search(name)
+        and negative_value_tokens.intersection(_signed_numeric_tokens(joined))
+    ):
+        return (
+            "promotion_structure_nonphysical_value_quarantined",
+            "negative_literal_for_inherently_nonnegative_feature",
+        )
+
+    # An equation/formula payload is not itself a Structure value.  Preserve a
+    # source-explicit final numeric result even when the paper says it was
+    # calculated or derived: ``volume fraction ... can be calculated to be
+    # ~37%`` is a factual reported result, whereas ``delta = 2(a1-a2)/(a1+a2)``
+    # is only the calculation rule.  This distinction avoids deleting valid
+    # expert-GT facts merely because their measurement basis is indirect.
+    if _STRUCTURE_EXPLICIT_DERIVATION_EVIDENCE.search(joined):
+        formula_value = bool(
+            re.search(r"(?x)[=δΔ]|\b(?:where|formula|equation)\b", value)
+        )
+        if formula_value:
+            return (
+                "promotion_structure_derived_feature_quarantined",
+                "formula_expression_not_observed_structure_value",
+            )
+
+    # A causal explanation can quote the inferred change literally, which
+    # defeats the ordinary inferential gate's direct-assertion check.  Do not
+    # promote that explanation as an independent qualitative measurement when
+    # the feature itself carries the causal phrase (``... caused by aging``).
+    if (
+        not quantitative
+        and _STRUCTURE_CAUSAL_PROJECTION_EVIDENCE.search(joined)
+        and re.search(
+            r"(?ix)\b(?:due\s+to|caused\s+by|result(?:ing|ed)?\s+from|"
+            r"align(?:s|ed|ing)?\s+with)\b",
+            f"{name} {value}",
+        )
+    ):
+        return (
+            "promotion_structure_inferential_projection_quarantined",
+            "causal_explanation_projected_as_observation",
+        )
 
     if structure_assertion_atomicity_v205_enabled():
         value_numbers = set(_numeric_tokens(value))
@@ -4722,6 +5272,109 @@ def _qualitative_structure_shadow_issue(
     )
 
 
+def _qualitative_structure_feature_is_direct(
+    fact: StructureFact,
+    feature: dict[str, Any],
+    evidence: Sequence[str],
+) -> bool:
+    """Return whether a qualitative feature is a local observed assertion.
+
+    This helper deliberately sits behind an opt-in switch.  It does not infer
+    an ontology from a noun: the feature name/value must occur literally in a
+    bounded evidence span with direct observation/change grammar.  Generic,
+    comparative, inferential, procedural and unqualified generalizations are
+    still rejected so enabling the recall path cannot reintroduce fan-out.
+    """
+
+    if not structure_qualitative_direct_v206_enabled():
+        return False
+    if not evidence or _has_table_evidence(evidence):
+        # Table cells have their own coordinate/yes-no gates.  Let those gates
+        # decide rather than treating a shared table block as prose evidence.
+        return False
+    if _is_quantitative_structure_feature(feature) or _is_negated_structure_feature(
+        feature
+    ):
+        return False
+    if _structure_projection_feature_is_comparative(fact, feature):
+        return False
+    joined = "\n".join(str(row or "") for row in evidence)
+    normalized_joined = normalize_evidence_text(joined)
+    labels = (
+        feature.get("feature_name_raw"),
+        feature.get("value_raw"),
+        feature.get("raw_expression"),
+    )
+    # A direct assertion is not enough when the model has paraphrased the
+    # payload.  Require at least one non-trivial feature/value literal in the
+    # cited span so this path cannot become a semantic completion mechanism.
+    grounded_label = any(
+        normalize_evidence_text(str(label or "")).strip()
+        and normalize_evidence_text(str(label or "")).strip()
+        in normalized_joined
+        for label in labels
+    )
+    if not grounded_label:
+        return False
+    if re.search(
+        r"(?ix)\b(?:suppress(?:ing|es|ed)?|beneficial|conducive|important|"
+        r"contribut(?:e|ed|es|ing)|enhanc(?:e|ed|es|ing)|promot(?:e|ed|es|ing)|"
+        r"responsible|attribut(?:e|ed|es|ing))\b",
+        " ".join(str(value or "") for value in labels),
+    ):
+        return False
+    if _STRUCTURE_INFERENTIAL_PROJECTION.search(joined):
+        # A direct assertion in the same sentence is safe only when it is
+        # local to this exact payload; a broad causal paragraph must not
+        # authorize a sibling noun.
+        labels = (
+            feature.get("feature_name_raw"),
+            feature.get("value_raw"),
+            feature.get("raw_expression"),
+        )
+        if not any(
+            label and _structure_evidence_has_direct_assertion(label, evidence)
+            for label in labels
+        ):
+            return False
+    if _STRUCTURE_GENERALIZATION_CUE.search(joined):
+        # General statements are admissible only when the owner is literally
+        # named in the same source span.  This prevents a chunk's routing hint
+        # from turning a literature/general background sentence into a target
+        # fact.
+        owner = str(fact.sample_id_raw or "").strip()
+        if not owner or not _literal_mention(joined, owner):
+            return False
+    return any(
+        str(label or "").strip()
+        and _structure_evidence_has_direct_assertion(label, evidence)
+        for label in labels
+    )
+
+
+def _structure_feature_is_atomic_payload(
+    fact: StructureFact,
+    feature: dict[str, Any],
+    evidence: Sequence[str],
+) -> bool:
+    """Return whether a retained feature makes its parent entity publishable.
+
+    The non-atomic entity gate historically counted only numeric and explicit
+    negative features.  That made a source-grounded qualitative feature (for
+    example ``lamellar morphology`` in ``microstructure consists of ...``)
+    get retained in the temporary row and then discarded together with its
+    otherwise valid entity.  Qualitative features are admitted here only
+    through the same source-local direct-assertion predicate used when the
+    feature is retained; no new inference or owner fan-out is introduced.
+    """
+
+    return bool(
+        _is_quantitative_structure_feature(feature)
+        or _is_negated_structure_feature(feature)
+        or _qualitative_structure_feature_is_direct(fact, feature, evidence)
+    )
+
+
 def _gate_structure_fact(
     fact: StructureFact,
 ) -> tuple[StructureFact | None, list[PromotionIssue]]:
@@ -4966,34 +5619,48 @@ def _gate_structure_fact(
                         evidence=feature_evidence,
                     )
                 )
-            elif not _payload_grounded(feature.get("value_raw"), feature_evidence):
-                issues.append(
-                    _promotion_issue(
-                        fact,
-                        code="promotion_structure_feature_unsupported",
-                        message=(
-                            "A structural feature value was absent from its cited "
-                            "evidence."
-                        ),
-                        expected={"feature_value_grounded": True},
-                        actual={
-                            "removed": deepcopy(feature),
-                            "entity": deepcopy(entity),
-                        },
-                        evidence=feature_evidence,
+            elif not _source_local_payload_grounded(
+                feature.get("value_raw"),
+                feature_evidence,
+                strict_text=True,
+            ):
+                if _qualitative_structure_feature_is_direct(
+                    fact, feature, feature_evidence
+                ):
+                    nested.append(deepcopy(feature))
+                else:
+                    issues.append(
+                        _promotion_issue(
+                            fact,
+                            code="promotion_structure_feature_unsupported",
+                            message=(
+                                "A structural feature value was absent from its cited "
+                                "evidence."
+                            ),
+                            expected={"feature_value_grounded": True},
+                            actual={
+                                "removed": deepcopy(feature),
+                                "entity": deepcopy(entity),
+                            },
+                            evidence=feature_evidence,
+                        )
                     )
-                )
             elif not _is_quantitative_structure_feature(
                 feature
             ) and not _is_negated_structure_feature(feature):
-                issues.append(
-                    _qualitative_structure_shadow_issue(
-                        fact,
-                        feature,
-                        entity=entity,
-                        evidence=feature_evidence,
+                if _qualitative_structure_feature_is_direct(
+                    fact, feature, feature_evidence
+                ):
+                    nested.append(deepcopy(feature))
+                else:
+                    issues.append(
+                        _qualitative_structure_shadow_issue(
+                            fact,
+                            feature,
+                            entity=entity,
+                            evidence=feature_evidence,
+                        )
                     )
-                )
             else:
                 nested.append(deepcopy(feature))
         row["features"] = nested
@@ -5002,8 +5669,9 @@ def _gate_structure_fact(
         if (
             entity_type in _NONATOMIC_STRUCTURE_ENTITY_TYPES
             and not any(
-                _is_quantitative_structure_feature(feature)
-                or _is_negated_structure_feature(feature)
+                _structure_feature_is_atomic_payload(
+                    fact, feature, entity_evidence
+                )
                 for feature in nested
             )
             and not _NEGATED_STRUCTURE_FEATURE.search(entity_evidence_text)
@@ -5099,34 +5767,48 @@ def _gate_structure_fact(
                     evidence=feature_evidence,
                 )
             )
-        elif not _payload_grounded(feature.get("value_raw"), feature_evidence):
-            issues.append(
-                _promotion_issue(
-                    fact,
-                    code="promotion_structure_feature_unsupported",
-                    message=(
-                        "A structural feature value was absent from its cited "
-                        "evidence."
-                    ),
-                    expected={"feature_value_grounded": True},
-                    actual={
-                        "removed": deepcopy(feature),
-                        "fact_before": before_fact,
-                    },
-                    evidence=feature_evidence,
+        elif not _source_local_payload_grounded(
+            feature.get("value_raw"),
+            feature_evidence,
+            strict_text=True,
+        ):
+            if _qualitative_structure_feature_is_direct(
+                fact, feature, feature_evidence
+            ):
+                features.append(deepcopy(feature))
+            else:
+                issues.append(
+                    _promotion_issue(
+                        fact,
+                        code="promotion_structure_feature_unsupported",
+                        message=(
+                            "A structural feature value was absent from its cited "
+                            "evidence."
+                        ),
+                        expected={"feature_value_grounded": True},
+                        actual={
+                            "removed": deepcopy(feature),
+                            "fact_before": before_fact,
+                        },
+                        evidence=feature_evidence,
+                    )
                 )
-            )
         elif entities and not _is_quantitative_structure_feature(
             feature
         ) and not _is_negated_structure_feature(feature):
-            issues.append(
-                _qualitative_structure_shadow_issue(
-                    fact,
-                    feature,
-                    entity=None,
-                    evidence=feature_evidence,
+            if _qualitative_structure_feature_is_direct(
+                fact, feature, feature_evidence
+            ):
+                features.append(deepcopy(feature))
+            else:
+                issues.append(
+                    _qualitative_structure_shadow_issue(
+                        fact,
+                        feature,
+                        entity=None,
+                        evidence=feature_evidence,
+                    )
                 )
-            )
         else:
             features.append(deepcopy(feature))
     presence_shadows: list[dict[str, Any]] = []
@@ -5261,11 +5943,13 @@ def _gate_structure_fact(
 # eligible for the formal Structure ledger.
 _STRUCTURE_COMPARATIVE_PROJECTION = re.compile(
     r"(?ix)\b(?:"
-    r"higher|lower|greater|smaller|larger|fewer|more|less|similar|different|"
+    r"higher|lower|greater|smaller|larger|weaker|stronger|finer|coarser|"
+    r"denser|fewer|more|less|similar|different|"
     r"comparable|compared|versus|relative\s+to|than|"
     r"increase(?:d|s)?|decrease(?:d|s)?|reduc(?:ed|tion)|improv(?:ed|ement)|"
     r"enhanc(?:ed|ement)|trend|ratio|difference|disparity|"
     r"variation|range|"
+    r"reliev(?:ed|es|ing)|"
     r"prefer(?:red|ential)|suggest(?:s|ing|ed)?|indic(?:ate|ates|ating)|"
     r"attribut(?:e|ed|es|ing)|caus(?:e|ed|es|ing)|due\s+to|leading\s+to|"
     r"result(?:ed|s)?\s+in|contribut(?:e|ed|es|ing)|risk|likely|"
@@ -5568,6 +6252,34 @@ def _structure_projection_feature_is_comparative(
     )
     if not _STRUCTURE_COMPARATIVE_PROJECTION.search(feature_text):
         return False
+    # Powder/feedstock descriptors are preparation metadata, not observations
+    # of the fabricated material.  The extractor often promotes a sentence
+    # such as ``finer, more agglomerated powder particles`` as a Structure
+    # feature because it contains a direct ``seen`` verb.  Require the
+    # descriptor to be tied to a processed-material entity before publishing.
+    if (
+        re.search(r"(?i)\bparticle\s+shape\b", feature_name := _scientific_fold(feature.get("feature_name_raw")))
+        and _STRUCTURE_FEEDSTOCK_PARTICLE_CONTEXT.search(" ".join(evidence))
+    ):
+        return True
+    # A qualitative treatment outcome (``residual strain partially relieved by
+    # aging``) is a process/result statement, not an independently observed
+    # Structure atom.  Keep the complete candidate in the audit stream.
+    treatment_outcome_text = " ".join(evidence)
+    treatment_cue = r"(?:aging|anneal(?:ed|ing)?|heat[\s-]*treat(?:ed|ment|ing)?|solution[\s-]*treat(?:ed|ment|ing)?)"
+    treatment_action = r"(?:reliev(?:e|ed|es|ing)|reduc(?:e|ed|es|ing)|increas(?:e|ed|es|ing)|decreas(?:e|ed|es|ing)|chang(?:e|ed|es|ing))"
+    if (
+        (
+            re.search(rf"(?ix)\b{treatment_action}\b.{{0,60}}\b{treatment_cue}\b", treatment_outcome_text)
+            or re.search(rf"(?ix)\b{treatment_cue}\b.{{0,60}}\b{treatment_action}\b", treatment_outcome_text)
+        )
+        and re.search(
+        r"(?i)\b(?:residual\s+strain|stress|texture\s+intensity|"
+        r"property|behavior|behaviour)\b",
+        feature_name,
+        )
+    ):
+        return True
     # A sentence such as ``oxides were mainly ...`` is comparative-context
     # prose but still declares positive phase presence.  Do not quarantine it
     # unless the feature itself is a comparison/interpretation rather than the
@@ -5589,6 +6301,12 @@ def _structure_projection_feature_is_comparative(
         r"misorientation|orientation|count)\b",
         feature_name,
     ) and _STRUCTURE_DIRECT_PRESENCE.search(" ".join(evidence)):
+        # Do not let a direct ``showed/observed`` verb rescue a feature whose
+        # value is itself an explicit comparison (for example ``generally
+        # larger as compared to the as-sintered condition``).  Direct phase
+        # presence remains eligible when the value is not comparative.
+        if _STRUCTURE_COMPARATIVE_PROJECTION.search(str(feature.get("value_raw") or "")):
+            return True
         return False
     return True
 
@@ -5738,7 +6456,7 @@ _STRUCTURE_NUMERIC_COMPARATIVE_VALUE = re.compile(
 
 
 def _structure_numeric_comparative_reason(
-    feature: dict[str, Any], evidence: Sequence[str]
+    feature: dict[str, Any], evidence: Sequence[str], fact: StructureFact | None = None
 ) -> str | None:
     """Return a reason for a derived/comparative numeric Structure feature."""
 
@@ -5753,6 +6471,33 @@ def _structure_numeric_comparative_reason(
         and _STRUCTURE_NUMERIC_COMPARATIVE_VALUE.search(value)
     ):
         return "comparative_or_derived_value_literal"
+    # A measured absolute value can be wrapped in a sentence comparing two
+    # owners.  If the declared owner appears only on the comparator side while
+    # this feature's value occurs before the comparison cue, the value belongs
+    # to the other owner and must not be projected here.  The converse case
+    # (value after the cue, e.g. ``higher than L90 (12%)``) is retained.
+    if fact is not None and not _has_table_evidence(evidence):
+        owner = str(fact.sample_id_raw or "").strip()
+        value_token = next(iter(_numeric_tokens(value)), "")
+        if owner and value_token:
+            owner_re = re.compile(
+                rf"(?<![A-Za-z0-9]){re.escape(owner)}(?![A-Za-z0-9])",
+                re.IGNORECASE,
+            )
+            value_re = re.compile(
+                rf"(?<![A-Za-z0-9]){re.escape(value_token)}(?![A-Za-z0-9])"
+            )
+            for span in evidence:
+                text = str(span or "")
+                for cue in _COMPARATIVE_OWNER_CUE.finditer(text):
+                    before = text[: cue.start()]
+                    after = text[cue.end() : cue.end() + 160]
+                    if (
+                        value_re.search(before)
+                        and owner_re.search(after)
+                        and not owner_re.search(before)
+                    ):
+                        return "owner_comparator_side_numeric_projection"
     return None
 
 
@@ -5788,7 +6533,7 @@ def _quarantine_structure_numeric_comparative_projections(
                 if not isinstance(feature, dict):
                     continue
                 evidence = _feature_evidence(feature, _fact_evidence(fact))
-                reason = _structure_numeric_comparative_reason(feature, evidence)
+                reason = _structure_numeric_comparative_reason(feature, evidence, fact)
                 if reason is None:
                     kept_features.append(feature)
                     continue
@@ -5807,7 +6552,7 @@ def _quarantine_structure_numeric_comparative_projections(
             if not isinstance(feature, dict):
                 continue
             evidence = _feature_evidence(feature, _fact_evidence(fact))
-            reason = _structure_numeric_comparative_reason(feature, evidence)
+            reason = _structure_numeric_comparative_reason(feature, evidence, fact)
             if reason is None:
                 kept_top.append(feature)
                 continue
@@ -6435,6 +7180,21 @@ def _characterization_has_direct_method_assertion(
     if _CHARACTERIZATION_STRONG_DECLARATION.search(evidence):
         return True
 
+    # Accept compact, source-literal method declarations that identify the
+    # instrument/setup but omit a finite acquisition verb.  This path is
+    # intentionally narrow: one modality family, an explicit setup cue, and
+    # no presentation-shaped result language.  It recovers lines such as
+    # ``transmission electron microscopy (TEM, Tecnai G2 F30)`` while leaving
+    # ``TEM images``/``EBSD maps`` captions on the quarantine path.
+    method_families = _specific_method_families(fact.data.get("method_raw"))
+    if (
+        len(method_families) == 1
+        and _CHARACTERIZATION_SETUP_CUE.search(evidence)
+        and not _CHARACTERIZATION_RESULT_MENTION.search(evidence)
+        and not _characterization_is_presentation_artifact(fact)
+    ):
+        return True
+
     record = build_promotion_records([fact])[0]
     source_key, source_kind, ambiguous = _record_source_binding(record, blocks)
     if ambiguous or source_kind != "table":
@@ -6444,6 +7204,81 @@ def _characterization_has_direct_method_assertion(
         block
         and _CHARACTERIZATION_TABLE_METHOD_LABEL.search(evidence)
     )
+
+
+def _unique_source_method_block_for_alias(
+    fact: StructureFact,
+    blocks: Sequence[_SourceBlock],
+) -> _SourceBlock | None:
+    """Find one source block that explicitly performs the alias' method.
+
+    A chunk may contain a result/caption candidate while the formal method
+    sentence was assigned to a neighbouring chunk.  Recovery is safe only
+    when the full source has exactly one block that names the same owner and
+    state and contains a strong acquisition declaration for the same method
+    family.  The helper returns no block for ambiguous owner/state matches.
+    """
+
+    method = str(fact.data.get("method_raw") or "").strip()
+    families = _specific_method_families(method)
+    if len(families) != 1:
+        return None
+    family = families[0]
+    family_pattern = next(
+        (pattern for candidate, pattern in _METHOD_FAMILIES if candidate == family),
+        None,
+    )
+    if family_pattern is None:
+        return None
+    owner = str(fact.sample_id_raw or "").strip()
+    state = str(_fact_material_state(fact) or "").strip()
+    matches: list[_SourceBlock] = []
+    for block in blocks:
+        text = block.normalized_text
+        # A source block can span an entire paragraph.  Requiring the owner,
+        # method family and acquisition verb in one sentence prevents an
+        # abstract/methods paragraph from authorizing every figure result for
+        # every owner mentioned elsewhere in that block.
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", text)
+            if sentence.strip()
+        ] or [text]
+        for sentence in sentences:
+            if not _CHARACTERIZATION_STRONG_DECLARATION.search(sentence):
+                continue
+            if not family_pattern.search(sentence):
+                continue
+            if not owner or not _literal_mention(sentence, owner):
+                continue
+            if state and not _literal_mention(sentence, state):
+                continue
+            matches.append(block)
+            break
+    return matches[0] if len(matches) == 1 else None
+
+
+def _method_block_excerpt(block: _SourceBlock, family: str) -> str | None:
+    """Return one literal line proving the recovered acquisition event."""
+
+    family_pattern = next(
+        (pattern for candidate, pattern in _METHOD_FAMILIES if candidate == family),
+        None,
+    )
+    if family_pattern is None:
+        return None
+    for line in block.normalized_text.splitlines():
+        sentences = [
+            sentence.strip()
+            for sentence in re.split(r"(?<=[.!?])\s+", line)
+            if sentence.strip()
+        ] or [line]
+        for sentence in sentences:
+            if _CHARACTERIZATION_STRONG_DECLARATION.search(sentence) and family_pattern.search(
+                sentence
+            ):
+                return sentence
+    return None
 
 
 _CHARACTERIZATION_SIMULATION_EVENT_V205 = re.compile(
@@ -6467,6 +7302,106 @@ def _characterization_event_kind_v205(fact: AxisFact) -> str:
     if _CHARACTERIZATION_LINE_SCAN_EVENT_V205.search(text):
         return "line_scan"
     return "experiment"
+
+
+def _recover_source_characterization_methods(
+    anchors: Sequence[InventoryAnchor],
+    facts: Sequence[AxisFact],
+    source_text: str,
+) -> tuple[list[AxisFact], list[PromotionIssue]]:
+    """Add only explicit owner-local method declarations omitted by chunks.
+
+    GLM candidates are intentionally high-recall, but a chunk can omit the
+    methods paragraph entirely while later chunks retain the resulting
+    structure facts.  This deterministic bridge recovers a method record only
+    when one sentence contains (1) a known modality, (2) a strong acquisition
+    declaration, and (3) exactly one source-backed owner label.  Generic
+    ``samples were examined`` prose and multi-owner sentences are skipped.
+    """
+
+    existing = {
+        (
+            _identity_text(fact.sample_id_raw),
+            _resolved_method_family(fact.data.get("method_raw"), _fact_evidence(fact)),
+            tuple(sorted(_identity_text(row) for row in _fact_evidence(fact))),
+        )
+        for fact in facts
+        if isinstance(fact, StructureFact) and fact.fact_type == "characterization"
+    }
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", str(source_text or ""))
+        if sentence.strip()
+    ]
+    recovered: list[AxisFact] = list(facts)
+    issues: list[PromotionIssue] = []
+    seen_new: set[tuple[str, str, str]] = set()
+    for sentence in sentences:
+        if not _CHARACTERIZATION_STRONG_DECLARATION.search(sentence):
+            continue
+        families = tuple(
+            family for family, pattern in _METHOD_FAMILIES if pattern.search(sentence)
+        )
+        if len(families) != 1:
+            continue
+        family = families[0]
+        owner_matches: list[InventoryAnchor] = []
+        for anchor in anchors:
+            labels = [anchor.sample_id_raw, anchor.material_name_raw]
+            if any(
+                str(label or "").strip() and _literal_mention(sentence, str(label))
+                for label in labels
+            ):
+                owner_matches.append(anchor)
+        owner_keys = {_identity_text(anchor.sample_id_raw) for anchor in owner_matches}
+        if len(owner_keys) != 1:
+            continue
+        owner = next(anchor for anchor in owner_matches if _identity_text(anchor.sample_id_raw))
+        key = (_identity_text(owner.sample_id_raw), family, _identity_text(sentence))
+        if key in seen_new:
+            continue
+        seen_new.add(key)
+        if (
+            _identity_text(owner.sample_id_raw),
+            family,
+            tuple(sorted({_identity_text(sentence)})),
+        ) in existing:
+            continue
+        recovered.append(
+            StructureFact(
+                sample_id_raw=owner.sample_id_raw,
+                fact_type="characterization",
+                evidence_unit_id="source-recovery-characterization",
+                data={
+                    "characterization_id": "temporary",
+                    "method_raw": _CHARACTERIZATION_CLASS_LABELS.get(family, family),
+                    "method_class": _CHARACTERIZATION_CLASS_LABELS.get(family, family),
+                    "source_evidence": [sentence],
+                    "recovery": "source_literal_owner_method",
+                },
+                source_evidence=[sentence],
+                confidence=0.75,
+            )
+        )
+        issues.append(
+            _promotion_issue(
+                recovered[-1],
+                code="promotion_characterization_source_method_recovered",
+                message=(
+                    "A source-literal owner-qualified acquisition method omitted "
+                    "by chunk extraction was restored deterministically."
+                ),
+                expected={
+                    "single_owner": True,
+                    "single_method_family": family,
+                    "strong_method_declaration": True,
+                    "audit_preserved": True,
+                },
+                actual={"owner": owner.sample_id_raw, "family": family, "evidence": sentence},
+                evidence=[sentence],
+            )
+        )
+    return recovered, issues
 
 
 def _characterization_event_decision_key_v205(
@@ -6820,6 +7755,13 @@ def _gate_characterizations(
                 method_class in _GENERIC_CHARACTERIZATION_CLASSES
                 or method_class
                 in _CHARACTERIZATION_CLASS_ALIASES[method_families[0]]
+                or _scientific_compact(method_class)
+                in {
+                    _scientific_compact(alias)
+                    for alias in _CHARACTERIZATION_CLASS_ALIASES[
+                        method_families[0]
+                    ]
+                }
             )
             and method_class
             != _scientific_fold(
@@ -6894,6 +7836,43 @@ def _gate_characterizations(
         if reusable_alias:
             valid.append(fact)
             continue
+        if characterization_source_block_recovery_v206_enabled():
+            recovered_block = _unique_source_method_block_for_alias(fact, blocks)
+            if recovered_block is not None:
+                family = _resolved_method_family(
+                    fact.data.get("method_raw"), evidence
+                )
+                excerpt = _method_block_excerpt(recovered_block, family)
+                if excerpt:
+                    merged_evidence = list(dict.fromkeys([*evidence, excerpt]))
+                    recovered = fact.model_copy(
+                        deep=True,
+                        update={"source_evidence": merged_evidence},
+                    )
+                    valid.append(recovered)
+                    issues.append(
+                        _promotion_issue(
+                            recovered,
+                            code="promotion_characterization_source_block_method_recovered",
+                            message=(
+                                "A result/caption Characterization candidate was "
+                                "recovered because one source-local block explicitly "
+                                "declared the same owner/state acquisition method."
+                            ),
+                            expected={
+                                "unique_owner_state_method_block": True,
+                                "direct_method_declaration": True,
+                                "audit_preserved": True,
+                            },
+                            actual={
+                                "recovered_block": recovered_block.key,
+                                "method_family": family,
+                                "recovered_evidence": excerpt,
+                            },
+                            evidence=merged_evidence,
+                        )
+                    )
+                    continue
         event_coordinate_conflict = (
             characterization_event_atomicity_v205_enabled()
             and key[:3] in direct_family_keys
@@ -7057,6 +8036,58 @@ def _v205_remove_locator_from_segment(
     return cleaned, matches
 
 
+def _v205_placeholder_or_method_only_condition(segment: str) -> bool:
+    """Return whether a condition segment carries no scientific coordinate."""
+
+    if _scientific_fold(segment) in _UNREPORTED:
+        return True
+    wrapped = _CONDITION_WRAPPER_V205.fullmatch(segment)
+    if wrapped is None:
+        return False
+    label = _scientific_fold(wrapped.group("label"))
+    payload = wrapped.group("payload").strip()
+    if _scientific_fold(payload) in _UNREPORTED:
+        return True
+    return bool(
+        "method" in label
+        and not _SCIENTIFIC_CONDITION_CUE_V205.search(payload)
+    )
+
+
+def _property_condition_decision_key_v205(
+    *,
+    code: str,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    detail: Any,
+) -> str:
+    """Return one stable audit key for a condition-only mutation."""
+
+    before_data = before.get("data") if isinstance(before.get("data"), Mapping) else {}
+    after_data = after.get("data") if isinstance(after.get("data"), Mapping) else {}
+    payload = {
+        "code": code,
+        "owner": _identity_text(before.get("sample_id_raw")),
+        "property": _scientific_fold(before_data.get("property_name_raw")),
+        "value": _scientific_fold(before_data.get("value_raw")),
+        "unit": _scientific_fold(before_data.get("unit_raw")),
+        "before_condition": str(before_data.get("test_condition_raw") or ""),
+        "after_condition": str(after_data.get("test_condition_raw") or ""),
+        "evidence": [
+            normalize_evidence_text(row)
+            for row in before.get("source_evidence", []) or []
+        ],
+        "detail": detail,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return "property-condition-v205:" + hashlib.sha256(encoded).hexdigest()[:24]
+
+
 def _separate_property_provenance_conditions_v205(
     facts: Sequence[AxisFact],
 ) -> tuple[list[AxisFact], list[PromotionIssue]]:
@@ -7077,11 +8108,62 @@ def _separate_property_provenance_conditions_v205(
             accepted.append(fact)
             continue
         raw_condition = str(fact.data.get("test_condition_raw") or "").strip()
-        if not raw_condition or _scientific_fold(raw_condition) in _UNREPORTED:
+        if not raw_condition:
             accepted.append(fact)
             continue
 
         current = fact
+        condition_segments = list(_v205_condition_segments(raw_condition))
+        removed_placeholders = [
+            segment
+            for segment in condition_segments
+            if _v205_placeholder_or_method_only_condition(segment)
+        ]
+        if removed_placeholders:
+            cleaned_segments = [
+                segment
+                for segment in condition_segments
+                if not _v205_placeholder_or_method_only_condition(segment)
+            ]
+            before = current.model_dump()
+            data = deepcopy(current.data)
+            data["test_condition_raw"] = "; ".join(cleaned_segments)
+            updated = current.model_copy(deep=True, update={"data": data})
+            after = updated.model_dump()
+            issues.append(
+                _promotion_issue(
+                    current,
+                    code="property_condition_placeholder_removed",
+                    severity="info",
+                    message=(
+                        "Placeholder and method-only fragments were removed from "
+                        "a Property condition without changing the scientific fact."
+                    ),
+                    expected={
+                        "test_condition": "source-literal scientific coordinates only",
+                        "placeholder_as_condition": False,
+                        "method_retained_in_dedicated_field_or_evidence": True,
+                        "audit_preserved": True,
+                    },
+                    actual={
+                        "before": before,
+                        "after": after,
+                        "removed_segments": removed_placeholders,
+                        "decision_key": _property_condition_decision_key_v205(
+                            code="property_condition_placeholder_removed",
+                            before=before,
+                            after=after,
+                            detail=removed_placeholders,
+                        ),
+                    },
+                    evidence=_fact_evidence(current),
+                )
+            )
+            current = updated
+            raw_condition = str(
+                current.data.get("test_condition_raw") or ""
+            ).strip()
+
         locator_segments: list[str] = []
         removed_locators: list[str] = []
         for segment in _v205_condition_segments(raw_condition):
@@ -7093,9 +8175,12 @@ def _separate_property_provenance_conditions_v205(
         if removed_locators and _condition_fragment_key(locator_condition) != (
             _condition_fragment_key(raw_condition)
         ):
+            before = current.model_dump()
             data = deepcopy(current.data)
             data["test_condition_raw"] = locator_condition
             updated = current.model_copy(deep=True, update={"data": data})
+            after = updated.model_dump()
+            unique_removed_locators = list(dict.fromkeys(removed_locators))
             issues.append(
                 _promotion_issue(
                     current,
@@ -7112,9 +8197,15 @@ def _separate_property_provenance_conditions_v205(
                         "audit_preserved": True,
                     },
                     actual={
-                        "before": current.model_dump(),
-                        "after": updated.model_dump(),
-                        "removed_locators": list(dict.fromkeys(removed_locators)),
+                        "before": before,
+                        "after": after,
+                        "removed_locators": unique_removed_locators,
+                        "decision_key": _property_condition_decision_key_v205(
+                            code="property_provenance_locator_removed_from_condition",
+                            before=before,
+                            after=after,
+                            detail=unique_removed_locators,
+                        ),
                     },
                     evidence=_fact_evidence(current),
                 )
@@ -7138,9 +8229,11 @@ def _separate_property_provenance_conditions_v205(
             unique_segments.append(segment)
         deduplicated_condition = "; ".join(unique_segments)
         if duplicate_segments:
+            before = current.model_dump()
             data = deepcopy(current.data)
             data["test_condition_raw"] = deduplicated_condition
             updated = current.model_copy(deep=True, update={"data": data})
+            after = updated.model_dump()
             issues.append(
                 _promotion_issue(
                     current,
@@ -7156,9 +8249,15 @@ def _separate_property_provenance_conditions_v205(
                         "audit_preserved": True,
                     },
                     actual={
-                        "before": current.model_dump(),
-                        "after": updated.model_dump(),
+                        "before": before,
+                        "after": after,
                         "removed_duplicate_segments": duplicate_segments,
+                        "decision_key": _property_condition_decision_key_v205(
+                            code="property_condition_duplicate_segment_removed",
+                            before=before,
+                            after=after,
+                            detail=duplicate_segments,
+                        ),
                     },
                     evidence=_fact_evidence(current),
                 )
@@ -7180,6 +8279,14 @@ def _v205_protocol_separation_audit(
         if issue.code != "promotion_condition_method_context_trimmed":
             continue
         actual = deepcopy(issue.actual)
+        before = actual.get("before") or {}
+        after = actual.get("after") or {}
+        actual["decision_key"] = _property_condition_decision_key_v205(
+            code="property_condition_protocol_context_separated",
+            before=before,
+            after=after,
+            detail=actual.get("reason"),
+        )
         output.append(
             PromotionIssue(
                 code="property_condition_protocol_context_separated",
@@ -7215,14 +8322,45 @@ def _strip_unbound_conditions(
             accepted.append(fact)
             continue
         condition = fact.data.get("test_condition_raw")
-        if _scientific_fold(condition) in _UNREPORTED or _payload_grounded(
-            condition, _fact_evidence(fact)
-        ) or _table_condition_is_source_bound(fact, source_text):
+        evidence = _fact_evidence(fact)
+        is_core_tensile = is_core_tensile_property_name(
+            fact.data.get("property_name_raw")
+        )
+        # Long method/protocol prose is intentionally handled by the dedicated
+        # cleanup pass below, which extracts source-literal coordinates from
+        # individual sentences.  Do not discard that recoverable coordinate
+        # merely because the complete copied paragraph spans several spans.
+        condition_text = str(condition or "").strip()
+        condition_grounded = (
+            _payload_grounded(condition, evidence)
+            if is_core_tensile and len(condition_text) > 180
+            else (
+                _source_local_payload_grounded(condition, evidence)
+                if is_core_tensile
+                else _payload_grounded(condition, evidence)
+            )
+        )
+        if (
+            _scientific_fold(condition) in _UNREPORTED
+            or condition_grounded
+            or _table_condition_is_source_bound(fact, source_text)
+        ):
             accepted.append(fact)
             continue
+        condition_segments = list(_v205_condition_segments(condition))
+        grounded_segments = [
+            segment
+            for segment in condition_segments
+            if (
+                _source_local_payload_grounded(segment, evidence)
+                if is_core_tensile
+                else _payload_grounded(segment, evidence)
+            )
+        ]
+        grounded_condition = "; ".join(grounded_segments)
         before = fact.model_dump()
         data = deepcopy(fact.data)
-        data["test_condition_raw"] = ""
+        data["test_condition_raw"] = grounded_condition
         cleaned = fact.model_copy(deep=True, update={"data": data})
         accepted.append(cleaned)
         issues.append(
@@ -7236,7 +8374,15 @@ def _strip_unbound_conditions(
                 expected={
                     "condition_binding": "same assertion or not_reported"
                 },
-                actual={"before": before["data"], "after": cleaned.data},
+                actual={
+                    "before": before["data"],
+                    "after": cleaned.data,
+                    "removed_segments": [
+                        segment
+                        for segment in condition_segments
+                        if segment not in grounded_segments
+                    ],
+                },
             )
         )
     return accepted, issues
@@ -7407,8 +8553,68 @@ def _explicit_treatment_condition(evidence: Sequence[str]) -> str | None:
     return matches[0]
 
 
+def _treatment_is_owner_state(
+    fact: AxisFact,
+    anchors: Sequence[InventoryAnchor],
+    treatment: str,
+) -> bool:
+    """Return whether a preparation treatment is already an owner/state cue.
+
+    A treatment copied from a result assertion is not automatically a tensile
+    test condition.  It becomes a material state only when the same candidate
+    (or its source-declared anchor) carries the treatment as its owner
+    coordinate.  This deliberately leaves the historical standalone assertion
+    behavior unchanged when no owner/state coordinate exists.
+    """
+
+    treatment_key = _identity_text(treatment)
+    if not treatment_key:
+        return False
+    owner_values = [str(fact.sample_id_raw or "")]
+    for anchor in anchors:
+        if _identity_text(anchor.sample_id_raw) == _identity_text(fact.sample_id_raw):
+            owner_values.extend((str(anchor.sample_id_raw or ""), str(anchor.state_raw or "")))
+    current_state = str(fact.data.get("material_state") or "").strip()
+    owner_values.append(current_state)
+    return any(
+        treatment_key in _identity_text(value)
+        and bool(
+            re.search(
+                r"(?i)\b(?:after|following|aged?|annealed?|heat[\s-]*treated?|"
+                r"solution[\s-]*(?:treated?|treatment)|homogen(?:ized|ised)|"
+                r"sinter(?:ed|ing)?)\b",
+                str(value),
+            )
+        )
+        for value in owner_values
+        if str(value or "").strip()
+    )
+
+
+def _remove_exact_treatment_condition(condition: str, treatment: str) -> str:
+    """Remove only the preparation segment, preserving protocol coordinates."""
+
+    raw = str(condition or "").strip()
+    if not raw:
+        return ""
+    treatment_key = _identity_text(treatment)
+    segments = [
+        segment.strip()
+        for segment in re.split(r"(?:\r?\n)+|\s*;\s*", raw)
+        if segment.strip()
+    ]
+    kept = [
+        segment
+        for segment in segments
+        if _identity_text(segment) != treatment_key
+        and treatment_key not in _identity_text(segment)
+    ]
+    return "; ".join(kept)
+
+
 def _bind_explicit_treatment_conditions(
     facts: Sequence[AxisFact],
+    anchors: Sequence[InventoryAnchor] = (),
 ) -> tuple[list[AxisFact], list[PromotionIssue]]:
     """Bind a treatment condition only when the result assertion states it.
 
@@ -7432,33 +8638,52 @@ def _bind_explicit_treatment_conditions(
             accepted.append(fact)
             continue
         current = str(fact.data.get("test_condition_raw") or "").strip()
-        if current and _EXPLICIT_TREATMENT_CONDITION.search(current):
+        owner_state = _treatment_is_owner_state(fact, anchors, treatment)
+        if current and _EXPLICIT_TREATMENT_CONDITION.search(current) and not owner_state:
             accepted.append(fact)
             continue
         data = deepcopy(fact.data)
-        data["test_condition_raw"] = (
-            treatment if not current else f"{current}; {treatment}"
-        )
+        if owner_state:
+            before_state = str(data.get("material_state") or "").strip()
+            data["material_state"] = before_state or treatment
+            data["test_condition_raw"] = _remove_exact_treatment_condition(
+                current, treatment
+            )
+            issue_code = "promotion_preparation_condition_separated"
+            message = (
+                "A preparation treatment already present in the source owner/state "
+                "coordinate was moved out of the tensile test condition."
+            )
+            reason = "owner_state_coordinate_present"
+        else:
+            data["test_condition_raw"] = (
+                treatment if not current else f"{current}; {treatment}"
+            )
+            issue_code = "promotion_explicit_treatment_condition_bound"
+            message = (
+                "A preparation treatment stated in the same tensile result "
+                "assertion was bound to its condition without borrowing from "
+                "neighboring source text."
+            )
+            reason = "no_owner_state_coordinate"
         updated = fact.model_copy(deep=True, update={"data": data})
         accepted.append(updated)
         issues.append(
             _promotion_issue(
                 fact,
-                code="promotion_explicit_treatment_condition_bound",
-                message=(
-                    "A preparation treatment stated in the same tensile result "
-                    "assertion was bound to its condition without borrowing from "
-                    "neighboring source text."
-                ),
+                code=issue_code,
+                message=message,
                 expected={
                     "condition_binding": "one source-literal treatment in own evidence",
                     "cross_sentence_inference": False,
                     "audit_preserved": True,
+                    "preparation_state_not_test_condition": owner_state,
                 },
                 actual={
                     "before": fact.model_dump(),
                     "after": updated.model_dump(),
                     "treatment_literal": treatment,
+                    "reason": reason,
                 },
                 evidence=evidence,
             )
@@ -7945,11 +9170,104 @@ def _structure_source_state_matches(
         for node in expanded.values()
         if node.state_raw
     )
+
+    # Some inventory builders encode a source-local coordinate directly in
+    # ``Sample_ID`` (for example ``binder jetting fracture surface``) rather
+    # than splitting it into ``state_raw``.  If the extractor preserved the
+    # same coordinate in ``material_state`` but attached the observation to a
+    # sibling owner (for example ``binder jetting powder``), the ordinary
+    # state-node search cannot see the intended target.  Recover only an
+    # existing owner whose label ends in the grounded coordinate and whose
+    # material/role/nature match the candidate lineage.  This is deliberately
+    # suffix-only and never creates or guesses a new owner.
+    material_state = str(fact.data.get("material_state") or "").strip()
+    if (
+        material_state
+        and _scientific_fold(material_state) not in _UNREPORTED
+        and _payload_grounded(material_state, evidence)
+    ):
+        state_folded = _scientific_fold(material_state)
+        candidate_materials = {
+            _identity_text(node.material_name_raw)
+            for node in candidate_nodes
+            if node.material_name_raw
+        }
+        candidate_roles = {
+            (node.role, node.data_nature)
+            for node in candidate_nodes
+        }
+        label_matches = []
+        for node in graph.nodes:
+            if node.state_raw or not node.material_name_raw:
+                continue
+            if _identity_text(node.material_name_raw) not in candidate_materials:
+                continue
+            if (node.role, node.data_nature) not in candidate_roles:
+                continue
+            label = _scientific_fold(node.sample_id_raw)
+            if not label or not re.search(
+                rf"(?:^|[\s,;:/()_-]){re.escape(state_folded)}$",
+                label,
+            ):
+                continue
+            label_matches.append(node)
+        unique_label_matches = {
+            node.owner_id: node for node in label_matches
+        }
+        for node in unique_label_matches.values():
+            expanded[node.owner_id] = node
+        state_nodes = tuple(
+            node
+            for node in expanded.values()
+            if node.state_raw
+            or node.owner_id in unique_label_matches
+        )
     if not state_nodes:
         return ()
 
-    # Full source-literal state labels are the strongest coordinate.  A
-    # generic base label may be present in every child alias, so only retain
+    # A Sample_ID suffix coordinate is already an exact state match even
+    # though its ``state_raw`` field is empty.  Prefer it to the generic
+    # literal/numeric matcher below: terms such as ``un-sintered`` can
+    # otherwise spuriously look like a separate ``sintered`` state.
+    label_coordinate = tuple(
+        node
+        for node in state_nodes
+        if not node.state_raw
+        and re.search(
+            rf"(?:^|[\s,;:/()_-]){re.escape(_scientific_fold(material_state))}$",
+            _scientific_fold(node.sample_id_raw),
+        )
+    )
+    unique_label_coordinate = {
+        node.owner_id: node for node in label_coordinate
+    }
+    if unique_label_coordinate:
+        return tuple(
+            unique_label_coordinate[key]
+            for key in sorted(unique_label_coordinate)
+        )
+
+    # Prefer an exact extracted ``material_state`` over incidental substring
+    # hits (``sintered`` inside ``un-sintered`` is a common example).  This is
+    # still source-grounded and only selects an existing state owner.
+    exact_material_state = tuple(
+        node
+        for node in state_nodes
+        if node.state_raw
+        and _identity_text(node.state_raw) == _identity_text(material_state)
+        and _literal_mention(support, node.state_raw)
+    )
+    unique_exact_material_state = {
+        node.owner_id: node for node in exact_material_state
+    }
+    if unique_exact_material_state:
+        return tuple(
+            unique_exact_material_state[key]
+            for key in sorted(unique_exact_material_state)
+        )
+
+    # Full source-literal state labels are the strongest remaining coordinate.
+    # A generic base label may be present in every child alias, so only retain
     # one child when exactly one state label is literally named.
     literal = tuple(
         node
@@ -8606,9 +9924,51 @@ def _quarantine_source_block_property_fanout(
         evidence_numbers = set(_numeric_tokens(record.evidence))
         return all(number in evidence_numbers for number in owner_numbers)
 
+    def physical_owner_coordinate_in_block(
+        record: PromotionRecord,
+        block: _SourceBlock | None,
+    ) -> bool:
+        """Protect one source-named physical owner with duplicate graph nodes."""
+
+        if block is None or not isinstance(record.fact, PropertyFact):
+            return False
+        envelope = _physical_owner_envelope(
+            record.fact, _candidate_nodes(record, graph)
+        )
+        return bool(
+            envelope is not None
+            and _literal_mention(
+                block.normalized_text, envelope.sample_id_raw
+            )
+            and _TENSILE_RESULT_CUE.search(block.normalized_text)
+        )
+
+    def core_tensile_source_coordinate_proven(
+        record: PromotionRecord,
+        block: _SourceBlock | None,
+    ) -> bool:
+        if not isinstance(record.fact, PropertyFact):
+            return False
+        decision = _v204_tensile_assertion_decision(
+            record.fact, graph, source_text
+        )
+        if (
+            decision.status == "matched"
+            and decision.coordinate is not None
+            and any(
+                _v204_same_existing_owner(
+                    node, graph.node(decision.coordinate.owner_key)
+                )
+                for node in _candidate_nodes(record, graph)
+            )
+        ):
+            return True
+        return physical_owner_coordinate_in_block(record, block)
+
     for (source_key, descriptor), rows in grouped.items():
         if len(rows) < 2:
             continue
+        block = block_by_key.get(source_key)
         values = [
             _scientific_compact(row.fact.data.get("value_raw"))
             for row in rows
@@ -8626,24 +9986,54 @@ def _quarantine_source_block_property_fanout(
         )
         if (
             is_core_tensile
+            and block is not None
+            and len(_tensile_axis_tokens_v205(block.normalized_text)) == 1
+            and all(
+                isinstance(row.fact, PropertyFact)
+                and str(
+                    row.fact.data.get("property_id_candidate") or ""
+                ).startswith("tensile-process-owner-v205:")
+                and len(
+                    coordinate_nodes := {
+                        node.owner_id: node
+                        for node in _candidate_nodes(row, graph)
+                    }
+                )
+                == 1
+                and (
+                    coordinate_node := next(
+                        iter(coordinate_nodes.values())
+                    )
+                )
+                is not None
+                and _tensile_axis_tokens_v205(
+                    coordinate_node.sample_id_raw, owner_label=True
+                )
+                == _tensile_axis_tokens_v205(block.normalized_text)
+                and (
+                    coordinate_base := _tensile_owner_base_v205(
+                        coordinate_node.sample_id_raw
+                    )
+                )
+                != ""
+                and _literal_mention(
+                    "\n".join(row.evidence), coordinate_base
+                )
+                for row in rows
+            )
+        ):
+            # Every row carries an independently audited, immutable oriented
+            # owner coordinate and its own evidence still pairs the value with
+            # that owner's literal base.  This is an enumerated source result,
+            # not a cross-chunk broadcast of one scalar.
+            continue
+        if (
+            is_core_tensile
             and graph.nodes
             and tensile_coordinate_fanout_guard_v204_enabled()
             and all(
-            (
-                decision := _v204_tensile_assertion_decision(
-                    row.fact, graph, source_text
-                )
-            ).status
-            == "matched"
-            and decision.coordinate is not None
-            and any(
-                _v204_same_existing_owner(
-                    node, graph.node(decision.coordinate.owner_key)
-                )
-                for node in _candidate_nodes(row, graph)
-            )
-            for row in rows
-            if isinstance(row.fact, PropertyFact)
+                core_tensile_source_coordinate_proven(row, block)
+                for row in rows
             )
         ):
             # The complete source assertion proves an independent owner/value
@@ -8651,9 +10041,6 @@ def _quarantine_source_block_property_fanout(
             # Preserve the rows; the earlier owner gate already emitted the
             # complete per-coordinate audit decisions.
             continue
-        if same_value and is_core_tensile:
-            continue
-        block = block_by_key.get(source_key)
         if block is None or _has_collective_owner_scope(block.normalized_text):
             continue
 
@@ -8700,7 +10087,7 @@ def _quarantine_source_block_property_fanout(
             else "promotion_source_block_property_fanout_quarantined"
         )
         issue_message = (
-            "The same scalar value for one non-core Property metric was emitted "
+            "The same scalar value for one Property metric was emitted "
             "for multiple owners from one prose source block without a unique "
             "owner or condition coordinate; the cross-chunk fan-out was isolated."
             if same_value
@@ -8744,15 +10131,17 @@ def _quarantine_source_block_property_fanout(
 def _quarantine_source_block_structural_fanout(
     facts: Sequence[AxisFact], source_text: str
 ) -> tuple[list[AxisFact], list[PromotionIssue]]:
-    """Isolate unqualified multi-value Structure/Processing projections.
+    """Isolate unqualified Structure/Processing source-block projections.
 
     Property fan-out already has a dedicated gate, but the same cross-chunk
     failure occurs in the other numeric axes: one prose sentence is copied into
     several chunks and a list such as ``41 and 9.5 µm`` becomes two facts under
-    one generic owner.  Tables, explicit ``respectively`` mappings, collective
-    assertions, and facts with a literal owner/condition coordinate are left
-    untouched.  The gate never merges or invents a coordinate; it only removes
-    the ambiguous atomic payload and records the complete parent fact.
+    one generic owner.  A same-valued Structure feature can be copied in the
+    same way when several owners are emitted without any coordinate.  Tables,
+    explicit ``respectively`` mappings, collective assertions, and facts with a
+    literal owner/condition coordinate are left untouched.  The gate never
+    merges or invents a coordinate; it only removes the ambiguous atomic
+    payload and records the complete parent fact.
     """
 
     blocks = _source_blocks(source_text)
@@ -8961,7 +10350,23 @@ def _quarantine_source_block_structural_fanout(
         return False
 
     for (_, _), group in grouped.items():
-        if len(group) < 2 or len({_scientific_compact(row.value) for row in group}) < 2:
+        if len(group) < 2:
+            continue
+        same_value = len({_scientific_compact(row.value) for row in group}) == 1
+        same_value_structure = same_value and all(
+            isinstance(row.fact, StructureFact) for row in group
+        )
+        # Processing parameters retain their historical different-valued
+        # fan-out protection; same-valued processing rows can be legitimate
+        # shared process settings and are outside this Structure-only change.
+        if same_value and not same_value_structure:
+            continue
+        block = group[0].block
+        # A collective sentence (``both alloys``, ``samples #2-#5``,
+        # ``respectively``) is an intentional multi-owner assertion even when
+        # the reported value happens to be identical.  Leave it for the
+        # coordinate-aware branch below.
+        if same_value and _has_collective_owner_scope(block.normalized_text):
             continue
         # A fact can legitimately report multiple differently named entities
         # or parameters; this function only sees identical descriptors.
@@ -8971,7 +10376,11 @@ def _quarantine_source_block_structural_fanout(
         for row in group:
             if isinstance(row.fact, StructureFact):
                 remove_structure.setdefault(id(row.fact), set()).add(row.index)
-                code = "promotion_source_block_structure_fanout_quarantined"
+                code = (
+                    "promotion_source_block_structure_same_value_fanout_quarantined"
+                    if same_value
+                    else "promotion_source_block_structure_fanout_quarantined"
+                )
                 path = "data.entities/features"
             else:
                 remove_processing.setdefault(id(row.fact), set()).add(row.index)
@@ -8982,7 +10391,11 @@ def _quarantine_source_block_structural_fanout(
                     row.fact,
                     code=code,
                     message=(
-                        "Multiple values for one source-block "
+                        (
+                            "The same value for one source-block "
+                            if same_value
+                            else "Multiple values for one source-block "
+                        )
                         + ("Structure feature" if isinstance(row.fact, StructureFact) else "Processing parameter")
                         + " had no unique owner, state, entity, or condition coordinate; "
                         "the cross-chunk projection was isolated."
@@ -9439,6 +10852,393 @@ def _quarantine_prose_multi_owner_atomicity(
             )
         )
     return accepted, issues
+
+
+def _quarantine_collective_ownerless_projections(
+    anchors: Sequence[InventoryAnchor],
+    facts: Sequence[AxisFact],
+    source_text: str,
+) -> tuple[list[AxisFact], list[PromotionIssue]]:
+    """Isolate a collective prose result attached to an unnamed owner.
+
+    The multi-owner atomicity gate intentionally preserves explicit collective
+    assertions for recall.  A common residual is narrower: prose such as
+    ``all the samples ... approximately 40%`` is copied into one concrete
+    inventory item (for example ``R1``), even though that item never occurs in
+    the value-bearing clause.  The current schema has no shared-owner slot, so
+    this one-owner projection is not a publishable item-level fact.
+
+    Tables, immutable table/sidecar/assertion coordinates, explicit
+    ``respectively`` mappings, and clauses that literally name the candidate
+    owner are left to their existing coordinate-aware paths.  Composition is
+    excluded to preserve its separately audited high-precision route.
+    """
+
+    graph = build_owner_graph(anchors)
+    blocks = _source_blocks(source_text)
+    if not graph.nodes or not blocks:
+        return list(facts), []
+    block_by_key = {block.key: block for block in blocks}
+    experimental_targets = tuple(
+        node
+        for node in graph.nodes
+        if node.role == "Target" and node.data_nature == "Experimental"
+    )
+
+    accepted: list[AxisFact] = []
+    issues: list[PromotionIssue] = []
+    for fact in facts:
+        if isinstance(fact, CompositionFact):
+            accepted.append(fact)
+            continue
+        if isinstance(fact, PropertyFact) and is_core_tensile_property_name(
+            fact.data.get("property_name_raw")
+        ):
+            eligible = True
+        elif isinstance(fact, PropertyFact):
+            # Non-tensile Properties can suffer from the same one-owner
+            # projection as Structure (for example, a group-level laser
+            # absorptivity statement copied onto one powder condition).  Keep
+            # this extension deliberately numeric and non-Composition: a
+            # categorical metadata assertion is not a scalar broadcast, and
+            # Composition has its own precision/routing contract.
+            eligible = bool(_numeric_tokens(fact.data.get("value_raw")))
+        elif isinstance(fact, StructureFact):
+            # Qualitative shared descriptions (``aged samples contained ...``)
+            # are intentionally retained by the existing shared-owner path.
+            # This additional gate targets only numeric measurements, where a
+            # one-owner projection creates a concrete false scalar.
+            if fact.fact_type != "structure_observation":
+                eligible = False
+            else:
+                structure_values = [
+                    feature.get("value_raw")
+                    for feature in (fact.data.get("features") or [])
+                    if isinstance(feature, Mapping)
+                ]
+                for entity in fact.data.get("entities") or []:
+                    if isinstance(entity, Mapping):
+                        structure_values.extend(
+                            feature.get("value_raw")
+                            for feature in (entity.get("features") or [])
+                            if isinstance(feature, Mapping)
+                        )
+                eligible = any(_numeric_tokens(value) for value in structure_values)
+        elif isinstance(fact, ProcessingFact):
+            # Processing has an explicit shared-assertion contract (for
+            # example, one heat treatment applied to all three alloys).  Keep
+            # it on that established path rather than treating it as a
+            # material-result broadcast.
+            eligible = False
+        else:
+            eligible = False
+        if not eligible:
+            accepted.append(fact)
+            continue
+
+        evidence = _fact_evidence(fact)
+        if not evidence or _has_table_evidence(evidence) or _has_strong_source_coordinate(fact):
+            accepted.append(fact)
+            continue
+        record = build_promotion_records([fact])[0]
+        if isinstance(fact, PropertyFact):
+            condition = str(fact.data.get("test_condition_raw") or "")
+            if _tensile_axis_tokens_v205(condition) or _TENSILE_STATE_COORDINATE.search(
+                condition
+            ):
+                # A source-explicit state/orientation condition is already a
+                # coordinate even when the prose subject is plural.
+                accepted.append(fact)
+                continue
+        source_key, source_kind, ambiguous = _record_source_binding(record, blocks)
+        if ambiguous or source_kind != "prose":
+            accepted.append(fact)
+            continue
+        block = block_by_key.get(source_key)
+        if block is None:
+            accepted.append(fact)
+            continue
+
+        candidate_nodes = _candidate_nodes(record, graph)
+        if not candidate_nodes:
+            accepted.append(fact)
+            continue
+        candidate_owner_labels = tuple(
+            dict.fromkeys(
+                label
+                for node in candidate_nodes
+                for label in (node.sample_id_raw, *node.aliases)
+                if label
+            )
+        )
+        block_text = block.normalized_text
+        # Scope detection is performed on the same local spans that carry the
+        # candidate payload, rather than on an entire paragraph.  This avoids
+        # borrowing a collective cue from an adjacent sentence.
+        local_spans = _source_local_evidence_spans((block_text,))
+        payload_spans = [
+            span for span in local_spans if _prose_fact_payload_in_segment(fact, span)
+        ]
+        if not payload_spans:
+            accepted.append(fact)
+            continue
+        scope_text = "\n".join(payload_spans)
+        tensile = isinstance(fact, PropertyFact) and is_core_tensile_property_name(
+            fact.data.get("property_name_raw")
+        )
+        if tensile and (
+            _tensile_axis_tokens_v205(scope_text)
+            or _TENSILE_STATE_COORDINATE.search(scope_text)
+        ):
+            # An orientation/state in the same value-bearing assertion is a
+            # real coordinate even if the extractor omitted it from the
+            # structured condition field; the v205 resolver will restore it.
+            accepted.append(fact)
+            continue
+        collective = (
+            _collective_tensile_source_scope(scope_text)
+            if tensile
+            else (
+                _has_collective_owner_scope(scope_text)
+                or bool(_NONCORE_PROPERTY_COLLECTIVE_SCOPE.search(scope_text))
+            )
+        )
+        if not collective or "respectiv" in scope_text.casefold():
+            accepted.append(fact)
+            continue
+        source_nodes = _safe_source_owner_nodes(scope_text, graph)
+        # Explicit local owner/value pairs remain valid, including a source
+        # sentence that says ``A1 and B1 both had ...``.  Only the unnamed
+        # projection is quarantined.
+        explicit_sample = str(fact.sample_id_raw or "").strip()
+        if (
+            _safe_explicit_owner_label(explicit_sample)
+            and not _collective_owner_label(explicit_sample)
+            and _exact_evidence_mentions_owner(scope_text, explicit_sample)
+        ):
+            # A literal owner anywhere in a paragraph is not sufficient for a
+            # numeric Properties assertion: the paragraph may introduce a
+            # material and then report a collective measurement for several
+            # powder fractions.  Require the owner and the value to form a
+            # bounded local pair, while retaining compact forms such as
+            # ``Cu-12%-ANP powder showed ... above 70%`` and tensile-style
+            # parentheticals.  This keeps the audit trail for the candidate but
+            # prevents a broad paragraph owner from rescuing a one-owner
+            # projection.
+            if isinstance(fact, PropertyFact):
+                sibling_owners = tuple(
+                    node.sample_id_raw
+                    for node in graph.nodes
+                    if node.sample_id_raw and node.sample_id_raw != explicit_sample
+                )
+                local_pair = _owner_value_local_pair(
+                    fact.data.get("value_raw"),
+                    (scope_text,),
+                    explicit_sample,
+                    sibling_owners,
+                )
+                if local_pair:
+                    accepted.append(fact)
+                    continue
+                # Coordinated assertions such as ``Both S15 and S70 had
+                # ...`` legitimately yield one fact per explicitly listed
+                # owner even though the shared value is farther than the
+                # compact owner/value window.  Preserve that fan-out only
+                # when every source-named owner has a matching candidate fact
+                # with the same property/value/evidence.  A lone projected
+                # fact (the precision failure this gate targets) still falls
+                # through to quarantine.
+                peer_labels = {
+                    str(other.sample_id_raw).strip()
+                    for other in facts
+                    if isinstance(other, PropertyFact)
+                    and str(other.data.get("property_name_raw") or "").casefold()
+                    == str(fact.data.get("property_name_raw") or "").casefold()
+                    and tuple(other.source_evidence or ())
+                    == tuple(fact.source_evidence or ())
+                }
+                peer_owner_ids = {
+                    node.owner_id
+                    for node in graph.nodes
+                    if any(
+                        _identity_text(node.sample_id_raw)
+                        == _identity_text(label)
+                        or any(
+                            _identity_text(alias) == _identity_text(label)
+                            for alias in node.aliases
+                        )
+                        for label in peer_labels
+                    )
+                }
+                if len(source_nodes) >= 2 and all(
+                    node.owner_id in peer_owner_ids for node in source_nodes
+                ):
+                    accepted.append(fact)
+                    continue
+            else:
+                accepted.append(fact)
+                continue
+
+        # A collective clause with no source owner labels is ambiguous only
+        # when the paper has multiple possible experimental owners.  A single
+        # owner paper may legitimately use ``all samples`` for replicates.
+        if not source_nodes and len(experimental_targets) <= 1:
+            accepted.append(fact)
+            continue
+        if len(source_nodes) == 1 and not isinstance(fact, PropertyFact):
+            # A single source owner is still sufficient when it is the same
+            # owner represented by the candidate.  If it is a different
+            # reference/material label (as in a generic ``samples ...``
+            # sentence copied onto ``cold-rolled Cu``), the candidate has no
+            # local coordinate and must be isolated.  Properties are stricter:
+            # a broad paragraph may mention one generic owner before a
+            # collective value sentence, so that paragraph-level label cannot
+            # rescue a one-owner Property projection.  The explicit
+            # owner/value check above remains the only Property escape hatch.
+            if (
+                not _collective_owner_label(fact.sample_id_raw)
+                and any(
+                    candidate.owner_id == source_nodes[0].owner_id
+                    for candidate in candidate_nodes
+                )
+            ):
+                accepted.append(fact)
+                continue
+
+        issues.append(
+            _promotion_issue(
+                fact,
+                code="promotion_collective_ownerless_projection_quarantined",
+                message=(
+                    "A collective prose payload was attached to one concrete "
+                    "owner without a local owner/value coordinate; the shared "
+                    "assertion was isolated instead of broadcast."
+                ),
+                expected={
+                    "local_owner_value_coordinate": True,
+                    "collective_broadcast": False,
+                    "table_or_strong_coordinate": False,
+                    "audit_preserved": True,
+                },
+                actual={
+                    "removed": fact.model_dump(),
+                    "candidate_owner": fact.sample_id_raw,
+                    "candidate_owner_labels": list(candidate_owner_labels),
+                    "source_owner_labels": [node.sample_id_raw for node in source_nodes],
+                    "source_block_key": block.key,
+                    "collective_scope": scope_text,
+                    "reason": "collective_assertion_without_local_owner_coordinate",
+                },
+                evidence=evidence,
+            )
+        )
+    return accepted, issues
+
+
+def _quarantine_collective_tensile_threshold_shadows(
+    facts: Sequence[AxisFact],
+) -> tuple[list[AxisFact], list[PromotionIssue]]:
+    """Remove a collective tensile threshold when an exact value is nested.
+
+    Statements like ``all rods exceeded 700 MPa (773 MPa for R1)`` are often
+    emitted twice: once as a threshold attached to one rod and once as the
+    exact R1 result.  The threshold is a group-level bound, not an independent
+    specimen scalar.  This gate only acts when the same source assertion also
+    contains exactly one source-literal scalar of the same tensile family/unit;
+    standalone thresholds and table rows remain untouched.
+    """
+
+    properties = [
+        fact
+        for fact in facts
+        if isinstance(fact, PropertyFact)
+        and is_core_tensile_property_name(fact.data.get("property_name_raw"))
+        and not _has_table_evidence(_fact_evidence(fact))
+    ]
+    if not properties:
+        return list(facts), []
+    scalar_rows: list[tuple[PropertyFact, float, str]] = []
+    for fact in properties:
+        scalar = _parse_exact_tensile_scalar(fact.data.get("value_raw"))
+        if scalar is None:
+            continue
+        scalar_rows.append(
+            (
+                fact,
+                scalar,
+                _generic_unit_key(fact.data.get("unit_raw")),
+            )
+        )
+
+    removed: set[int] = set()
+    issues: list[PromotionIssue] = []
+    for threshold_fact in properties:
+        threshold = _parse_tensile_threshold(threshold_fact.data.get("value_raw"))
+        if threshold is None:
+            continue
+        support = "\n".join(_fact_evidence(threshold_fact))
+        if not _collective_tensile_source_scope(support):
+            continue
+        family = _core_tensile_family(
+            threshold_fact.data.get("property_name_raw")
+        )
+        unit = _generic_unit_key(threshold_fact.data.get("unit_raw"))
+        candidates: list[tuple[PropertyFact, float]] = []
+        for scalar_fact, scalar, scalar_unit in scalar_rows:
+            if scalar_fact is threshold_fact:
+                continue
+            if (
+                _core_tensile_family(
+                    scalar_fact.data.get("property_name_raw")
+                )
+                != family
+                or scalar_unit != unit
+                or not _threshold_relation_satisfied(threshold, scalar)
+            ):
+                continue
+            evidence = _fact_evidence(threshold_fact)
+            if not _numeric_spans_for_value(scalar, "\n".join(evidence)):
+                continue
+            if unit not in _source_units_next_to_value_generic(scalar, evidence):
+                continue
+            candidates.append((scalar_fact, scalar))
+        # Require one exact nested survivor.  Multiple values indicate an
+        # ordered comparison or mixed-owner bundle and should remain on the
+        # established gates for a more specific decision.
+        unique_candidates = {
+            (id(fact), scalar): (fact, scalar) for fact, scalar in candidates
+        }
+        if len(unique_candidates) != 1:
+            continue
+        survivor, scalar = next(iter(unique_candidates.values()))
+        removed.add(id(threshold_fact))
+        issues.append(
+            _promotion_issue(
+                threshold_fact,
+                code="promotion_collective_tensile_threshold_shadow_quarantined",
+                message=(
+                    "A collective tensile threshold was a less-specific group "
+                    "projection of one nested exact source value; the exact "
+                    "value remains the only specimen-level scalar."
+                ),
+                expected={
+                    "independent_specimen_threshold": False,
+                    "unique_exact_survivor": True,
+                    "collective_broadcast": False,
+                    "audit_preserved": True,
+                },
+                actual={
+                    "removed": threshold_fact.model_dump(),
+                    "survivor": survivor.model_dump(),
+                    "threshold_operator": threshold.operator,
+                    "threshold_bound": threshold.bound,
+                    "nested_scalar": scalar,
+                    "reason": "collective_threshold_nested_exact_value",
+                },
+                evidence=_fact_evidence(threshold_fact),
+            )
+        )
+    return [fact for fact in facts if id(fact) not in removed], issues
 
 
 def _raw_markdown_table_blocks(source_text: str) -> list[tuple[int, int, tuple[str, ...]]]:
@@ -10970,6 +12770,106 @@ def _table_condition_state_owner(
     return None
 
 
+def _infer_tensile_table_condition_owner(
+    fact: PropertyFact,
+    record: PromotionRecord,
+    graph: OwnerGraph,
+    table_details: Mapping[str, Any],
+) -> tuple[OwnerNode, str] | None:
+    """Infer one existing state owner from a unique value/condition column.
+
+    Some chunk responses retain only the numeric property row from a table and
+    therefore leave ``test_condition_raw`` empty.  When the complete source
+    table still has one unique occurrence of the candidate value, its column
+    header is a literal condition coordinate (for example ``300 s Delay``).
+    This helper maps that header only to an already-declared state owner.  It
+    deliberately does not infer from row order, approximate values, or
+    material-name similarity.
+    """
+
+    if str(fact.data.get("test_condition_raw") or "").strip():
+        return None
+    rows_raw = table_details.get("table_rows")
+    if not isinstance(rows_raw, (list, tuple)):
+        return None
+    parsed = [
+        _table_cells(row)
+        for row in rows_raw
+        if _table_cells(row) and not _is_table_separator(_table_cells(row))
+    ]
+    if len(parsed) < 2:
+        return None
+
+    value = fact.data.get("value_raw")
+    value_hits: list[tuple[int, int]] = []
+    for row_index, row in enumerate(parsed[1:], start=1):
+        for column, cell in enumerate(row):
+            if _table_value_cell_matches(cell, value):
+                value_hits.append((row_index, column))
+    if len(value_hits) != 1:
+        return None
+    _, value_column = value_hits[0]
+
+    candidates = _candidate_nodes(record, graph)
+    if not candidates:
+        return None
+    expanded = {node.owner_id: node for node in candidates}
+    for node in _lineage_state_nodes(candidates, graph):
+        expanded[node.owner_id] = node
+    candidate_materials = {
+        _identity_text(node.material_name_raw)
+        for node in candidates
+        if _identity_text(node.material_name_raw)
+    }
+    if len(candidate_materials) == 1:
+        for node in graph.nodes:
+            if (
+                node.state_raw
+                and _identity_text(node.material_name_raw)
+                in candidate_materials
+                and node.role == "Target"
+                and node.data_nature == "Experimental"
+            ):
+                expanded[node.owner_id] = node
+    state_nodes = [
+        node
+        for node in expanded.values()
+        if node.state_raw
+        and node.role == "Target"
+        and node.data_nature == "Experimental"
+    ]
+    if not state_nodes:
+        return None
+
+    # The first non-separator row is the normal header.  A second header row
+    # is included only when the first one has a blank/descriptor first cell;
+    # this supports owner/condition two-level headers without treating a data
+    # row as a condition label.
+    headers = [parsed[0]]
+    if len(parsed) >= 3:
+        first_cell = _scientific_fold(parsed[0][0]) if parsed[0] else ""
+        second_cell = _scientific_fold(parsed[1][0]) if parsed[1] else ""
+        if first_cell in {"", "property", "properties", "parameter", "condition"}:
+            if second_cell in {"", "property", "properties", "parameter", "condition"}:
+                headers.append(parsed[1])
+
+    header_text = " ".join(
+        row[value_column] for row in headers if value_column < len(row)
+    ).strip()
+    if not header_text:
+        return None
+    matches = [
+        node
+        for node in state_nodes
+        if _table_condition_matches_row((header_text,), node.state_raw)
+    ]
+    unique = {node.owner_id: node for node in matches}
+    if len(unique) != 1:
+        return None
+    target = next(iter(unique.values()))
+    return target, header_text
+
+
 def _gate_tensile_source_bindings(
     anchors: Sequence[InventoryAnchor],
     facts: Sequence[AxisFact],
@@ -11001,9 +12901,18 @@ def _gate_tensile_source_bindings(
             if node.role == "Target" and node.data_nature == "Experimental"
         ]
         candidate_nodes = _candidate_nodes(record, graph)
-        if len(current_named_nodes) == 1 and not any(
-            node.owner_id == current_named_nodes[0].owner_id
-            for node in candidate_nodes
+        if (
+            len(current_named_nodes) == 1
+            and not any(
+                node.owner_id == current_named_nodes[0].owner_id
+                for node in candidate_nodes
+            )
+            # A sole literal owner after ``higher/lower than`` or
+            # ``compared with`` can be the comparator rather than the subject
+            # of this value.  The value-local assertion resolver below owns
+            # that distinction; this coarse sentence-level fallback must not
+            # overwrite an existing candidate with the comparison target.
+            and _TENSILE_COMPARATOR_RELATION.search(support) is None
         ):
             target = current_named_nodes[0]
             before_reassignment = fact
@@ -11035,6 +12944,58 @@ def _gate_tensile_source_bindings(
         table_decision, table_details = _table_binding_decision(
             fact, record, graph, source_text
         )
+        if table_decision is None:
+            inferred = _infer_tensile_table_condition_owner(
+                fact, record, graph, table_details
+            )
+            if inferred is not None:
+                target, condition_text = inferred
+                before_reassignment = fact
+                reassigned = _reassign_fact_owner(fact, target.sample_id_raw)
+                data = deepcopy(reassigned.data)
+                data["test_condition_raw"] = target.state_raw
+                reassigned = reassigned.model_copy(deep=True, update={"data": data})
+                fact = reassigned
+                record = build_promotion_records([fact])[0]
+                issues.append(
+                    _promotion_issue(
+                        before_reassignment,
+                        code="promotion_tensile_table_condition_owner_inferred",
+                        severity="info",
+                        message=(
+                            "A tensile value-only table row was bound to one "
+                            "existing state owner by its unique physical "
+                            "condition column."
+                        ),
+                        expected={
+                            "unique_existing_condition_owner": target.sample_id_raw,
+                            "condition_from_literal_table_header": True,
+                            "owner_invented": False,
+                            "broadcast": False,
+                            "audit_preserved": True,
+                        },
+                        actual={
+                            "before": before_reassignment.model_dump(),
+                            "after": fact.model_dump(),
+                            "selected_owner": target.sample_id_raw,
+                            "selected_owner_id": target.owner_id,
+                            "condition_header": condition_text,
+                            "table_binding": table_details,
+                        },
+                        evidence=list(record.evidence),
+                    )
+                )
+                # Continue through the normal condition-scope check below;
+                # the inferred state is source-literal and must not bypass
+                # later safety gates.
+                table_decision = True
+                table_details = {
+                    **table_details,
+                    "reason": "unique_value_condition_column_owner_inferred",
+                    "inferred_owner": target.sample_id_raw,
+                    "inferred_condition": target.state_raw,
+                    "condition_header": condition_text,
+                }
         if table_decision is True:
             condition = _table_binding_payload(fact)
             table_condition = condition[1] if condition is not None else ""
@@ -11142,11 +13103,30 @@ def _route_cited_table_reference_owners(
     issues: list[PromotionIssue] = []
     for fact in facts:
         record = build_promotion_records([fact])[0]
+        candidate_nodes = _candidate_nodes(record, graph)
         target = _table_reference_owner_collision(fact, record, graph)
         if target is None:
             accepted.append(fact)
             continue
-        reassigned = _reassign_fact_owner(fact, target.sample_id_raw)
+        # An extractor can emit the exact same sample label for a current Target
+        # and a cited Reference row.  OwnerGraph keeps those roles distinct,
+        # but the raw label alone cannot carry that distinction into the
+        # materializer.  Give the recovered Reference a stable public suffix
+        # only in this collision case; citation-qualified labels already have
+        # their own identity and remain byte-for-byte unchanged.
+        reference_label = str(target.sample_id_raw or "").strip()
+        target_key = _identity_text(reference_label)
+        collides_with_target = any(
+            node.role == "Target"
+            and node.data_nature == "Experimental"
+            and _identity_text(node.sample_id_raw) == target_key
+            for node in candidate_nodes
+        )
+        if collides_with_target and not re.search(
+            r"(?i)\s*\[reference\]\s*$", reference_label
+        ):
+            reference_label = f"{reference_label} [reference]"
+        reassigned = _reassign_fact_owner(fact, reference_label)
         if target.state_raw:
             data = deepcopy(reassigned.data)
             state_keys = {
@@ -11178,7 +13158,7 @@ def _route_cited_table_reference_owners(
                 actual={
                     "before": fact.model_dump(),
                     "after": reassigned.model_dump(),
-                    "reference_owner": target.sample_id_raw,
+                    "reference_owner": reference_label,
                 },
                 evidence=_fact_evidence(fact),
             )
@@ -11399,12 +13379,15 @@ def _processing_table_parameter_coordinate(
     # small number of OCR tables use two header rows; scanning the first three
     # rows is enough to find the literal owner without treating data rows as a
     # coordinate.  Duplicate aliases/columns are intentionally ambiguous.
-    owner_columns: dict[int, OwnerNode] = {}
+    # Keep two views: all literal owner columns are needed to detect a value
+    # copied from a sibling, while ``owner_columns`` below is restricted to the
+    # candidate's owner to choose the target coordinate.
+    all_owner_columns: dict[int, OwnerNode] = {}
     for header in parsed[:3]:
         for column, cell in enumerate(header):
             matches = [
                 node
-                for node in candidate_nodes
+                for node in graph.nodes
                 if _table_owner_cell_matches(cell, node)
             ]
             # Inventory extraction can legitimately emit the same sample label
@@ -11415,17 +13398,17 @@ def _processing_table_parameter_coordinate(
                 _identity_text(node.sample_id_raw) for node in matches
             }
             if len(matched_labels) == 1 and matches:
-                prior = owner_columns.get(column)
+                prior = all_owner_columns.get(column)
                 if prior is None or _identity_text(prior.sample_id_raw) == next(
                     iter(matched_labels)
                 ):
-                    owner_columns[column] = matches[0]
+                    all_owner_columns[column] = matches[0]
                 else:
-                    owner_columns.pop(column, None)
+                    all_owner_columns.pop(column, None)
     candidate_owner_ids = {node.owner_id for node in candidate_nodes}
     owner_columns = {
         column: node
-        for column, node in owner_columns.items()
+        for column, node in all_owner_columns.items()
         if node.owner_id in candidate_owner_ids
     }
     unique_owner_columns = (
@@ -11437,24 +13420,25 @@ def _processing_table_parameter_coordinate(
     # The row-oriented form has the owner in the first cell of one data row.
     # Exclude the first parsed row, which is the header even when it happens to
     # contain a sample-like label such as ``A1``.
-    owner_rows: dict[int, OwnerNode] = {}
+    all_owner_rows: dict[int, OwnerNode] = {}
     for row_index, row in enumerate(parsed[1:], start=1):
         if not row:
             continue
         matches = [
             node
-            for node in candidate_nodes
+            for node in graph.nodes
             if _table_owner_cell_matches(row[0], node)
         ]
         matched_labels = {
             _identity_text(node.sample_id_raw) for node in matches
         }
         if len(matched_labels) == 1 and matches:
-            prior = owner_rows.get(row_index)
+            prior = all_owner_rows.get(row_index)
             if prior is None or _identity_text(prior.sample_id_raw) == next(
                 iter(matched_labels)
             ):
-                owner_rows[row_index] = matches[0]
+                all_owner_rows[row_index] = matches[0]
+    owner_rows = all_owner_rows
     target_rows = [
         row_index
         for row_index, node in owner_rows.items()
@@ -11495,6 +13479,7 @@ def _processing_table_parameter_coordinate(
         value = parameter.get("value_raw")
         if layout == "row":
             target_row_index = unique_target_rows[0]
+            row_index = target_row_index
             header = parsed[0]
             header_hits = [
                 column
@@ -11531,10 +13516,20 @@ def _processing_table_parameter_coordinate(
             column = next(iter(unique_owner_columns))
             target_cell = row[column] if column < len(row) else ""
             matches_target = _table_value_cell_matches(target_cell, value)
+            # For a column-oriented table, a copied value can come from a
+            # sibling owner's column on this same parameter row.  Restrict the
+            # search to that row and literal owner columns; scanning every
+            # parameter row can confuse an unrelated repeated numeric value
+            # with an owner-coordinate conflict.
             all_hits = [
                 (other_index, other_column)
                 for other_index, other_row in enumerate(parsed[1:], start=1)
-                for other_column, cell in enumerate(other_row)
+                if other_index == row_index
+                for other_column in sorted(all_owner_columns)
+                for cell in [
+                    other_row[other_column]
+                    if other_column < len(other_row) else ""
+                ]
                 if _table_value_cell_matches(cell, value)
             ]
         details = {
@@ -12927,6 +14922,37 @@ def _quarantine_property_projections(
                         "removed": fact.model_dump(),
                         "reason": metadata_reason,
                     },
+                )
+            )
+            continue
+        explicit_origin = _scientific_fold(fact.data.get("origin"))
+        if (
+            is_core_tensile_property_name(name)
+            and explicit_origin in _NONEXPERIMENTAL_TENSILE_ORIGINS
+            and _NONEXPERIMENTAL_TENSILE_CUE.search(
+                "\n".join((name, *_fact_evidence(fact)))
+            )
+        ):
+            issues.append(
+                _promotion_issue(
+                    fact,
+                    code="promotion_comparative_tensile_quarantined",
+                    message=(
+                        "An explicitly calculated, estimated, modelled, or "
+                        "otherwise non-experimental tensile scalar was isolated "
+                        "from formal material Properties."
+                    ),
+                    expected={
+                        "formal_property": False,
+                        "direct_experimental_result": True,
+                        "audit_preserved": True,
+                    },
+                    actual={
+                        "removed": fact.model_dump(),
+                        "reason": "explicit_nonexperimental_origin",
+                        "origin": explicit_origin,
+                    },
+                    evidence=list(_fact_evidence(fact)),
                 )
             )
             continue
@@ -15106,6 +17132,576 @@ def _source_context_owner_nodes(
     return tuple(matches[key] for key in sorted(matches))
 
 
+_PROCESS_STATE_TRANSITION_RE = re.compile(
+    r"(?ix)\b(?:post[-\s]?anneal(?:ing|ed)?|"
+    r"anneal(?:ing|ed)?|heat[-\s]?treat(?:ment|ing|ed)?|"
+    r"solution[-\s]?treat(?:ment|ed)?|age(?:ing|d)?|"
+    r"tempered?|normaliz(?:ed|ation)|quench(?:ed|ing)?)\b"
+)
+
+
+def _processing_source_context_owner_nodes(
+    fact: ProcessingFact,
+    graph: OwnerGraph,
+    source_text: str,
+) -> tuple[OwnerNode, ...]:
+    """Recover a processing owner only from a locally subject-bound clause.
+
+    A complete sentence may mention a process parameter and then compare the
+    result with another state (for example ``post-annealing ... higher than
+    the as-built samples``).  The generic source-context helper intentionally
+    serves tensile recovery and can find that comparator as the only literal
+    owner in the sentence.  For Processing this is unsafe: it changes the
+    owner of the treatment itself.  Require a forming/process subject to be
+    named before the parameter evidence in the same clause and fail closed for
+    state-transition treatments, whose parameters describe the transformation
+    rather than the pre-treatment state.
+    """
+
+    if not source_text or _has_table_evidence(_fact_evidence(fact)):
+        return ()
+    process_name = normalize_evidence_text(fact.data.get("process_name_raw"))
+    if _PROCESS_STATE_TRANSITION_RE.search(process_name):
+        return ()
+    evidence = tuple(
+        normalize_evidence_text(row)
+        for row in _fact_evidence(fact)
+        if normalize_evidence_text(row)
+    )
+    if not evidence:
+        return ()
+    matches: dict[str, OwnerNode] = {}
+    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", source_text)
+    for sentence in sentences:
+        normalized = normalize_evidence_text(sentence)
+        if not normalized or not all(row in normalized for row in evidence):
+            continue
+        # For a parameterized process, the event subject must occur before
+        # the first parameter/evidence span.  This prevents a trailing
+        # comparator (``... compared with as-built``) from becoming owner.
+        first_evidence = min(
+            (normalized.find(row) for row in evidence if normalized.find(row) >= 0),
+            default=-1,
+        )
+        if first_evidence < 0:
+            continue
+        prefix = sentence[:first_evidence]
+        named = _safe_source_owner_nodes(prefix, graph)
+        if len(named) == 1:
+            matches[named[0].owner_id] = named[0]
+    return tuple(matches[key] for key in sorted(matches))
+
+
+@dataclass(frozen=True)
+class _PhysicalOwnerEnvelope:
+    """One physical sample represented by several finer OwnerGraph nodes."""
+
+    sample_id_raw: str
+    owner_ids: tuple[str, ...]
+    baseline_owner_ids: tuple[str, ...]
+    role: str
+    data_nature: str
+
+
+_PHYSICAL_OWNER_RESULT_ANCHOR = re.compile(
+    r"(?ix)\b(?:mechanical\s+(?:propert(?:y|ies)|performance)|"
+    r"tensile|yield|ultimate|uts|elongation|ductility|strength|"
+    r"stress[\s-]*strain)\b"
+)
+
+
+def _physical_owner_envelope(
+    fact: PropertyFact,
+    candidate_nodes: Sequence[OwnerNode],
+) -> _PhysicalOwnerEnvelope | None:
+    """Collapse duplicate graph nodes only when source anchors prove one sample.
+
+    Inventory extraction can represent a physical sample once for its matrix,
+    region, deformation state, and base material.  Raw graph-node count must not
+    turn those representations into several physical tensile owners.  The
+    collapse is deliberately unavailable for ordinary state siblings: at least
+    one candidate must be a source-grounded baseline identity whose empty/short
+    state is already encoded in the sample label and whose own evidence declares
+    that sample as a mechanical-result owner.
+    """
+
+    if len(candidate_nodes) < 2:
+        return None
+    samples = {_identity_text(node.sample_id_raw) for node in candidate_nodes}
+    roles = {node.role for node in candidate_nodes}
+    natures = {node.data_nature for node in candidate_nodes}
+    fact_sample = _identity_text(fact.sample_id_raw)
+    if (
+        len(samples) != 1
+        or not fact_sample
+        or samples != {fact_sample}
+        or roles != {"Target"}
+        or natures != {"Experimental"}
+    ):
+        return None
+
+    origin = _scientific_fold(fact.data.get("origin"))
+    method = _scientific_fold(fact.data.get("test_method_raw"))
+    fact_support = "\n".join(_fact_evidence(fact))
+    direct_experimental_signal = bool(
+        origin
+        in {"experimental", "experiment", "measured", "direct experiment"}
+        or re.search(r"(?ix)\b(?:tensile|uniaxial)\b", method)
+        or re.search(
+            r"(?ix)\b(?:experimental|measured)\b.{0,48}\b"
+            r"(?:tensile|yield|ultimate|uts|elongation|ductility|strength)\b|"
+            r"\b(?:tensile\s+tests?|measured\s+(?:ys|uts|yield|ultimate))\b",
+            fact_support,
+        )
+    )
+    if (
+        not direct_experimental_signal
+        and origin not in _NONEXPERIMENTAL_TENSILE_ORIGINS
+    ):
+        # Owner recovery must not convert an ownerless abstract/summary scalar
+        # into an apparently experimental Property. Explicit non-experimental
+        # rows continue only so the later origin gate can emit its precise
+        # calculated/estimated audit code.
+        return None
+
+    sample_tokens = set(re.findall(r"[a-z0-9]+", fact_sample))
+    baseline: dict[str, OwnerNode] = {}
+    for node in candidate_nodes:
+        state = _identity_text(node.state_raw)
+        state_tokens = set(re.findall(r"[a-z0-9]+", state))
+        display_base_state = not state_tokens or (
+            len(state_tokens) <= 2
+            and bool(state_tokens)
+            and state_tokens < sample_tokens
+        )
+        anchor_support = "\n".join(node.source_evidence)
+        # A result anchor that names the physical sample but does not name the
+        # node's finer state is itself sample-scoped.  This covers an inventory
+        # node whose state was supplied by a wider task context while its copied
+        # evidence says only ``HT-Alloy shows superior mechanical performance``.
+        # Conversely, ``HIPed Alloy A shows ...`` remains state-specific and
+        # cannot collapse an as-built/HIPed sibling set.
+        sample_scoped_result = bool(
+            anchor_support
+            and _literal_mention(anchor_support, node.sample_id_raw)
+            and _PHYSICAL_OWNER_RESULT_ANCHOR.search(anchor_support)
+            and (
+                display_base_state
+                or not state
+                or not _literal_mention(anchor_support, node.state_raw)
+            )
+        )
+        if (
+            sample_scoped_result
+        ):
+            baseline[node.owner_id] = node
+    if not baseline:
+        return None
+
+    owner_ids = tuple(sorted(node.owner_id for node in candidate_nodes))
+    return _PhysicalOwnerEnvelope(
+        sample_id_raw=min(
+            (node.sample_id_raw for node in candidate_nodes),
+            key=lambda value: (_identity_text(value), value),
+        ),
+        owner_ids=owner_ids,
+        baseline_owner_ids=tuple(sorted(baseline)),
+        role="Target",
+        data_nature="Experimental",
+    )
+
+
+@dataclass(frozen=True)
+class _SourceSentenceStateOwnerDecision:
+    """One source-literal state coordinate for a shortened tensile quote."""
+
+    target: OwnerNode
+    source_sentence: str
+    evidence_fragments: tuple[str, ...]
+    property_family: str
+    unit_key: str
+
+
+_DERIVED_TENSILE_PROPERTY_NAME = re.compile(
+    r"(?ix)\b(?:difference|relative|calculated|theoretical|increment|ratio|"
+    r"contribution|estimated|prediction|predicted|change|delta)\b"
+)
+_GENERIC_NOUN_ONLY_STATE = re.compile(
+    r"(?ix)^\s*(?:(?:formed|fabricated|printed|built|produced|processed)\s+)?"
+    r"(?:workpieces?|samples?|specimens?|parts?|components?)\s*$"
+)
+
+
+def _source_sentence_value_unit_is_literal(
+    fact: PropertyFact,
+    sentence: str,
+) -> bool:
+    """Require the declared unit immediately after this candidate's value."""
+
+    declared = _generic_unit_key(fact.data.get("unit_raw"))
+    if not declared or declared in _UNREPORTED:
+        return False
+    _, expected_matches = _tensile_numeric_matches(
+        fact.data.get("value_raw")
+    )
+    expected = tuple(row[0] for row in expected_matches)
+    normalized, source_matches = _tensile_numeric_matches(sentence)
+    starts = _tensile_value_sequence_starts(normalized, expected)
+    if len(starts) != 1:
+        return False
+    start = starts[0]
+    sequence_indexes = [
+        index
+        for index in range(0, len(source_matches) - len(expected) + 1)
+        if source_matches[index][1] == start
+        and tuple(
+            row[0]
+            for row in source_matches[index : index + len(expected)]
+        )
+        == expected
+    ]
+    if len(sequence_indexes) != 1:
+        return False
+    final_match = source_matches[sequence_indexes[0] + len(expected) - 1]
+    # Only presentation wrappers may separate the final scalar token from its
+    # unit.  A second word/number before the unit would be a different source
+    # coordinate and must fail closed.
+    suffix = normalized[final_match[2] : final_match[2] + 48]
+    unit_match = re.match(
+        r"(?ix)^[\s$\\{}()\[\],:;._^/-]{0,24}"
+        r"(?P<unit>gpa|mpa|kpa|pa|%)",
+        suffix,
+    )
+    return bool(
+        unit_match
+        and _generic_unit_key(unit_match.group("unit")) == declared
+    )
+
+
+def _maximal_literal_state_nodes(
+    sentence: str,
+    state_nodes: Sequence[OwnerNode],
+) -> tuple[OwnerNode, ...]:
+    """Return literal states after removing shorter alias-only matches.
+
+    Inventories may contain both ``CL`` and ``CL sample`` for one extracted
+    identity.  When the source literally says ``CL sample``, the shorter
+    substring is not a second coordinate.  Distinct non-nested states such as
+    ``as-built`` and ``aged`` remain independent and therefore ambiguous.
+    """
+
+    literal = {
+        node.owner_id: node
+        for node in state_nodes
+        if node.role == "Target"
+        and node.data_nature == "Experimental"
+        and node.state_raw
+        and _scientific_fold(node.state_raw) not in _UNREPORTED
+        and not _GENERIC_NOUN_ONLY_STATE.fullmatch(
+            _scientific_fold(node.state_raw)
+        )
+        and _literal_mention(sentence, node.state_raw)
+    }
+    maximal: list[OwnerNode] = []
+    for node in literal.values():
+        state = _identity_text(node.state_raw)
+        shadowed = any(
+            other.owner_id != node.owner_id
+            and len(_identity_text(other.state_raw)) > len(state)
+            and _literal_mention(other.state_raw, node.state_raw)
+            for other in literal.values()
+        )
+        if not shadowed:
+            maximal.append(node)
+    # ``build_owner_graph`` already merges exact duplicate anchors.  Keep an
+    # explicit identity collapse here because this resolver's safety contract
+    # must not depend on the graph construction implementation detail.
+    identities: dict[tuple[str, str, str, str], OwnerNode] = {}
+    for node in maximal:
+        key = (
+            _identity_text(node.sample_id_raw),
+            _identity_text(node.state_raw),
+            node.role,
+            node.data_nature,
+        )
+        representative = identities.get(key)
+        if representative is None or node.owner_id < representative.owner_id:
+            identities[key] = node
+    return tuple(
+        identities[key]
+        for key in sorted(identities)
+    )
+
+
+def _bounded_source_sentence_state_owner(
+    fact: PropertyFact,
+    state_nodes: Sequence[OwnerNode],
+    source_text: str,
+) -> _SourceSentenceStateOwnerDecision | None:
+    """Resolve one existing state only from one complete source sentence.
+
+    This is deliberately narrower than paragraph continuation.  It exists for
+    extraction quotes that retain a direct property/value/unit phrase while
+    dropping the state prefix from the same sentence.
+    """
+
+    if (
+        not source_text
+        or not state_nodes
+        or _has_table_evidence(_fact_evidence(fact))
+        or _DERIVED_TENSILE_PROPERTY_NAME.search(
+            str(fact.data.get("property_name_raw") or "")
+        )
+        or _tensile_scalar_shape(fact) is None
+    ):
+        return None
+    evidence = tuple(
+        normalize_evidence_text(row)
+        for row in _fact_evidence(fact)
+        if normalize_evidence_text(row)
+    )
+    if not evidence:
+        return None
+    normalized_source = normalize_evidence_text(source_text)
+    containing = []
+    for raw_sentence in _TENSILE_SENTENCE_BOUNDARY.split(normalized_source):
+        sentence = raw_sentence.strip().rstrip(".;")
+        if sentence and all(fragment in sentence for fragment in evidence):
+            containing.append(sentence)
+    unique_sentences = tuple(dict.fromkeys(containing))
+    if len(unique_sentences) != 1:
+        return None
+    sentence = unique_sentences[0]
+    if (
+        _has_collective_owner_scope(sentence)
+        or _TENSILE_COMPARATOR_RELATION.search(sentence)
+        or not _source_sentence_value_unit_is_literal(fact, sentence)
+    ):
+        return None
+    family = _core_tensile_family(fact.data.get("property_name_raw"))
+    if not family or family not in _tensile_families_in_text(sentence):
+        return None
+    states = _maximal_literal_state_nodes(sentence, state_nodes)
+    if len(states) != 1:
+        return None
+    declared_state = _fact_material_state(fact)
+    if (
+        declared_state
+        and _scientific_fold(declared_state) not in _UNREPORTED
+        and _identity_text(declared_state)
+        != _identity_text(states[0].state_raw)
+    ):
+        return None
+    return _SourceSentenceStateOwnerDecision(
+        target=states[0],
+        source_sentence=sentence,
+        evidence_fragments=evidence,
+        property_family=family,
+        unit_key=_generic_unit_key(fact.data.get("unit_raw")),
+    )
+
+
+def _bind_source_sentence_state_owner(
+    fact: PropertyFact,
+    target: OwnerNode,
+) -> PropertyFact:
+    """Publish one proven state as an internal materializer coordinate."""
+
+    reassigned = (
+        fact
+        if _identity_text(fact.sample_id_raw)
+        == _identity_text(target.sample_id_raw)
+        else _reassign_fact_owner(fact, target.sample_id_raw)
+    )
+    current_state = _fact_material_state(reassigned)
+    if (
+        not target.state_raw
+        or (
+            current_state
+            and _scientific_fold(current_state) not in _UNREPORTED
+        )
+    ):
+        return reassigned
+    data = deepcopy(reassigned.data)
+    data["material_state"] = target.state_raw
+    return reassigned.model_copy(deep=True, update={"data": data})
+
+
+def _source_sentence_state_has_explicit_peer(
+    fact: PropertyFact,
+    decision: _SourceSentenceStateOwnerDecision,
+    facts: Sequence[AxisFact],
+    graph: OwnerGraph,
+) -> bool:
+    """Avoid recovering a second owner for an already-bound source scalar."""
+
+    shape = _tensile_scalar_shape(fact)
+    if shape is None:
+        return False
+    family = _core_tensile_family(fact.data.get("property_name_raw"))
+    subtype = core_tensile_subtype(fact.data.get("property_name_raw"))
+    for other in facts:
+        if other is fact or not isinstance(other, PropertyFact):
+            continue
+        other_shape = _tensile_scalar_shape(other)
+        if (
+            other_shape is None
+            or family
+            != _core_tensile_family(other.data.get("property_name_raw"))
+            or subtype
+            != core_tensile_subtype(other.data.get("property_name_raw"))
+            or shape.unit_dimension != other_shape.unit_dimension
+            or not math.isclose(
+                shape.canonical_central,
+                other_shape.canonical_central,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+            or (
+                shape.canonical_uncertainty is None
+            )
+            != (other_shape.canonical_uncertainty is None)
+            or (
+                shape.canonical_uncertainty is not None
+                and other_shape.canonical_uncertainty is not None
+                and not math.isclose(
+                    shape.canonical_uncertainty,
+                    other_shape.canonical_uncertainty,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            )
+        ):
+            continue
+        peer_evidence = tuple(
+            normalize_evidence_text(row)
+            for row in _fact_evidence(other)
+            if normalize_evidence_text(row)
+        )
+        if not peer_evidence:
+            continue
+        named = _fact_has_literal_owner_or_state(
+            other, graph, current_only=True
+        )
+        support = "\n".join(_fact_evidence(other))
+        peer_condition = str(
+            other.data.get("test_condition_raw") or ""
+        ).strip()
+        explicit_peer = len(named) == 1 or (
+            peer_condition
+            and _payload_grounded(peer_condition, _fact_evidence(other))
+        ) or (
+            _literal_mention(support, other.sample_id_raw)
+            and (
+                _safe_explicit_owner_label(other.sample_id_raw)
+                or _CONDITION_DISCRIMINATOR_CUE.search(
+                    str(other.sample_id_raw or "")
+                )
+            )
+        )
+        if not explicit_peer:
+            continue
+        if all(row in decision.source_sentence for row in peer_evidence):
+            return True
+        # Abstract and Results sections can repeat the same scalar with
+        # different owner spellings.  Suppress the optional generic recovery
+        # only when the already-bound peer carries the same literal state
+        # coordinate (for example ``sintered at 1280 °C`` versus
+        # ``1280 °C sample``).  Numeric equality alone is insufficient: both
+        # coordinate texts must contain a state/condition discriminator.
+        target_state = str(decision.target.state_raw or "").strip()
+        peer_coordinate = " ".join(
+            str(value or "").strip()
+            for value in (
+                other.sample_id_raw,
+                _fact_material_state(other),
+                peer_condition,
+            )
+            if str(value or "").strip()
+        )
+        target_numbers = set(_numeric_tokens(target_state))
+        peer_numbers = set(_numeric_tokens(peer_coordinate))
+        same_literal_state = bool(
+            target_state
+            and (
+                _literal_mention(peer_coordinate, target_state)
+                or _literal_mention(target_state, peer_coordinate)
+            )
+        )
+        same_numeric_state = bool(
+            target_numbers
+            and target_numbers <= peer_numbers
+            and _CONDITION_DISCRIMINATOR_CUE.search(target_state)
+            and _CONDITION_DISCRIMINATOR_CUE.search(peer_coordinate)
+        )
+        if same_literal_state or same_numeric_state:
+            return True
+    return False
+
+
+def _source_sentence_state_recovery_shadow_ids(
+    facts: Sequence[AxisFact],
+) -> set[int]:
+    """Identify scalar summaries shadowed by a richer uncertainty result.
+
+    Recovery is optional: when the same owner, tensile metric, unit, central
+    value, and non-conflicting condition already have an uncertainty-bearing
+    candidate, restoring the scalar summary would duplicate one measurement in
+    formal Properties.  The scalar continues to the normal quarantine so its
+    evidence and reason remain auditable.
+    """
+
+    rows: list[tuple[PropertyFact, _TensileScalarShape]] = []
+    for fact in facts:
+        if not isinstance(fact, PropertyFact) or not is_core_tensile_property_name(
+            fact.data.get("property_name_raw")
+        ):
+            continue
+        shape = _tensile_scalar_shape(fact)
+        if shape is not None:
+            rows.append((fact, shape))
+    shadow_ids: set[int] = set()
+    for fact, shape in rows:
+        if shape.uncertainty is not None:
+            continue
+        family = _core_tensile_family(fact.data.get("property_name_raw"))
+        subtype = core_tensile_subtype(fact.data.get("property_name_raw"))
+        condition = _scientific_fold(fact.data.get("test_condition_raw"))
+        for other, other_shape in rows:
+            if other is fact or other_shape.uncertainty is None:
+                continue
+            if (
+                _identity_text(fact.sample_id_raw)
+                != _identity_text(other.sample_id_raw)
+                or family
+                != _core_tensile_family(other.data.get("property_name_raw"))
+                or subtype
+                != core_tensile_subtype(other.data.get("property_name_raw"))
+                or shape.unit_dimension != other_shape.unit_dimension
+                or not math.isclose(
+                    shape.canonical_central,
+                    other_shape.canonical_central,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            ):
+                continue
+            other_condition = _scientific_fold(
+                other.data.get("test_condition_raw")
+            )
+            if (
+                condition
+                and condition not in _UNREPORTED
+                and other_condition
+                and other_condition not in _UNREPORTED
+                and condition != other_condition
+            ):
+                continue
+            shadow_ids.add(id(fact))
+            break
+    return shadow_ids
+
+
 def _fact_has_explicit_base_owner_without_state(
     fact: AxisFact,
     candidate_nodes: Sequence[OwnerNode],
@@ -15219,6 +17815,239 @@ def _processing_parameter_state_matches(
         if process_state_match:
             matches[node.owner_id] = node
     return tuple(matches[key] for key in sorted(matches))
+
+
+def _processing_parameter_owner_value_local_pair(
+    value: Any,
+    evidence: Sequence[str],
+    owner: str,
+    sibling_owners: Sequence[str],
+) -> bool:
+    """Require a Processing parameter to stay with its source-local owner.
+
+    Processing candidates frequently retain a complete comparison sentence
+    while the model assigns the numeric parameter to every mentioned sample.
+    Split at contrast markers first, then use the existing bounded owner/value
+    matcher inside each side.  A side with no competing owner may use the
+    wider local assertion window; a side containing multiple owners must pass
+    the stricter nearest-owner rule.  No owner is inferred or renamed here.
+    """
+
+    numeric_tokens = _numeric_tokens(value)
+    if not numeric_tokens:
+        return False
+    owner_folded = _identity_text(owner)
+    if not owner_folded:
+        return False
+    for raw in evidence:
+        for span in _source_local_evidence_spans((str(raw or ""),)):
+            parts = [
+                part.strip()
+                for part in _PROCESS_OWNER_CONTRAST_BOUNDARY.split(span)
+                if part.strip()
+            ] or [span]
+            for part in parts:
+                if not _payload_grounded(value, (part,)):
+                    continue
+                if not any(
+                    _literal_mention(part, alias)
+                    for alias in _owner_evidence_aliases(owner)
+                ):
+                    continue
+                local_siblings = tuple(
+                    sibling
+                    for sibling in sibling_owners
+                    if any(
+                        _literal_mention(part, alias)
+                        for alias in _owner_evidence_aliases(sibling)
+                    )
+                    and not (
+                        _identity_text(sibling) == owner_folded
+                        or _identity_text(sibling) in owner_folded
+                        or owner_folded in _identity_text(sibling)
+                    )
+                )
+                if not local_siblings:
+                    # With no competing owner on this side, the value and
+                    # owner are still required to occur in one source span.
+                    return True
+                # Explicit shared events such as ``A1 and A2 were sintered at
+                # 1300 °C`` are valid for both owners.  Permit this only when
+                # every local owner is named and, after removing owner labels,
+                # the span contains exactly this parameter's numeric payload.
+                # An ordered list (``A1 ... 1300 and A2 ... 1400``) therefore
+                # remains ambiguous and is rejected below.
+                local_labels = (owner, *local_siblings)
+                cleaned = part
+                for label in local_labels:
+                    for alias in _owner_evidence_aliases(label):
+                        if alias:
+                            cleaned = re.sub(
+                                rf"(?<!\w){re.escape(alias)}(?!\w)",
+                                " ",
+                                cleaned,
+                                flags=re.IGNORECASE,
+                            )
+                if (
+                    all(
+                        any(
+                            _literal_mention(part, alias)
+                            for alias in _owner_evidence_aliases(label)
+                        )
+                        for label in local_labels
+                    )
+                    and _numeric_tokens(cleaned) == numeric_tokens
+                ):
+                    return True
+                if _owner_value_local_pair(
+                    value,
+                    (part,),
+                    owner,
+                    local_siblings,
+                ):
+                    return True
+    return False
+
+
+def _quarantine_processing_parameter_owner_projections(
+    anchors: Sequence[InventoryAnchor],
+    facts: Sequence[AxisFact],
+) -> tuple[list[AxisFact], list[PromotionIssue]]:
+    """Remove numeric process parameters copied across contrasted owners.
+
+    This is intentionally parameter-level: the process event itself can remain
+    in the formal ledger when its route is source-grounded, while an ambiguous
+    temperature/power/time value is isolated with full audit provenance.
+    Table rows and explicit strong coordinates are handled by their existing
+    axis-specific gates and are not reinterpreted here.
+    """
+
+    graph = build_owner_graph(anchors)
+    if len(graph.nodes) <= 1:
+        return list(facts), []
+    accepted: list[AxisFact] = []
+    issues: list[PromotionIssue] = []
+    for fact in facts:
+        if not isinstance(fact, ProcessingFact) or fact.fact_type != "process_stage":
+            accepted.append(fact)
+            continue
+        parameters = [
+            parameter
+            for parameter in fact.data.get("parameters_raw") or []
+            if isinstance(parameter, dict)
+        ]
+        if not parameters:
+            accepted.append(fact)
+            continue
+        record = build_promotion_records([fact])[0]
+        candidate_nodes = _candidate_nodes(record, graph)
+        if not candidate_nodes:
+            accepted.append(fact)
+            continue
+        fallback = _fact_evidence(fact)
+        kept: list[dict[str, Any]] = []
+        removed: list[dict[str, Any]] = []
+        for parameter in parameters:
+            value = str(parameter.get("value_raw") or "").strip()
+            evidence = _feature_evidence(parameter, fallback)
+            if (
+                not _numeric_tokens(value)
+                or _has_table_evidence(evidence)
+                or _has_strong_source_coordinate(fact)
+            ):
+                kept.append(parameter)
+                continue
+            source_nodes = _safe_source_owner_nodes(
+                "\n".join(str(row) for row in evidence), graph
+            )
+            # If the parameter evidence does not expose at least two distinct
+            # source owners, this gate has no proof of a cross-owner copy.  The
+            # later owner/state gates retain their established behavior.
+            if len(source_nodes) <= 1:
+                kept.append(parameter)
+                continue
+            # This pass is deliberately limited to explicit contrast grammar.
+            # Generic multi-owner prose is handled by the existing atomicity
+            # gate, whose issue code and broader coordination rules are more
+            # informative for review.
+            if not _PROCESS_OWNER_CONTRAST_BOUNDARY.search(
+                "\n".join(str(row) for row in evidence)
+            ):
+                kept.append(parameter)
+                continue
+            source_owner_ids = {node.owner_id for node in source_nodes}
+            candidate_source_nodes = tuple(
+                node for node in candidate_nodes if node.owner_id in source_owner_ids
+            )
+            if not candidate_source_nodes:
+                kept.append(parameter)
+                continue
+            sibling_labels = tuple(
+                node.sample_id_raw
+                for node in source_nodes
+                if node.owner_id not in {node_.owner_id for node_ in candidate_source_nodes}
+            )
+            if any(
+                _processing_parameter_owner_value_local_pair(
+                    value,
+                    evidence,
+                    node.sample_id_raw,
+                    sibling_labels,
+                )
+                for node in candidate_source_nodes
+            ):
+                kept.append(parameter)
+                continue
+            removed.append(
+                {
+                    "parameter": deepcopy(parameter),
+                    "value_raw": value,
+                    "evidence": list(evidence),
+                    "candidate_owners": [
+                        node.sample_id_raw for node in candidate_source_nodes
+                    ],
+                    "source_owners": [node.sample_id_raw for node in source_nodes],
+                    "reason": "contrasted_owner_without_local_value_pair",
+                }
+            )
+        if not removed:
+            accepted.append(fact)
+            continue
+        data = deepcopy(fact.data)
+        data["parameters_raw"] = kept
+        after = fact.model_copy(deep=True, update={"data": data})
+        if kept or _processing_stage_has_direct_assertion(fact, ""):
+            accepted.append(after)
+        before = fact.model_dump()
+        for row in removed:
+            issues.append(
+                _promotion_issue(
+                    fact,
+                    code="promotion_processing_parameter_owner_value_projection_quarantined",
+                    message=(
+                        "A numeric Processing parameter was attached to an owner "
+                        "mentioned only on the comparator side of the source "
+                        "assertion; the parameter was isolated while its complete "
+                        "stage and evidence remain auditable."
+                    ),
+                    expected={
+                        "source_local_owner_value_pair": True,
+                        "contrast_side_matches_owner": True,
+                        "parameter_only_quarantined": True,
+                        "audit_preserved": True,
+                    },
+                    actual={
+                        "removed_parameter": row["parameter"],
+                        "before": before,
+                        "after": after.model_dump() if kept else None,
+                        "candidate_owners": row["candidate_owners"],
+                        "source_owners": row["source_owners"],
+                        "reason": row["reason"],
+                    },
+                    evidence=row["evidence"],
+                )
+            )
+    return accepted, issues
 
 
 _IMPLICIT_PROCESSED_STATE = re.compile(
@@ -15379,6 +18208,42 @@ def _quarantine_processing_owner_ambiguities(
         ):
             accepted.append(fact)
             continue
+        # Task chunking can retain only the parameter suffix while the full
+        # source sentence names one owner (``H230AM ... laser power 300 W``).
+        # Recover that existing owner before applying the parameter-level
+        # contrast gate; this is source-local recovery, never a chemistry or
+        # item-order inference.
+        context_nodes = _processing_source_context_owner_nodes(
+            fact, graph, source_text
+        )
+        if len(context_nodes) == 1:
+            target = context_nodes[0]
+            if not any(node.owner_id == target.owner_id for node in candidate_nodes):
+                reassigned = _reassign_fact_owner(fact, target.sample_id_raw)
+                accepted.append(reassigned)
+                issues.append(
+                    _promotion_issue(
+                        fact,
+                        code="promotion_processing_source_context_owner_reassigned",
+                        message=(
+                            "A parameterized Processing candidate was routed to "
+                            "the one existing owner named by its complete source "
+                            "sentence after the task evidence had been truncated."
+                        ),
+                        expected={
+                            "unique_source_context_owner": target.sample_id_raw,
+                            "owner_invented": False,
+                            "audit_preserved": True,
+                        },
+                        actual={
+                            "before": fact.model_dump(),
+                            "after": reassigned.model_dump(),
+                            "source_context_owner": target.sample_id_raw,
+                        },
+                        evidence=list(_fact_evidence(fact)),
+                    )
+                )
+                continue
         named_nodes = _fact_has_literal_owner_or_state(
             fact, graph, current_only=True
         )
@@ -15652,6 +18517,253 @@ _PROCESS_ROLE_VERBS_V205 = (
     r"process(?:ed|ing)|produc(?:ed|tion)|build|built|deposit(?:ed|ion)"
 )
 
+_TENSILE_AXIS_ORIENTATION_V205 = re.compile(
+    r"(?ix)\b(?P<axis>[xyz])\s*(?:[-/]\s*)?"
+    r"(?:axis|orientation|direction)\b"
+)
+_TENSILE_OWNER_AXIS_SUFFIX_V205 = re.compile(
+    r"(?ix)(?:\s*/\s*|\s+)(?P<axis>[xyz])"
+    r"(?:\s+(?:axis|orientation|direction))?\s*$"
+)
+_TENSILE_OWNER_ROLE_SUFFIX_V205 = re.compile(
+    r"(?ix)\s+(?:powders?|feedstocks?|specimens?|samples?|parts?)\s*$"
+)
+_TENSILE_RESULT_TEMPERATURE_V205 = re.compile(
+    r"(?ix)(?:"
+    r"\bRT\b|\broom\s+temperature\b|"
+    r"(?<![a-z0-9])[-+]?\d+(?:\.\d+)?\s*(?:\\[,;:]\s*)?°\s*[ck]\b|"
+    r"(?<![a-z0-9])[-+]?\d+(?:\.\d+)?\s*(?:\\[,;:]\s*)?"
+    r"\^?\s*\{?\s*\\circ\s*\}?\s*(?:\\mathrm\s*\{?)?\s*[ck]\b|"
+    r"(?<![a-z0-9])[-+]?\d+(?:\.\d+)?\s+k\b"
+    r")"
+)
+
+
+def _tensile_axis_tokens_v205(value: Any, *, owner_label: bool = False) -> set[str]:
+    """Return only source-explicit X/Y/Z tensile coordinates."""
+
+    text = str(value or "").strip()
+    tokens = {
+        match.group("axis").casefold()
+        for match in _TENSILE_AXIS_ORIENTATION_V205.finditer(text)
+    }
+    if owner_label and (match := _TENSILE_OWNER_AXIS_SUFFIX_V205.search(text)):
+        tokens.add(match.group("axis").casefold())
+    return tokens
+
+
+def _tensile_owner_base_v205(value: Any) -> str:
+    """Fold one oriented/specimen display label to its literal process base."""
+
+    text = str(value or "").strip()
+    text = _TENSILE_OWNER_AXIS_SUFFIX_V205.sub("", text)
+    text = _TENSILE_OWNER_ROLE_SUFFIX_V205.sub("", text)
+    return _identity_text(text)
+
+
+def _explicit_orientation_owner_candidates_v205(
+    current: OwnerNode,
+    graph: OwnerGraph,
+    context: str,
+) -> tuple[str | None, list[OwnerNode]]:
+    """Resolve one existing oriented owner without inventing an identity."""
+
+    orientations = _tensile_axis_tokens_v205(context)
+    if len(orientations) != 1 or _tensile_axis_tokens_v205(
+        current.sample_id_raw, owner_label=True
+    ):
+        return None, []
+    orientation = next(iter(orientations))
+    current_base = _tensile_owner_base_v205(current.sample_id_raw)
+    if not current_base:
+        return orientation, []
+    candidates = [
+        node
+        for node in graph.nodes
+        if node.owner_id != current.owner_id
+        and node.role == "Target"
+        and node.data_nature == "Experimental"
+        and _tensile_axis_tokens_v205(node.sample_id_raw, owner_label=True)
+        == {orientation}
+        and _tensile_owner_base_v205(node.sample_id_raw) == current_base
+    ]
+    return orientation, candidates
+
+
+def _bounded_source_orientation_sentence_v205(
+    fact: PropertyFact,
+    current: OwnerNode,
+    source_text: str,
+) -> str | None:
+    """Recover one orientation only from the fact's unique source sentence.
+
+    Extraction responses sometimes copy a value-local phrase while omitting the sentence
+    prefix that declares ``X orientation`` or ``Z orientation``.  Expanding
+    such a phrase is safe only when all of the following remain source-literal:
+
+    * the evidence phrase contains this fact's owner base and complete value;
+    * that phrase occurs in exactly one source sentence; and
+    * the source sentence contains exactly one X/Y/Z coordinate.
+
+    The owner/value co-location requirement is what prevents a multi-owner
+    comparison from assigning every value to whichever owner happens to be
+    nearest after sentence expansion.  No approximate-value or table lookup is
+    used here.
+    """
+
+    owner_base = _tensile_owner_base_v205(current.sample_id_raw)
+    _, value_matches = _tensile_numeric_matches(fact.data.get("value_raw"))
+    expected = tuple(row[0] for row in value_matches)
+    normalized_source = normalize_evidence_text(source_text)
+    if not owner_base or not expected or not normalized_source:
+        return None
+    source_sentences = [
+        row.strip()
+        for row in _TENSILE_SENTENCE_BOUNDARY.split(normalized_source)
+        if row.strip()
+    ]
+    matched: list[str] = []
+    for raw_evidence in _fact_evidence(fact):
+        if _is_table_evidence_row(raw_evidence):
+            continue
+        evidence = normalize_evidence_text(str(raw_evidence or ""))
+        if (
+            not evidence
+            or not _literal_mention(evidence, owner_base)
+            or len(_tensile_value_sequence_starts(evidence, expected)) != 1
+        ):
+            continue
+        containing = [
+            sentence for sentence in source_sentences if evidence in sentence
+        ]
+        if len(containing) != 1:
+            continue
+        sentence = containing[0]
+        if (
+            len(_tensile_value_sequence_starts(sentence, expected)) != 1
+            or len(_tensile_axis_tokens_v205(sentence)) != 1
+        ):
+            continue
+        matched.append(sentence)
+    unique = list(dict.fromkeys(matched))
+    return unique[0] if len(unique) == 1 else None
+
+
+def _bounded_source_tensile_temperature_v205(
+    fact: PropertyFact,
+    source_text: str,
+) -> tuple[str, str] | None:
+    """Recover one omitted result temperature from one unique source sentence."""
+
+    if (
+        not source_text
+        or str(fact.data.get("test_condition_raw") or "").strip()
+        or _has_table_evidence(_fact_evidence(fact))
+    ):
+        return None
+    owner_base = _tensile_owner_base_v205(fact.sample_id_raw)
+    _, value_matches = _tensile_numeric_matches(fact.data.get("value_raw"))
+    expected = tuple(row[0] for row in value_matches)
+    normalized_source = normalize_evidence_text(source_text)
+    if not owner_base or not expected or not normalized_source:
+        return None
+    source_sentences = [
+        row.strip()
+        for row in _TENSILE_SENTENCE_BOUNDARY.split(normalized_source)
+        if row.strip()
+    ]
+    matched: list[tuple[str, str]] = []
+    for raw_evidence in _fact_evidence(fact):
+        evidence = normalize_evidence_text(str(raw_evidence or ""))
+        if (
+            not evidence
+            or not _literal_mention(evidence, owner_base)
+            or len(_tensile_value_sequence_starts(evidence, expected)) != 1
+        ):
+            continue
+        containing = [
+            sentence for sentence in source_sentences if evidence in sentence
+        ]
+        if len(containing) != 1:
+            continue
+        sentence = containing[0]
+        if len(_tensile_value_sequence_starts(sentence, expected)) != 1:
+            continue
+        temperatures = list(
+            dict.fromkeys(
+                re.sub(r"\s+", " ", match.group(0)).strip()
+                for match in _TENSILE_RESULT_TEMPERATURE_V205.finditer(sentence)
+            )
+        )
+        if len(temperatures) == 1:
+            matched.append((temperatures[0], sentence))
+    unique = list(dict.fromkeys(matched))
+    return unique[0] if len(unique) == 1 else None
+
+
+def _bind_unique_source_sentence_tensile_temperature_v205(
+    facts: Sequence[AxisFact],
+    source_text: str,
+) -> tuple[list[AxisFact], list[PromotionIssue]]:
+    """Fill an empty tensile condition from one source-proven sentence only."""
+
+    if not property_provenance_condition_separation_v205_enabled():
+        return list(facts), []
+    accepted: list[AxisFact] = []
+    issues: list[PromotionIssue] = []
+    for fact in facts:
+        if not (
+            isinstance(fact, PropertyFact)
+            and is_core_tensile_property_name(
+                fact.data.get("property_name_raw")
+            )
+        ):
+            accepted.append(fact)
+            continue
+        decision = _bounded_source_tensile_temperature_v205(fact, source_text)
+        if decision is None:
+            accepted.append(fact)
+            continue
+        temperature, sentence = decision
+        before = fact.model_dump()
+        data = deepcopy(fact.data)
+        data["test_condition_raw"] = temperature
+        updated = fact.model_copy(deep=True, update={"data": data})
+        after = updated.model_dump()
+        accepted.append(updated)
+        issues.append(
+            _promotion_issue(
+                fact,
+                code="tensile_source_sentence_temperature_bound",
+                severity="info",
+                message=(
+                    "A temperature omitted from a short tensile quote was "
+                    "restored from its one unique complete source sentence."
+                ),
+                expected={
+                    "unique_source_sentence": True,
+                    "unique_result_temperature": True,
+                    "owner_value_local": True,
+                    "cross_sentence_inference": False,
+                    "audit_preserved": True,
+                },
+                actual={
+                    "before": before,
+                    "after": after,
+                    "temperature": temperature,
+                    "source_sentence": sentence,
+                    "decision_key": _property_condition_decision_key_v205(
+                        code="tensile_source_sentence_temperature_bound",
+                        before=before,
+                        after=after,
+                        detail=sentence,
+                    ),
+                },
+                evidence=_fact_evidence(fact),
+            )
+        )
+    return accepted, issues
+
 
 def _owner_label_has_process_role_v205(label: str, support: str) -> bool:
     """Require grammar that explicitly uses an owner label as a process."""
@@ -15739,6 +18851,138 @@ def _route_unique_material_owner_v205(
             for node in current_nodes
             if node.role == "Target" and node.data_nature == "Experimental"
         ]
+        if not current_targets:
+            accepted.append(fact)
+            continue
+        # Inventory may contain several state anchors under one coarse sample
+        # label (for example LPBF with X- and Z-orientation state_raw values).
+        # The explicit-orientation route only needs that shared literal sample
+        # base; the older process-grammar route below still requires one exact
+        # owner node.
+        current_sample_labels = {
+            _identity_text(node.sample_id_raw) for node in current_targets
+        }
+        current = min(current_targets, key=lambda node: node.owner_id)
+        orientation_context = "\n".join(
+            [support, str(fact.data.get("test_condition_raw") or "")]
+        )
+        orientation_source_sentence: str | None = None
+        orientation_source_kind = "direct_evidence"
+        if not _tensile_axis_tokens_v205(orientation_context):
+            orientation_source_sentence = (
+                _bounded_source_orientation_sentence_v205(
+                    fact, current, source_text
+                )
+            )
+            if orientation_source_sentence is not None:
+                orientation_context = orientation_source_sentence
+                orientation_source_kind = "bounded_source_sentence"
+        orientation: str | None = None
+        orientation_targets: list[OwnerNode] = []
+        if len(current_sample_labels) == 1:
+            orientation, orientation_targets = (
+                _explicit_orientation_owner_candidates_v205(
+                    current, graph, orientation_context
+                )
+            )
+        if orientation is not None and len(orientation_targets) == 1:
+            target = orientation_targets[0]
+            decision_key = _tensile_process_owner_decision_key_v205(
+                fact,
+                [target],
+                reason=(
+                    "bounded_source_sentence_orientation_owner"
+                    if orientation_source_sentence is not None
+                    else "explicit_orientation_owner"
+                ),
+            )
+            coordinate_data = deepcopy(fact.data)
+            coordinate_data["property_id_candidate"] = decision_key
+            coordinate_fact = fact.model_copy(
+                deep=True, update={"data": coordinate_data}
+            )
+            reassigned = _reassign_fact_owner(
+                coordinate_fact, target.sample_id_raw
+            )
+            accepted.append(reassigned)
+            issues.append(
+                _promotion_issue(
+                    fact,
+                    code="tensile_process_owner_reassigned",
+                    severity="info",
+                    message=(
+                        "A core-tensile candidate carried exactly one explicit "
+                        "X/Y/Z coordinate and exactly one existing same-base "
+                        "oriented Target owner; it was rerouted without "
+                        "inventing an owner."
+                    ),
+                    expected={
+                        "explicit_orientation": True,
+                        "unique_existing_oriented_owner": True,
+                        "owner_invented": False,
+                        "value_unit_condition_changed": False,
+                        "audit_preserved": True,
+                    },
+                    actual={
+                        "before": fact.model_dump(),
+                        "after": reassigned.model_dump(),
+                        "selected_owner": target.sample_id_raw,
+                        "selected_owner_id": target.owner_id,
+                        "decision_key": decision_key,
+                        "coordinate": {
+                            "kind": "explicit_orientation_owner",
+                            "orientation": orientation.upper(),
+                            "owner_base": _tensile_owner_base_v205(
+                                current.sample_id_raw
+                            ),
+                            **(
+                                {
+                                    "orientation_source_kind": orientation_source_kind,
+                                    "orientation_source_sentence": (
+                                        orientation_source_sentence
+                                    ),
+                                }
+                                if orientation_source_sentence is not None
+                                else {}
+                            ),
+                        },
+                    },
+                    evidence=evidence,
+                )
+            )
+            continue
+        if orientation is not None and len(orientation_targets) > 1:
+            accepted.append(fact)
+            issues.append(
+                _promotion_issue(
+                    fact,
+                    code="tensile_process_owner_ambiguous",
+                    message=(
+                        "An explicit X/Y/Z tensile coordinate matched more "
+                        "than one existing same-base Target owner; the original "
+                        "candidate was preserved for review."
+                    ),
+                    expected={
+                        "unique_existing_oriented_owner": True,
+                        "owner_invented": False,
+                        "ambiguous_reassignment": False,
+                        "audit_preserved": True,
+                    },
+                    actual={
+                        "before": fact.model_dump(),
+                        "reason": "ambiguous_explicit_orientation_owner",
+                        "orientation": orientation.upper(),
+                        "candidate_owner_ids": sorted(
+                            node.owner_id for node in orientation_targets
+                        ),
+                        "candidate_owners": sorted(
+                            node.sample_id_raw for node in orientation_targets
+                        ),
+                    },
+                    evidence=evidence,
+                )
+            )
+            continue
         if len({node.owner_id for node in current_targets}) != 1:
             accepted.append(fact)
             continue
@@ -15881,6 +19125,9 @@ def _quarantine_core_tensile_owner_ambiguities(
         return list(facts), []
     accepted: list[AxisFact] = []
     issues: list[PromotionIssue] = []
+    source_sentence_shadow_ids = _source_sentence_state_recovery_shadow_ids(
+        facts
+    )
     for fact in facts:
         if not isinstance(fact, PropertyFact) or not is_core_tensile_property_name(
             fact.data.get("property_name_raw")
@@ -15920,6 +19167,20 @@ def _quarantine_core_tensile_owner_ambiguities(
             accepted.append(fact)
             continue
         state_nodes = _lineage_state_nodes(candidate_nodes, graph)
+        source_sentence_state = (
+            None
+            if id(fact) in source_sentence_shadow_ids
+            else _bounded_source_sentence_state_owner(
+                fact, state_nodes, source_text
+            )
+        )
+        if (
+            source_sentence_state is not None
+            and _source_sentence_state_has_explicit_peer(
+                fact, source_sentence_state, facts, graph
+            )
+        ):
+            source_sentence_state = None
 
         # A prose quote about a generic population (``the rods``, ``the
         # samples``, ``the alloy``) cannot safely validate one of several
@@ -15937,6 +19198,64 @@ def _quarantine_core_tensile_owner_ambiguities(
             for node in candidate_nodes
             for alias in _owner_evidence_aliases(node.sample_id_raw)
         )
+        # A preceding v205 pass may have bound a coarse extracted owner such as
+        # ``LPBF`` to the one existing ``LPBF / Z`` inventory node using a
+        # literal ``Z orientation`` coordinate.  The prose need not repeat the
+        # slash-form display label.  Treat that exact coordinate as explicit so
+        # the generic assertion resolver cannot route the fact back to LPBF.
+        if prose_evidence and not explicit_owner_in_quote:
+            coordinate_owner_nodes = {
+                node.owner_id: node for node in candidate_nodes
+            }
+            coordinate_node = (
+                next(iter(coordinate_owner_nodes.values()))
+                if len(coordinate_owner_nodes) == 1
+                else None
+            )
+            coordinate_base = (
+                _tensile_owner_base_v205(coordinate_node.sample_id_raw)
+                if coordinate_node is not None
+                else ""
+            )
+            if (
+                coordinate_node is not None
+                and str(
+                    fact.data.get("property_id_candidate") or ""
+                ).startswith("tensile-process-owner-v205:")
+                and len(
+                    _tensile_axis_tokens_v205(
+                        coordinate_node.sample_id_raw, owner_label=True
+                    )
+                )
+                == 1
+                and coordinate_base
+                and _literal_mention(support, coordinate_base)
+            ):
+                # A preceding source-sentence expansion proved the omitted
+                # X/Y/Z prefix and published an immutable coordinate.  The
+                # short quote still has to contain the same owner base, so this
+                # cannot rescue a cross-material or owner-free projection.
+                explicit_owner_in_quote = True
+        if prose_evidence and not explicit_owner_in_quote:
+            orientation_context = "\n".join(
+                [support, str(fact.data.get("test_condition_raw") or "")]
+            )
+            context_orientations = _tensile_axis_tokens_v205(
+                orientation_context
+            )
+            node_orientations = {
+                token
+                for node in candidate_nodes
+                for token in _tensile_axis_tokens_v205(
+                    node.sample_id_raw, owner_label=True
+                )
+            }
+            if (
+                len({node.owner_id for node in candidate_nodes}) == 1
+                and len(context_orientations) == 1
+                and node_orientations == context_orientations
+            ):
+                explicit_owner_in_quote = True
         if prose_evidence and not explicit_owner_in_quote and source_text:
             # The chunk may have dropped the owner while the bounded source
             # sentence still names it.  Treat one source-local current owner
@@ -15949,6 +19268,11 @@ def _quarantine_core_tensile_owner_ambiguities(
                 node.owner_id == source_context_nodes[0].owner_id
                 for node in candidate_nodes
             )
+        if prose_evidence and not explicit_owner_in_quote and source_sentence_state:
+            # The short quote omitted the state prefix, but one complete source
+            # sentence proved a direct property/value/unit coordinate for one
+            # existing state in this candidate's lineage.
+            explicit_owner_in_quote = True
         if prose_evidence and not explicit_owner_in_quote and source_text:
             assertion_decision = _v204_tensile_assertion_decision(
                 fact, graph, source_text
@@ -16063,12 +19387,16 @@ def _quarantine_core_tensile_owner_ambiguities(
             node.role == "Target" and node.data_nature == "Experimental"
             for node in graph.nodes
         )
+        physical_owner_envelope = _physical_owner_envelope(
+            fact, candidate_nodes
+        )
         if (
             prose_evidence
             and current_target_count > 1
             and not explicit_owner_in_quote
             and not explicit_state_in_quote
             and not _has_collective_owner_scope(support)
+            and physical_owner_envelope is None
         ):
             issues.append(
                 _promotion_issue(
@@ -16092,6 +19420,52 @@ def _quarantine_core_tensile_owner_ambiguities(
                         ],
                         "current_target_count": current_target_count,
                         "reason": "prose_owner_not_literal",
+                    },
+                    evidence=list(_fact_evidence(fact)),
+                )
+            )
+            continue
+        if (
+            prose_evidence
+            and current_target_count > 1
+            and not explicit_owner_in_quote
+            and not explicit_state_in_quote
+            and physical_owner_envelope is not None
+        ):
+            accepted.append(fact)
+            issues.append(
+                _promotion_issue(
+                    fact,
+                    code="tensile_physical_owner_envelope_recovered",
+                    severity="info",
+                    message=(
+                        "Several fine-grained owner graph nodes were collapsed "
+                        "to one source-grounded physical tensile owner."
+                    ),
+                    expected={
+                        "one_physical_owner": True,
+                        "same_sample_identity": True,
+                        "same_role_and_data_nature": True,
+                        "source_grounded_result_anchor": True,
+                        "broadcast": False,
+                        "audit_preserved": True,
+                    },
+                    actual={
+                        "physical_owner": physical_owner_envelope.sample_id_raw,
+                        "candidate_owner_ids": list(
+                            physical_owner_envelope.owner_ids
+                        ),
+                        "baseline_owner_ids": list(
+                            physical_owner_envelope.baseline_owner_ids
+                        ),
+                        "owner_role": physical_owner_envelope.role,
+                        "owner_data_nature": (
+                            physical_owner_envelope.data_nature
+                        ),
+                        "candidate_value_changed": False,
+                        "candidate_unit_changed": False,
+                        "candidate_owner_changed": False,
+                        "reason": "identical_physical_owner_envelope",
                     },
                     evidence=list(_fact_evidence(fact)),
                 )
@@ -16193,6 +19567,50 @@ def _quarantine_core_tensile_owner_ambiguities(
             accepted.append(fact)
             continue
 
+        if source_sentence_state is not None:
+            target = source_sentence_state.target
+            reassigned = _bind_source_sentence_state_owner(
+                fact, target
+            )
+            accepted.append(reassigned)
+            issues.append(
+                _promotion_issue(
+                    fact,
+                    code="tensile_source_sentence_state_owner_recovered",
+                    severity="info",
+                    message=(
+                        "A shortened direct core-tensile quote inherited one "
+                        "source-literal state from its unique complete source "
+                        "sentence."
+                    ),
+                    expected={
+                        "unique_source_sentence": True,
+                        "direct_scalar": True,
+                        "literal_property_value_unit": True,
+                        "unique_existing_state_owner": True,
+                        "owner_invented": False,
+                        "candidate_value_changed": False,
+                        "candidate_unit_changed": False,
+                        "broadcast": False,
+                    },
+                    actual={
+                        "before": fact.model_dump(),
+                        "after": reassigned.model_dump(),
+                        "selected_owner": target.sample_id_raw,
+                        "selected_owner_id": target.owner_id,
+                        "selected_state": target.state_raw,
+                        "property_family": source_sentence_state.property_family,
+                        "unit_key": source_sentence_state.unit_key,
+                        "evidence_fragments": list(
+                            source_sentence_state.evidence_fragments
+                        ),
+                        "source_sentence": source_sentence_state.source_sentence,
+                    },
+                    evidence=[source_sentence_state.source_sentence],
+                )
+            )
+            continue
+
         issues.append(
             _promotion_issue(
                 fact,
@@ -16216,6 +19634,238 @@ def _quarantine_core_tensile_owner_ambiguities(
                     "reason": "core_tensile_generic_owner_without_coordinate",
                 },
                 evidence=list(_fact_evidence(fact)),
+            )
+        )
+    return accepted, issues
+
+
+_COLLECTIVE_TENSILE_SOURCE_SCOPE = re.compile(
+    r"(?ix)\b(?:"
+    r"(?:these|the|all|both|various|different|respective)\s+"
+    r"(?:rods|bars|wires|walls|specimens|samples|coupons|"
+    r"alloys|materials|conditions)\b|"
+    r"(?:rods|bars|wires|walls|specimens|samples|coupons)\s+"
+    r"(?:at|under|in|showed|exhibited|reached|achieved|had|were|are)\b"
+    r")"
+)
+
+def _collective_tensile_source_scope(text: str) -> bool:
+    """Recognize collective tensile prose, including plural specimen nouns.
+
+    ``_has_collective_owner_scope`` intentionally covers the broad material
+    vocabulary used by the older precision gates, but papers commonly say
+    ``these rods`` or ``the wires``.  Those are collective scopes as well; the
+    extra vocabulary is kept local to this tensile-only gate.
+    """
+
+    folded = str(text or "")
+    # ``different conditions`` is a comparison/state-disambiguation cue, not
+    # a shared specimen scope; the established tensile ambiguity gate owns it.
+    if re.search(r"(?ix)\b(?:under\s+)?different\s+conditions\b", folded):
+        return False
+    return bool(_COLLECTIVE_TENSILE_SOURCE_SCOPE.search(folded))
+
+
+def _collective_tensile_local_pair(
+    fact: PropertyFact,
+    segment: str,
+    candidate_nodes: Sequence[OwnerNode],
+    source_nodes: Sequence[OwnerNode],
+) -> bool:
+    """Require the scalar and its owner to share one bounded prose clause."""
+
+    value = fact.data.get("value_raw")
+    sibling_labels = tuple(
+        node.sample_id_raw
+        for node in source_nodes
+        if node.owner_id not in {candidate.owner_id for candidate in candidate_nodes}
+    )
+    for node in candidate_nodes:
+        if _owner_value_local_pair(
+            value,
+            (segment,),
+            node.sample_id_raw,
+            sibling_labels,
+        ):
+            return True
+        # A state-qualified inventory node may be written in prose using only
+        # its base sample label plus the state in the same clause.  The base
+        # label remains the owner/value coordinate; the state is checked by the
+        # existing owner-bound helper to avoid inventing a state.
+        if _prose_fact_owner_bound_in_segment(
+            fact, segment, (node,), (node,)
+        ) and _owner_value_local_pair(
+            value,
+            (segment,),
+            re.sub(r"\s*\[[^\]]+\]\s*$", "", node.sample_id_raw).strip(),
+            sibling_labels,
+        ):
+            return True
+    return False
+
+
+def _quarantine_collective_tensile_owner_projections(
+    anchors: Sequence[InventoryAnchor],
+    facts: Sequence[AxisFact],
+    source_text: str = "",
+) -> tuple[list[AxisFact], list[PromotionIssue]]:
+    """Isolate one-owner projections of a collective prose tensile result.
+
+    A sentence such as ``the rods reached 644 MPa`` can be emitted under one
+    of several inventory owners even though the source gives no per-rod
+    coordinate.  Conversely, ``773 MPa for R1`` is a bounded owner/value pair
+    and must survive.  This gate is source-only and runs before the legacy
+    collective-scope escape in ``_quarantine_core_tensile_owner_ambiguities``.
+    """
+
+    graph = build_owner_graph(anchors)
+    blocks = _source_blocks(source_text)
+    if not graph.nodes or not blocks:
+        return list(facts), []
+    block_by_key = {block.key: block for block in blocks}
+    experimental_targets = tuple(
+        node
+        for node in graph.nodes
+        if node.role == "Target" and node.data_nature == "Experimental"
+    )
+    if len({node.owner_id for node in experimental_targets}) <= 1:
+        return list(facts), []
+
+    accepted: list[AxisFact] = []
+    issues: list[PromotionIssue] = []
+    for fact in facts:
+        if not isinstance(fact, PropertyFact) or not is_core_tensile_property_name(
+            fact.data.get("property_name_raw")
+        ):
+            accepted.append(fact)
+            continue
+        value = str(fact.data.get("value_raw") or "")
+        if not _numeric_tokens(value) or _has_table_evidence(_fact_evidence(fact)):
+            accepted.append(fact)
+            continue
+        record = build_promotion_records([fact])[0]
+        source_key, source_kind, ambiguous = _record_source_binding(record, blocks)
+        # Chunk evidence may stop at the scalar while the source sentence
+        # continues (``644 MPa and elongations ...``).  Recover a unique prose
+        # block using punctuation-trimmed evidence rather than treating that
+        # harmless truncation as an unresolved source binding.
+        if ambiguous:
+            needles = tuple(
+                normalize_evidence_text(row).rstrip(".;")
+                for row in _fact_evidence(fact)
+                if normalize_evidence_text(row).rstrip(".;")
+            )
+            fallback_blocks = [
+                candidate
+                for candidate in blocks
+                if candidate.kind == "prose"
+                and needles
+                and all(needle in candidate.normalized_text for needle in needles)
+            ]
+            if len(fallback_blocks) == 1:
+                source_key, source_kind, ambiguous = (
+                    fallback_blocks[0].key,
+                    fallback_blocks[0].kind,
+                    False,
+                )
+        if ambiguous or source_kind != "prose":
+            accepted.append(fact)
+            continue
+        block = block_by_key.get(source_key)
+        if block is None or not _collective_tensile_source_scope(
+            block.normalized_text
+        ):
+            accepted.append(fact)
+            continue
+        block_text = block.normalized_text
+        support = "\n".join(_fact_evidence(fact))
+        # Comparative, calculated, and ordered-summary assertions have their
+        # own precision gates.  Let those gates retain their established audit
+        # codes and owner recovery behavior instead of pre-empting them here.
+        if (
+            _COMPARATIVE_ASSERTION_CUE.search(block_text)
+            or re.search(r"(?ix)\b(?:calculated|estimate|estimated|predicted)\b", support)
+            or str(fact.data.get("origin") or "").casefold() in {"calculated", "predicted"}
+            or "respectively" in block_text.casefold()
+        ):
+            accepted.append(fact)
+            continue
+        candidate_nodes = _candidate_nodes(record, graph)
+        if not candidate_nodes:
+            accepted.append(fact)
+            continue
+        source_nodes = _safe_source_owner_nodes(block.normalized_text, graph)
+        # A chunk may use a process label while the source names a longer
+        # specimen owner; the v205 coordinate pass below handles that route.
+        # Do not quarantine before it can reassign the existing owner.
+        if not any(
+            candidate.owner_id == source.owner_id
+            for candidate in candidate_nodes
+            for source in source_nodes
+        ):
+            accepted.append(fact)
+            continue
+        # Orientation/state recovery is source-explicit and is intentionally
+        # delegated to the existing v205 tensile coordinate resolver.
+        if _tensile_axis_tokens_v205(block_text) and len(source_nodes) <= 1:
+            accepted.append(fact)
+            continue
+        segments = _source_local_evidence_spans((block.normalized_text,))
+        matched_segments = [
+            segment
+            for segment in segments
+            if _prose_fact_payload_in_segment(fact, segment)
+        ]
+        if any(
+            _collective_tensile_local_pair(
+                fact, segment, candidate_nodes, source_nodes
+            )
+            for segment in matched_segments
+        ):
+            accepted.append(fact)
+            continue
+        issues.append(
+            _promotion_issue(
+                fact,
+                code="promotion_collective_tensile_owner_quarantined",
+                message=(
+                    "A collective prose tensile scalar was attached to one "
+                    "owner without a bounded source-local owner/value pair; "
+                    "the projection was isolated from formal Properties."
+                ),
+                expected={
+                    "bounded_owner_value_pair": True,
+                    "collective_scope": True,
+                    "source_kind": "prose",
+                    "broadcast": False,
+                    "audit_preserved": True,
+                },
+                actual={
+                    "removed": fact.model_dump(),
+                    "source_block": {
+                        "key": block.key,
+                        "start_line": block.start_line,
+                        "end_line": block.end_line,
+                        "text": block.normalized_text,
+                    },
+                    "candidate_owners": [
+                        node.sample_id_raw for node in candidate_nodes
+                    ],
+                    "source_named_owners": [
+                        node.sample_id_raw for node in source_nodes
+                    ],
+                    "collective_scope": _COLLECTIVE_TENSILE_SOURCE_SCOPE.search(
+                        block.normalized_text
+                    ).group(0)
+                    if _COLLECTIVE_TENSILE_SOURCE_SCOPE.search(
+                        block.normalized_text
+                    )
+                    else "legacy_collective_owner_scope",
+                    "matched_payload_segments": matched_segments,
+                    "reason": "collective_value_without_bounded_owner_pair",
+                    "owner_invented": False,
+                },
+                evidence=_fact_evidence(fact),
             )
         )
     return accepted, issues
@@ -16372,65 +20022,111 @@ def _quarantine_structure_region_coordinate_projections(
         ):
             accepted.append(fact)
             continue
-        quantitative_features: list[dict[str, Any]] = []
-        for feature in fact.data.get("features") or []:
+        # Resolve the fact-level coordinate once.  A fact-level coordinate is
+        # intentionally shared by every feature in that observation, but a
+        # coordinate carried by one feature must never rescue an unbound
+        # sibling.  The previous all-or-nothing boolean did exactly that and
+        # allowed a single ``top region`` measurement to authorize a second
+        # ``bottom region``/unknown measurement emitted by another chunk.
+        fact_coordinate = any(
+            value
+            and _scientific_fold(value) not in _UNREPORTED
+            and _payload_grounded(value, evidence)
+            for key in coordinate_keys
+            for value in (fact.data.get(key),)
+        )
+
+        def feature_has_coordinate(feature: dict[str, Any]) -> bool:
+            feature_evidence = _feature_evidence(feature, evidence)
+            return fact_coordinate or any(
+                value
+                and _scientific_fold(value) not in _UNREPORTED
+                and _payload_grounded(value, feature_evidence)
+                for key in coordinate_keys
+                for value in (feature.get(key),)
+            )
+
+        # Keep non-quantitative observations on the existing qualitative and
+        # entity gates.  This gate only removes the individual quantitative
+        # feature whose local coordinate was lost.
+        removed_feature_paths: set[tuple[str, int, int]] = set()
+        feature_rows: list[tuple[dict[str, Any], dict[str, Any] | None, tuple[str, int, int]]] = []
+        for top_index, feature in enumerate(fact.data.get("features") or []):
             if isinstance(feature, dict) and _is_quantitative_structure_feature(feature):
-                quantitative_features.append(feature)
-        for entity in fact.data.get("entities") or []:
+                feature_rows.append((feature, None, ("top", -1, top_index)))
+        for entity_index, entity in enumerate(fact.data.get("entities") or []):
             if not isinstance(entity, dict):
                 continue
-            for feature in entity.get("features") or []:
+            for feature_index, feature in enumerate(entity.get("features") or []):
                 if isinstance(feature, dict) and _is_quantitative_structure_feature(feature):
-                    quantitative_features.append(feature)
-        if not quantitative_features:
+                    feature_rows.append((feature, entity, ("entity", entity_index, feature_index)))
+        if not feature_rows:
             accepted.append(fact)
             continue
-        grounded_coordinate = False
-        for key in coordinate_keys:
-            value = fact.data.get(key)
-            if value and _scientific_fold(value) not in _UNREPORTED and _payload_grounded(
-                value, evidence
-            ):
-                grounded_coordinate = True
-                break
-        if not grounded_coordinate:
-            for feature in quantitative_features:
-                for key in coordinate_keys:
-                    value = feature.get(key)
-                    if value and _scientific_fold(value) not in _UNREPORTED and _payload_grounded(
-                        value, _feature_evidence(feature, evidence)
-                    ):
-                        grounded_coordinate = True
-                        break
-                if grounded_coordinate:
-                    break
-        if grounded_coordinate:
-            accepted.append(fact)
-            continue
-        issues.append(
-            _promotion_issue(
-                fact,
-                code="promotion_structure_region_coordinate_missing_quarantined",
-                message=(
-                    "A quantitative Structure observation was tied to a local "
-                    "region/surface/layer in the source, but the candidate did "
-                    "not preserve one coordinate per measurement."
-                ),
-                expected={
-                    "feature_level_region_coordinate": True,
-                    "whole_material_broadcast": False,
-                    "audit_preserved": True,
-                },
-                actual={
-                    "removed": fact.model_dump(),
-                    "region_cues": sorted(
-                        {match.group(0).strip() for match in _STRUCTURE_LOCAL_REGION_COORDINATE.finditer(support)}
+
+        for feature, entity, path in feature_rows:
+            if feature_has_coordinate(feature):
+                continue
+            removed_feature_paths.add(path)
+            feature_evidence = _feature_evidence(feature, evidence)
+            issues.append(
+                _promotion_issue(
+                    fact,
+                    code="promotion_structure_region_coordinate_missing_quarantined",
+                    message=(
+                        "A quantitative Structure feature was tied to a local "
+                        "region/surface/layer in the source, but this feature "
+                        "did not preserve its own coordinate; only the unbound "
+                        "feature was isolated."
                     ),
-                    "reason": "local_region_coordinate_missing",
-                },
-                evidence=evidence,
+                    expected={
+                        "feature_level_region_coordinate": True,
+                        "whole_material_broadcast": False,
+                        "sibling_features_untouched": True,
+                        "audit_preserved": True,
+                    },
+                    actual={
+                        "removed": deepcopy(feature),
+                        "entity": deepcopy(entity),
+                        "fact_before": fact.model_dump(),
+                        "region_cues": sorted(
+                            {
+                                match.group(0).strip()
+                                for match in _STRUCTURE_LOCAL_REGION_COORDINATE.finditer(
+                                    " ".join(feature_evidence)
+                                )
+                            }
+                        ),
+                        "reason": "local_region_coordinate_missing",
+                    },
+                    evidence=feature_evidence,
+                )
             )
-        )
+
+        if not removed_feature_paths:
+            accepted.append(fact)
+            continue
+        data = deepcopy(fact.data)
+        data["features"] = [
+            feature
+            for index, feature in enumerate(data.get("features") or [])
+            if ("top", -1, index) not in removed_feature_paths
+        ]
+        cleaned_entities: list[dict[str, Any]] = []
+        for entity_index, entity in enumerate(data.get("entities") or []):
+            if not isinstance(entity, dict):
+                continue
+            cleaned = deepcopy(entity)
+            cleaned["features"] = [
+                feature
+                for feature_index, feature in enumerate(entity.get("features") or [])
+                if ("entity", entity_index, feature_index) not in removed_feature_paths
+            ]
+            if cleaned.get("features") or cleaned.get("name_raw") or cleaned.get("raw_expression"):
+                cleaned_entities.append(cleaned)
+        data["entities"] = cleaned_entities
+        if data.get("features") or any(entity.get("features") for entity in cleaned_entities):
+            accepted.append(fact.model_copy(deep=True, update={"data": data}))
     return accepted, issues
 
 
@@ -16939,6 +20635,16 @@ _COLLECTIVE_OWNER_SCOPE = re.compile(
     r"(?:with|without|containing|inoculated|fabricated|processed|examined|"
     r"are|is|were|had|showed|exhibited|contained|consisted|displayed)\b"
     r")"
+)
+
+# Non-tensile Property prose often uses a prepositional collective subject,
+# e.g. ``measured for composite powders`` or ``reported across the samples``.
+# Keep this supplemental cue local to the non-core projection gate rather than
+# broadening the shared owner grammar used by tensile and Composition routing.
+_NONCORE_PROPERTY_COLLECTIVE_SCOPE = re.compile(
+    r"(?ix)\b(?:for|among|across|throughout)\s+"
+    r"(?:the\s+)?(?:[a-z0-9_%+#-]+\s+){0,4}"
+    r"(?:alloys|superalloys|samples|specimens|powders|walls|parts|composites)\b"
 )
 
 
@@ -17957,7 +21663,11 @@ class _TensileOwnerCoordinate:
     owner_ids: tuple[str, ...]
     role: str
     data_nature: str
-    kind: Literal["resolved", "identical_candidate_envelope"]
+    kind: Literal[
+        "resolved",
+        "identical_candidate_envelope",
+        "physical_owner_envelope",
+    ]
 
 
 @dataclass(frozen=True)
@@ -18053,12 +21763,27 @@ def _decimal_places(raw: str) -> int:
     return len(mantissa.split(".", 1)[1]) if "." in mantissa else 0
 
 
-def _tensile_scalar_shape(fact: PropertyFact) -> _TensileScalarShape | None:
+def _tensile_scalar_shape(
+    fact: PropertyFact,
+    *,
+    allow_approximate: bool = False,
+) -> _TensileScalarShape | None:
     """Parse only one exact scalar, optionally with explicit uncertainty."""
 
     raw = str(fact.data.get("value_raw") or "").strip()
-    if not raw or _TENSILE_APPROXIMATE_SCALAR.search(raw):
+    if not raw:
         return None
+    if _TENSILE_APPROXIMATE_SCALAR.search(raw):
+        if not allow_approximate:
+            return None
+        raw = re.sub(
+            r"(?ix)^\s*(?:~|≈|approx(?:imately)?|about|around|roughly|nearly)\s*",
+            "",
+            raw,
+            count=1,
+        ).strip()
+        if not raw or _TENSILE_APPROXIMATE_SCALAR.search(raw):
+            return None
     if re.search(r"(?:>=|<=|[<>≥≤])", raw) or re.search(
         r"(?<=\d)\s*[-–—~]\s*(?=\d)", raw
     ):
@@ -18547,6 +22272,208 @@ def _quarantine_generic_tensile_summary_shadows(
             json.dumps(row.actual, ensure_ascii=False, sort_keys=True),
         )
     )
+    return [
+        replacements.get(id(fact), fact)
+        for fact in facts
+        if id(fact) not in removed
+    ], issues
+
+
+_TENSILE_EXPERIMENTAL_RESTATEMENT = re.compile(
+    r"(?ix)\b(?:close|similar|comparable|consistent)\s+to\s+"
+    r"(?:the\s+)?(?:measured|experimental)\s+value\b|"
+    r"\b(?:measured|experimental)\s+value\s+from\s+"
+    r"(?:the\s+)?tensile\s+tests?\b"
+)
+
+
+def _experimental_restatement_owner_coordinate(
+    fact: PropertyFact,
+    graph: OwnerGraph,
+) -> _TensileOwnerCoordinate | None:
+    """Resolve restatements against the same physical-owner gate as promotion."""
+
+    record = build_promotion_records([fact])[0]
+    envelope = _physical_owner_envelope(
+        fact, _candidate_nodes(record, graph)
+    )
+    if envelope is not None:
+        encoded = "\n".join(
+            (
+                _identity_text(envelope.sample_id_raw),
+                envelope.role,
+                envelope.data_nature,
+            )
+        ).encode("utf-8")
+        return _TensileOwnerCoordinate(
+            key=(
+                "physical_owner_envelope_"
+                + hashlib.sha256(encoded).hexdigest()[:24]
+            ),
+            label=envelope.sample_id_raw,
+            owner_ids=envelope.owner_ids,
+            role=envelope.role,
+            data_nature=envelope.data_nature,
+            kind="physical_owner_envelope",
+        )
+    return _tensile_owner_coordinate(fact, graph)
+
+
+def _quarantine_experimental_tensile_restatement_shadows(
+    anchors: Sequence[InventoryAnchor],
+    facts: Sequence[AxisFact],
+) -> tuple[list[AxisFact], list[PromotionIssue]]:
+    """Fold a calculated-discussion restatement into one direct tensile fact.
+
+    Discussion sections often compare a calculated value with an already
+    reported experimental scalar.  High-recall extraction can emit the
+    parenthetical experimental number a second time under a verbose Property
+    label.  The restatement is merged only when one existing same-owner direct
+    result has the identical canonical value, unit, and subtype. Conditions
+    must also match, except that an unconditioned discussion restatement may
+    fold into one unique richer direct result; multiple conditioned direct
+    candidates remain ambiguous and are left untouched.
+    """
+
+    graph = build_owner_graph(anchors)
+    if not graph.nodes:
+        return list(facts), []
+    properties = [
+        fact
+        for fact in facts
+        if isinstance(fact, PropertyFact)
+        and is_core_tensile_property_name(fact.data.get("property_name_raw"))
+    ]
+    shapes = {
+        id(fact): shape
+        for fact in properties
+        if (
+            shape := _tensile_scalar_shape(
+                fact, allow_approximate=True
+            )
+        )
+        is not None
+    }
+    coordinates = {
+        id(fact): coordinate
+        for fact in properties
+        if (
+            coordinate := _experimental_restatement_owner_coordinate(
+                fact, graph
+            )
+        )
+        is not None
+    }
+
+    proposals: list[
+        tuple[PropertyFact, PropertyFact, _TensileOwnerCoordinate]
+    ] = []
+    for shadow in properties:
+        shadow_shape = shapes.get(id(shadow))
+        shadow_owner = coordinates.get(id(shadow))
+        shadow_support = "\n".join(_fact_evidence(shadow))
+        if (
+            shadow_shape is None
+            or shadow_owner is None
+            or not _TENSILE_EXPERIMENTAL_RESTATEMENT.search(shadow_support)
+        ):
+            continue
+        family = _core_tensile_family(shadow.data.get("property_name_raw"))
+        subtype = core_tensile_subtype(
+            shadow.data.get("property_name_raw")
+        )
+        shadow_condition = _scientific_fold(
+            shadow.data.get("test_condition_raw")
+        )
+        candidates: list[PropertyFact] = []
+        for survivor in properties:
+            survivor_shape = shapes.get(id(survivor))
+            survivor_owner = coordinates.get(id(survivor))
+            if (
+                survivor is shadow
+                or survivor_shape is None
+                or survivor_owner is None
+                or survivor_owner.key != shadow_owner.key
+                or family
+                != _core_tensile_family(
+                    survivor.data.get("property_name_raw")
+                )
+                or subtype
+                != core_tensile_subtype(
+                    survivor.data.get("property_name_raw")
+                )
+                or survivor_shape.unit_dimension != shadow_shape.unit_dimension
+                or not math.isclose(
+                    survivor_shape.canonical_central,
+                    shadow_shape.canonical_central,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+                or _TENSILE_EXPERIMENTAL_RESTATEMENT.search(
+                    "\n".join(_fact_evidence(survivor))
+                )
+            ):
+                continue
+            survivor_condition = _scientific_fold(
+                survivor.data.get("test_condition_raw")
+            )
+            if (
+                survivor_condition != shadow_condition
+                and shadow_condition not in _UNREPORTED
+            ):
+                continue
+            candidates.append(survivor)
+        if len(candidates) == 1:
+            survivor = candidates[0]
+            survivor_owner = coordinates[id(survivor)]
+            proposals.append((shadow, survivor, survivor_owner))
+
+    survivor_counts = Counter(id(row[1]) for row in proposals)
+    removed: set[int] = set()
+    replacements: dict[int, PropertyFact] = {}
+    issues: list[PromotionIssue] = []
+    for shadow, survivor, survivor_owner in proposals:
+        if survivor_counts[id(survivor)] != 1:
+            continue
+        survivor_before = survivor
+        survivor_after = _append_fact_evidence(survivor_before, shadow)
+        removed.add(id(shadow))
+        replacements[id(survivor)] = survivor_after
+        issues.append(
+            _promotion_issue(
+                shadow,
+                code=(
+                    "core_tensile_experimental_restatement_shadow_quarantined"
+                ),
+                message=(
+                    "A discussion-level experimental-value restatement was "
+                    "merged into one identical direct same-owner tensile result."
+                ),
+                expected={
+                    "independent_measurement": False,
+                    "unique_direct_survivor": True,
+                    "same_owner_value_unit_subtype": True,
+                    "condition_exact_or_shadow_unreported": True,
+                    "audit_preserved": True,
+                },
+                actual={
+                    "removed": shadow.model_dump(),
+                    "survivor_before": survivor_before.model_dump(),
+                    "survivor_after": survivor_after.model_dump(),
+                    "owner_coordinate": survivor_owner.key,
+                    "canonical_value": shapes[id(shadow)].canonical_central,
+                    "unit_dimension": shapes[id(shadow)].unit_dimension,
+                    "condition": _scientific_fold(
+                        shadow.data.get("test_condition_raw")
+                    ),
+                    "survivor_condition": _scientific_fold(
+                        survivor.data.get("test_condition_raw")
+                    ),
+                    "reason": "experimental_value_restatement_shadow",
+                },
+                evidence=list(_fact_evidence(shadow)),
+            )
+        )
     return [
         replacements.get(id(fact), fact)
         for fact in facts
@@ -19145,6 +23072,7 @@ def _publish_v204_tensile_assertion_coordinates(
     if not graph.nodes:
         return list(facts), []
     protocol_ledger = TensileProtocolLedger(source_text)
+    source_blocks = _source_blocks(source_text)
 
     accepted: list[AxisFact] = []
     issues: list[PromotionIssue] = []
@@ -19162,7 +23090,99 @@ def _publish_v204_tensile_assertion_coordinates(
         decision = _v204_tensile_assertion_decision(fact, graph, source_text)
         coordinate = decision.coordinate
         if decision.status != "matched" or coordinate is None:
-            accepted.append(fact)
+            record = build_promotion_records([fact])[0]
+            envelope = _physical_owner_envelope(
+                fact, _candidate_nodes(record, graph)
+            )
+            coordinate_evidence = [
+                row
+                for row in _fact_evidence(fact)
+                if not _TENSILE_EXPERIMENTAL_RESTATEMENT.search(row)
+            ]
+            coordinate_fact = fact
+            if coordinate_evidence and coordinate_evidence != _fact_evidence(fact):
+                coordinate_data = deepcopy(fact.data)
+                coordinate_data["source_evidence"] = coordinate_evidence
+                coordinate_fact = fact.model_copy(
+                    deep=True,
+                    update={
+                        "data": coordinate_data,
+                        "source_evidence": coordinate_evidence,
+                    },
+                )
+            coordinate_record = build_promotion_records(
+                [coordinate_fact]
+            )[0]
+            source_key, source_kind, ambiguous = _record_source_binding(
+                coordinate_record, source_blocks
+            )
+            block = next(
+                (row for row in source_blocks if row.key == source_key),
+                None,
+            )
+            source_owner_proven = bool(
+                envelope is not None
+                and not ambiguous
+                and source_kind == "prose"
+                and block is not None
+                and _literal_mention(
+                    block.normalized_text, envelope.sample_id_raw
+                )
+                and _TENSILE_RESULT_CUE.search(block.normalized_text)
+                and not _EXTERNAL_SOURCE_ASSERTION.search(
+                    block.normalized_text
+                )
+            )
+            if not source_owner_proven or envelope is None or block is None:
+                accepted.append(fact)
+                continue
+            signature = "\n".join(
+                (
+                    _identity_text(envelope.sample_id_raw),
+                    _core_tensile_family(
+                        fact.data.get("property_name_raw")
+                    ),
+                    _scientific_fold(fact.data.get("value_raw")),
+                    _generic_unit_key(fact.data.get("unit_raw")),
+                    block.key,
+                )
+            )
+            coordinate_key = (
+                "physical-owner-envelope:"
+                + hashlib.sha256(signature.encode("utf-8")).hexdigest()
+            )
+            data = deepcopy(fact.data)
+            data["property_id_candidate"] = coordinate_key
+            published = fact.model_copy(deep=True, update={"data": data})
+            accepted.append(published)
+            issues.append(
+                _promotion_issue(
+                    fact,
+                    code="tensile_physical_owner_source_coordinate_recovered",
+                    severity="info",
+                    message=(
+                        "A source block naming one proven physical owner "
+                        "published a protocol-safe tensile coordinate."
+                    ),
+                    expected={
+                        "one_physical_owner": True,
+                        "source_block_names_owner": True,
+                        "source_block_contains_result": True,
+                        "external_projection": False,
+                        "candidate_value_changed": False,
+                        "candidate_unit_changed": False,
+                    },
+                    actual={
+                        "before": fact.model_dump(),
+                        "after": published.model_dump(),
+                        "physical_owner": envelope.sample_id_raw,
+                        "candidate_owner_ids": list(envelope.owner_ids),
+                        "source_block_key": block.key,
+                        "coordinate_key": coordinate_key,
+                    },
+                    evidence=[block.normalized_text],
+                )
+            )
             continue
         target = graph.node(coordinate.owner_key)
         record = build_promotion_records([fact])[0]
@@ -19202,7 +23222,14 @@ def _publish_v204_tensile_assertion_coordinates(
         # Publish internal metadata only when the assertion coordinate is the
         # fact that changes a unique protocol decision.  This keeps v204 from
         # rewriting already-safe single-owner facts merely for bookkeeping.
-        if probe_decision.status != "bound" or baseline_decision.status == "bound":
+        # A source-local bind is deliberately a narrow escape hatch for a
+        # result quote whose owner is present in the source.  Still publish the
+        # immutable assertion coordinate so downstream materialization and
+        # audit can distinguish it from a broad paper-level bind.
+        if probe_decision.status != "bound" or (
+            baseline_decision.status == "bound"
+            and baseline_decision.scope != "source_local"
+        ):
             accepted.append(fact)
             continue
 
@@ -19265,6 +23292,242 @@ def _publish_v204_tensile_assertion_coordinates(
     return accepted, issues
 
 
+_GLOBAL_COORDINATE_KEYS = (
+    "source_coordinate_key",
+    "table_coordinate_key",
+    "dense_coordinate_key",
+    "decision_key",
+)
+
+
+def _has_strong_source_coordinate(fact: AxisFact) -> bool:
+    """Whether a candidate carries an immutable, source-local coordinate."""
+
+    data = fact.data if isinstance(fact.data, Mapping) else {}
+    values: list[str] = []
+    for key in _GLOBAL_COORDINATE_KEYS:
+        value = data.get(key)
+        if value:
+            values.append(str(value))
+    candidate = str(data.get("property_id_candidate") or "")
+    values.append(candidate)
+    # These prefixes are emitted only by the bounded table/sidecar/assertion
+    # recovery code.  Do not treat arbitrary generated IDs as coordinates.
+    return any(
+        value.startswith(
+            (
+                "table-cell:",
+                "dense-table-cell:",
+                "sidecar-cell:",
+                "tensile-assertion:",
+                "physical-owner-envelope:",
+            )
+        )
+        for value in values
+    )
+
+
+def _numeric_payloads_for_release_gate(fact: AxisFact) -> tuple[str, ...]:
+    """Collect only scientific numeric payloads, excluding IDs/confidence."""
+
+    data = fact.data if isinstance(fact.data, Mapping) else {}
+    payloads: list[str] = []
+
+    def add(value: Any, *, key: str = "") -> None:
+        if value is None or isinstance(value, bool) or isinstance(value, (dict, list, tuple)):
+            return
+        text = str(value).strip()
+        if not text or key.casefold() in {
+            "confidence",
+            "stage_index_candidate",
+            "observation_id",
+            "characterization_id",
+            "candidate_stage_id",
+            "property_id_candidate",
+        }:
+            return
+        if _numeric_tokens(text):
+            payloads.append(text)
+
+    if isinstance(fact, PropertyFact):
+        add(data.get("value_raw"), key="value_raw")
+        # Unit is part of the value assertion when it contains a numeric token
+        # (e.g. ``10 wt%``), otherwise the value check is sufficient.
+        add(data.get("unit_raw"), key="unit_raw")
+    elif isinstance(fact, ProcessingFact):
+        if fact.fact_type == "process_stage":
+            for parameter in data.get("parameters_raw") or []:
+                if isinstance(parameter, Mapping):
+                    add(parameter.get("value_raw"), key="parameter_value")
+                    add(parameter.get("unit_raw"), key="parameter_unit")
+    elif isinstance(fact, StructureFact):
+        # Structure observations may carry measured dimensions/counts in
+        # features.  Keep categorical microscopy language out of this gate.
+        for feature in data.get("features") or []:
+            if isinstance(feature, Mapping):
+                for key in ("value_raw", "value", "measurement", "size_raw", "dimension_raw"):
+                    add(feature.get(key), key=key)
+    return tuple(dict.fromkeys(payloads))
+
+
+def _processing_parameters_source_local_grounded(
+    fact: ProcessingFact,
+    source_text: str = "",
+) -> bool:
+    """Return whether every numeric process parameter has local evidence.
+
+    Processing stages are structured as a parent assertion plus one
+    ``source_evidence`` span per parameter.  The final precision barrier must
+    not require all sibling parameters to occur in the parent sentence:
+    doing so turns a valid parameter bundle into a false cross-chunk
+    projection.  A missing parameter-level span remains fail-closed.
+    """
+
+    if fact.fact_type != "process_stage" or not str(source_text or "").strip():
+        return False
+    source_blocks = _source_blocks(source_text)
+
+    def span_in_source(span: str) -> bool:
+        normalized = normalize_evidence_text(span)
+        return bool(
+            normalized
+            and any(
+                normalized == block.normalized_text
+                or normalized in block.normalized_text
+                for block in source_blocks
+            )
+        )
+
+    parameters = [
+        parameter
+        for parameter in (fact.data.get("parameters_raw") or [])
+        if isinstance(parameter, Mapping)
+    ]
+    if not parameters:
+        return False
+    found_numeric = False
+    for parameter in parameters:
+        raw_evidence = parameter.get("source_evidence")
+        if isinstance(raw_evidence, str):
+            local_evidence = (raw_evidence,)
+        elif isinstance(raw_evidence, Sequence) and not isinstance(
+            raw_evidence, (str, bytes)
+        ):
+            local_evidence = tuple(
+                str(row).strip() for row in raw_evidence if str(row).strip()
+            )
+        else:
+            return False
+        if not local_evidence:
+            return False
+        if not all(span_in_source(span) for span in local_evidence):
+            return False
+        payloads: list[str] = []
+        for key in ("value_raw", "unit_raw"):
+            value = parameter.get(key)
+            if value is None or isinstance(value, bool) or isinstance(
+                value, (dict, list, tuple)
+            ):
+                continue
+            text = str(value).strip()
+            if text and _numeric_tokens(text):
+                payloads.append(text)
+        if not payloads:
+            continue
+        found_numeric = True
+        if not all(
+            any(_payload_grounded(payload, (span,)) for span in local_evidence)
+            for payload in payloads
+        ):
+            return False
+    return found_numeric
+
+
+def _quarantine_global_precision_release_gate(
+    facts: Sequence[AxisFact],
+    source_text: str = "",
+) -> tuple[list[AxisFact], list[PromotionIssue]]:
+    """Fail closed on cross-chunk numeric projection at final publication.
+
+    A numeric claim is accepted when all of its scientific numeric payloads
+    occur in one sentence/table row from the candidate evidence.  Strong
+    coordinates are an explicit, auditable exception because they already
+    identify one table cell or one source assertion.  Composition is never
+    touched here.  The complete candidate is placed in the normal issue/audit
+    stream when rejected.
+    """
+
+    if not global_precision_release_gate_v207_enabled():
+        return list(facts), []
+    accepted: list[AxisFact] = []
+    issues: list[PromotionIssue] = []
+    for fact in facts:
+        if isinstance(fact, CompositionFact) or _has_strong_source_coordinate(fact):
+            accepted.append(fact)
+            continue
+        evidence = _fact_evidence(fact)
+        # Table candidates already pass through axis-specific logical-table
+        # gates (including owner/column reconciliation and statistical-shadow
+        # absorption).  Requiring one prose sentence here would incorrectly
+        # reject a legitimate value whose table row is intentionally split
+        # across header/owner/value evidence.
+        if _has_table_evidence(evidence):
+            accepted.append(fact)
+            continue
+        payloads = _numeric_payloads_for_release_gate(fact)
+        if not payloads:
+            accepted.append(fact)
+            continue
+        # A structured Processing candidate may legitimately carry several
+        # numeric parameters whose individual source spans are narrower than
+        # the parent process sentence. Validate each parameter against its own
+        # span before applying the parent-envelope barrier; this preserves
+        # source-local precision without borrowing values between parameters.
+        if isinstance(fact, ProcessingFact) and _processing_parameters_source_local_grounded(
+            fact, source_text
+        ):
+            accepted.append(fact)
+            continue
+        spans = _source_local_evidence_spans(evidence)
+        # Numeric zero is often OCR-normalized as the word ``zero`` in prose
+        # (``zero-hour hold``).  It is still a literal local assertion, not a
+        # borrowed number.
+        if all(_scientific_fold(payload) in {"0", "0.0", "0.00"} for payload in payloads):
+            joined = _scientific_fold(" ".join(spans or evidence))
+            if re.search(r"\bzero\b", joined):
+                accepted.append(fact)
+                continue
+        if spans and all(
+            any(_payload_grounded(payload, (span,)) for span in spans)
+            for payload in payloads
+        ):
+            accepted.append(fact)
+            continue
+        issues.append(
+            _promotion_issue(
+                fact,
+                code="global_precision_source_local_payload_quarantined",
+                message=(
+                    "A numeric candidate was isolated at final publication "
+                    "because its payload was not fully supported by one source-"
+                    "local assertion. This prevents cross-chunk value/unit "
+                    "borrowing and preserves the complete candidate for audit."
+                ),
+                expected={
+                    "source_local_numeric_assertion": True,
+                    "strong_coordinate": False,
+                    "composition_unchanged": True,
+                },
+                actual={
+                    "removed": fact.model_dump(),
+                    "numeric_payloads": list(payloads),
+                    "source_local_spans": list(spans),
+                },
+            )
+        )
+    return accepted, issues
+
+
 def promote_axis_facts(
     anchors: Iterable[InventoryAnchor],
     facts: Iterable[AxisFact],
@@ -19279,7 +23542,16 @@ def promote_axis_facts(
     original_fact_rows = list(fact_rows)
     if task_ids is not None and len(task_ids) != len(fact_rows):
         raise ValueError("task_ids must contain exactly one entry per fact")
+    task_id_rows = list(task_ids) if task_ids is not None else None
     issues: list[PromotionIssue] = []
+
+    if characterization_source_method_recovery_v229_enabled():
+        fact_rows, recovered_method_issues = _recover_source_characterization_methods(
+            anchor_rows, fact_rows, source_text
+        )
+        issues.extend(recovered_method_issues)
+        if task_id_rows is not None:
+            task_id_rows.extend([None] * (len(fact_rows) - len(task_id_rows)))
 
     fact_rows, stage_issues = _quality_gate(fact_rows)
     issues.extend(stage_issues)
@@ -19313,6 +23585,10 @@ def promote_axis_facts(
     issues.extend(stage_issues)
     fact_rows, stage_issues = _quarantine_processing_metadata_parameters(
         fact_rows
+    )
+    issues.extend(stage_issues)
+    fact_rows, stage_issues = _quarantine_processing_parameter_owner_projections(
+        anchor_rows, fact_rows
     )
     issues.extend(stage_issues)
 
@@ -19364,7 +23640,9 @@ def promote_axis_facts(
     issues.extend(stage_issues)
     fact_rows, stage_issues = _strip_unbound_conditions(fact_rows, source_text)
     issues.extend(stage_issues)
-    fact_rows, stage_issues = _bind_explicit_treatment_conditions(fact_rows)
+    fact_rows, stage_issues = _bind_explicit_treatment_conditions(
+        fact_rows, anchor_rows
+    )
     issues.extend(stage_issues)
     fact_rows, stage_issues = _bind_property_condition_labels(fact_rows)
     issues.extend(stage_issues)
@@ -19415,6 +23693,10 @@ def promote_axis_facts(
     )
     issues.extend(stage_issues)
     fact_rows, stage_issues = _route_unique_material_owner_v205(
+        anchor_rows, fact_rows, source_text
+    )
+    issues.extend(stage_issues)
+    fact_rows, stage_issues = _quarantine_collective_tensile_owner_projections(
         anchor_rows, fact_rows, source_text
     )
     issues.extend(stage_issues)
@@ -19491,6 +23773,12 @@ def promote_axis_facts(
     )
     fact_rows = list(deduplicated.accepted)
     issues.extend(deduplicated.issues)
+    cross_chunk_deduplicated = deduplicate_cross_chunk_source_spans(
+        fact_rows,
+        source_text=source_text,
+    )
+    fact_rows = list(cross_chunk_deduplicated.accepted)
+    issues.extend(cross_chunk_deduplicated.issues)
     if same_table_property_merge_v201_enabled():
         fact_rows, stage_issues = _merge_same_numbered_table_property_duplicates(
             anchor_rows, fact_rows, source_text
@@ -19548,6 +23836,12 @@ def promote_axis_facts(
         anchor_rows, fact_rows
     )
     issues.extend(stage_issues)
+    fact_rows, stage_issues = (
+        _quarantine_experimental_tensile_restatement_shadows(
+            anchor_rows, fact_rows
+        )
+    )
+    issues.extend(stage_issues)
     fact_rows, stage_issues = _quarantine_ownerless_tensile_group_extrema(
         anchor_rows, fact_rows
     )
@@ -19576,8 +23870,35 @@ def promote_axis_facts(
         anchor_rows, fact_rows, source_text
     )
     issues.extend(stage_issues)
+    fact_rows, stage_issues = _quarantine_collective_ownerless_projections(
+        anchor_rows, fact_rows, source_text
+    )
+    issues.extend(stage_issues)
+    fact_rows, stage_issues = _quarantine_collective_tensile_threshold_shadows(
+        fact_rows
+    )
+    issues.extend(stage_issues)
     fact_rows, stage_issues = _publish_v204_tensile_assertion_coordinates(
         anchor_rows, fact_rows, source_text
+    )
+    issues.extend(stage_issues)
+    # Recover an omitted result temperature only after every precision gate
+    # and threshold/conflict comparison has completed.  A short quote may be
+    # uniquely expandable while a related threshold quote is not; binding
+    # earlier would make those otherwise identical assertions appear to have
+    # different conditions and could defeat established deduplication.
+    fact_rows, stage_issues = (
+        _bind_unique_source_sentence_tensile_temperature_v205(
+            fact_rows, source_text
+        )
+    )
+    issues.extend(stage_issues)
+    # Last publication barrier: prevent a value/unit or measured feature from
+    # borrowing a number from an adjacent chunk.  This deliberately runs
+    # after all existing recovery/deduplication passes and leaves Composition
+    # on its established path.
+    fact_rows, stage_issues = _quarantine_global_precision_release_gate(
+        fact_rows, source_text
     )
     issues.extend(stage_issues)
     fact_rows = _restore_input_order(fact_rows, original_fact_rows)
@@ -19601,6 +23922,7 @@ __all__ = [
     "build_owner_graph",
     "build_promotion_records",
     "deduplicate_source_assertions",
+    "deduplicate_cross_chunk_source_spans",
     "group_source_assertions",
     "promote_axis_facts",
     "resolve_record_owner",
@@ -19608,7 +23930,12 @@ __all__ = [
     "characterization_event_atomicity_v205_enabled",
     "property_provenance_condition_separation_v205_enabled",
     "unique_material_owner_convergence_v205_enabled",
+    "structure_qualitative_direct_v206_enabled",
+    "characterization_source_block_recovery_v206_enabled",
+    "characterization_source_method_recovery_v229_enabled",
+    "cross_chunk_source_span_dedup_v206_enabled",
     "tensile_assertion_coordinates_v204_enabled",
     "tensile_coordinate_fanout_guard_v204_enabled",
     "tensile_result_protocol_binding_v204_enabled",
+    "global_precision_release_gate_v207_enabled",
 ]

@@ -45,20 +45,22 @@ sys.path.insert(0, str(KNOWMAT_DIR / "src"))
 # Stub out heavy dependencies so we can import knowmat submodules without
 # needing langgraph, langchain, trustcall, etc.
 import types
+import importlib.util
 for _mod in [
     "langgraph", "langgraph.graph", "langgraph.checkpoint", "langgraph.checkpoint.memory",
     "langchain", "langchain_core", "langchain_openai", "langchain_core.messages",
     "trustcall", "openai",
 ]:
-    if _mod not in sys.modules:
+    if _mod not in sys.modules and importlib.util.find_spec(_mod) is None:
         sys.modules[_mod] = types.ModuleType(_mod)
 
 # Provide minimal stubs that knowmat/__init__.py and orchestrator.py will see
 import types as _t
-_lg = sys.modules["langgraph.graph"] = _t.ModuleType("langgraph.graph")
-_lg.StateGraph = object
-_lg.START = "START"
-_lg.END = "END"
+if importlib.util.find_spec("langgraph.graph") is None:
+    _lg = sys.modules["langgraph.graph"] = _t.ModuleType("langgraph.graph")
+    _lg.StateGraph = object
+    _lg.START = "START"
+    _lg.END = "END"
 
 # Load .env before any knowmat import
 from dotenv import load_dotenv
