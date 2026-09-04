@@ -24,7 +24,57 @@ KnowMat 是一个 AI 驱动的 Agentic 流水线，可将非结构化科学文�
 
 ---
 
-## 安装
+## 冷启动（唯一推荐路径）
+
+### 前置要求
+
+Python 3.11+、一个 OpenAI 兼容 LLM API，以及以下 OCR 后端之一：云端
+PaddleOCR API（无需 GPU）或带 CUDA 的 NVIDIA GPU 本地 PaddleOCR。
+
+```bash
+git clone https://github.com/shiyuasuka/KnowMat.git
+cd KnowMat
+python -m venv venv
+source venv/bin/activate          # Windows: venv\\Scripts\\activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -m pip install -r requirements.txt
+cp .env.example .env
+```
+
+程序会自动读取项目根目录的 `.env`，不要执行 `source .env`；这避免 CRLF
+行尾污染布尔配置。Conda/environment.yml 和 PowerShell 片段仅保留给已有
+部署的兼容场景，不是新环境的第二套入口。
+
+至少配置：
+
+```dotenv
+LLM_API_KEY=your_llm_api_key
+LLM_BASE_URL=https://your-openai-compatible-endpoint/v1
+LLM_MODEL=glm-5.3
+KNOWMAT2_EXTRACTION_THINKING=provider_default
+KNOWMAT2_EXTRACTION_REASONING_EFFORT=low
+KNOWMAT2_LLM_API_MODE=chat_completions
+```
+
+云端 OCR 额外配置 `PADDLEOCR_API_TOKEN` 并运行 `--paddleocr-api`；本地 OCR
+额外安装 `requirements-gpu.txt`，再运行唯一的
+`scripts/download_paddleocrvl_models.py`（默认 PaddleOCR-VL 1.5）。
+
+属性标准化/图文对齐需要 embedding 时：
+
+```bash
+python -m pip install -e ".[standardization]"
+python scripts/download_embedding_model.py
+```
+
+完整的云端/本地命令、环境变量和冻结 OCR 示例见
+[`docs/alpha25-ocr-llm-runbook.md`](docs/alpha25-ocr-llm-runbook.md)。
+
+<!-- BEGIN LEGACY INSTALLATION NOTES
+Legacy installation details retained for historical reference only.
+     Follow the cold-start section above for new deployments.
+## 安装（兼容说明）
 
 ### 前置要求
 
@@ -172,6 +222,8 @@ python -m knowmat --help
 
 ---
 
+END LEGACY INSTALLATION NOTES -->
+
 ## 配置
 
 ### 环境变量
@@ -181,6 +233,9 @@ python -m knowmat --help
 | `LLM_API_KEY` | 是 | - | LLM API 密钥 |
 | `LLM_BASE_URL` | 是 | - | OpenAI 兼容 base URL |
 | `LLM_MODEL` | 是 | - | 默认模型名称 |
+| `KNOWMAT2_EXTRACTION_THINKING` | 否 | `provider_default` | provider-neutral thinking mode |
+| `KNOWMAT2_EXTRACTION_REASONING_EFFORT` | 否 | `provider_default` | `low`、`medium` 或 `high` |
+| `KNOWMAT2_LLM_API_MODE` | 否 | `chat_completions` | `chat_completions` 或 `responses` |
 | `PADDLEOCRVL_MODEL_DIR` | 否 | `models/paddleocrvl1_5` | OCR 模型目录 |
 | `PADDLEOCRVL_VERSION` | 否 | `1.5` | PaddleOCR-VL 版本 |
 | `LANGCHAIN_API_KEY` | 否 | - | LangSmith API 密钥 |
@@ -213,6 +268,9 @@ OCR 问题排查见 [docs/ocr-cudnn64_9-fix.md](docs/ocr-cudnn64_9-fix.md)。
 ---
 
 ## 使用方法
+
+新部署请直接使用上方“冷启动”命令。下面的章节保留批处理、Final-MD 和
+历史兼容参数，均不改变生产 Alpha25 的输出协议。
 
 ### 基础命令
 
@@ -621,7 +679,8 @@ KnowMat/
 ├── scripts/                  # 工具脚本（包的薄包装层，向后兼容）
 │   ├── run_batch_enrich.py       # EnrichRunner 的 CLI 包装
 │   ├── batch_ocr_to_finalmd.py   # finalmd_pipeline 的 CLI 包装
-│   └── download_paddleocrvl_models.py
+│   ├── download_paddleocrvl_models.py # 唯一的本地 OCR 模型预下载入口
+│   └── download_embedding_model.py   # 唯一的 embedding 预热入口
 ├── prompts/                  # LLM 提示词模板
 ├── configs/                  # 配置目录
 ├── data/                     # 数据目录
@@ -632,6 +691,10 @@ KnowMat/
 ├── requirements*.txt        # pip 依赖
 └── .env.example              # 环境变量模板
 ```
+
+实验结果管理：`v200` 及之后的结果与审计报告保留在本地
+`data/experiments/`、`data/output-*` 和 `reports/` 历史目录中；这些目录是
+生成物，不纳入生产源码提交。
 
 ---
 

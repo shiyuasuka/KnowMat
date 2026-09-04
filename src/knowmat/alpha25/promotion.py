@@ -7311,7 +7311,7 @@ def _recover_source_characterization_methods(
 ) -> tuple[list[AxisFact], list[PromotionIssue]]:
     """Add only explicit owner-local method declarations omitted by chunks.
 
-    GLM candidates are intentionally high-recall, but a chunk can omit the
+    Model candidates are intentionally high-recall, but a chunk can omit the
     methods paragraph entirely while later chunks retain the resulting
     structure facts.  This deterministic bridge recovers a method record only
     when one sentence contains (1) a known modality, (2) a strong acquisition
@@ -10302,10 +10302,10 @@ def _quarantine_source_block_structural_fanout(
         ):
             # The evidence attached to a chunk frequently contains the whole
             # comparison sentence, so a plain literal mention is not enough:
-            # ``H230 and H230AM ... 13.2 and 10.9`` mentions both owners for
+            # ``Alloy and AlloyAM ... 13.2 and 10.9`` mentions both owners for
             # both values.  Accept an owner pair only when the candidate's
             # value is in a bounded local phrase that contains this owner and
-            # no sibling owner.  Parenthetical forms such as ``H230AM (10
+            # no sibling owner.  Parenthetical forms such as ``AlloyAM (10
             # um)`` and chunk-local ``A1 ... 10 um`` therefore survive, while
             # an unqualified ordered list is quarantined for review.
             sibling_owners = [
@@ -11591,7 +11591,7 @@ def _table_condition_coordinate(
         if _table_condition_matches_row((header,), condition_text)
     ]
     # HTML/OCR tables frequently render a two-level header as an owner row
-    # followed by a condition row (for example ``H230AM`` over ``HT / 200 h /
+    # followed by a condition row (for example ``AlloyAM`` over ``HT / 200 h /
     # 500 h``).  The first parsed row is still the owner header, so looking at
     # it alone makes every repeated value appear ambiguous.  Treat the first
     # data row as a condition header only when its leading cell is blank or an
@@ -18209,7 +18209,7 @@ def _quarantine_processing_owner_ambiguities(
             accepted.append(fact)
             continue
         # Task chunking can retain only the parameter suffix while the full
-        # source sentence names one owner (``H230AM ... laser power 300 W``).
+        # source sentence names one owner (``AlloyAM ... laser power 300 W``).
         # Recover that existing owner before applying the parameter-level
         # contrast gate; this is source-local recovery, never a chemistry or
         # item-order inference.
@@ -20523,7 +20523,7 @@ def _quarantine_feedstock_composition_mismatches(
 
     A composition sentence that explicitly describes powder/feedstock is not
     evidence for a later heat-treated or fabricated sample.  Existing explicit
-    sample labels (for example ``H230 powder``) remain valid; otherwise the
+    sample labels (for example ``Alloy powder``) remain valid; otherwise the
     candidate is routed to one existing feedstock owner or isolated for review.
     No feedstock owner is invented here.
     """
@@ -20730,7 +20730,7 @@ def _owner_value_local_pair(
     if nearest_sibling_distance is None:
         return nearest_owner_distance <= 72
     # A competing owner in the same sentence is acceptable only for a compact
-    # local pair (``H230AM (10 um)``).  A broad ordered list keeps both owners
+    # local pair (``AlloyAM (10 um)``).  A broad ordered list keeps both owners
     # far from every value and is therefore quarantined.
     return nearest_owner_distance <= 24 and (
         nearest_sibling_distance > nearest_owner_distance
@@ -21258,7 +21258,7 @@ def _quarantine_prose_owner_value_mismatches(
 ) -> tuple[list[AxisFact], list[PromotionIssue]]:
     """Quarantine swapped owner/value pairs from explicit prose enumerations.
 
-    Example handled safely: ``grain sizes of H230 and H230AM ... were 13.2 µm
+    Example handled safely: ``grain sizes of Alloy and AlloyAM ... were 13.2 µm
     and 10.9 µm``.  The gate requires one prose source block, unique owner
     labels, one single-value fact per owner, and a one-to-one order-preserving
     value mapping.  Tables, compositions, repeated labels, and ambiguous value

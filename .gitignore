@@ -62,3 +62,20 @@ MANIFEST
 # Test files (optional: remove if you want to keep tests in git)
 tests/venv/
 venv/
+
+# Generated OCR, extraction, evaluation and experiment artifacts
+data/output-*/
+data/evaluation-*/
+data/experiments/
+data/cache-*/
+data/raw/**/_ocr_cache/
+data/raw/**/paddleocrvl_parse/
+data/raw/**/txt_parse/
+reports/
+tmp/
+tmp_*.stdout
+pre_verifier_manifest.json
+
+# Locally downloaded model weights/caches
+models/*
+!models/.gitignore

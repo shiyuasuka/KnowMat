@@ -2719,7 +2719,7 @@ def _recover_structure_table_feature_coordinates(
 ) -> tuple[list[AxisFact], list[MaterializeIssue]]:
     """Split one malformed multi-row structure table fact into row owners.
 
-    GLM frequently returns a single StructureFact containing two values for
+    The provider frequently returns a single StructureFact containing two values for
     every feature while copying only the feature/value rows.  When the full
     source table has one unique owner/state column and one explicit region
     column, the values can be rebound to the source row without inference.
@@ -3233,7 +3233,7 @@ def _is_preparation_only_tensile_condition(
 ) -> tuple[bool, str]:
     """Return whether a tensile condition is a preparation coordinate only.
 
-    GLM sometimes copies the temperature from ``sample sintered at 1280 °C``
+    A provider sometimes copies the temperature from ``sample sintered at 1280 °C``
     into ``test_condition_raw`` while dropping the actual tensile protocol.
     This helper does not infer a protocol or a new owner.  It only removes the
     preparation token from the formal test-condition slot when the token is
@@ -4931,7 +4931,7 @@ def _normalize_synthetic_bracket_owners(
 
     Alpha25 facts often arrive from separate chunks where the model turns a
     process/orientation/test qualifier into a new ``sample_id_raw`` (for
-    example ``H230AM [LPBF]`` or ``H230AM [X]``).  Unless that complete label is
+    example ``AlloyAM [LPBF]`` or ``AlloyAM [X]``).  Unless that complete label is
     literal in the OCR, it is not an independent material identity.  Redirect
     only when an exact source-backed base anchor already exists; retain a
     treatment/exposure qualifier as ``state_raw`` when it clearly denotes a
@@ -4968,8 +4968,8 @@ def _normalize_synthetic_bracket_owners(
         # coordinates and are intentionally left untouched.
         if not _SYNTHETIC_PROCESS_QUALIFIER.fullmatch(qualifier):
             continue
-        # A normalized source string can make ``H230AM ... LPBF`` look like the
-        # concatenated token ``H230AMLPBF`` even though the source never names
+        # A normalized source string can make ``AlloyAM ... LPBF`` look like the
+        # concatenated token ``AlloyAMLPBF`` even though the source never names
         # the bracketed label.  Process/orientation qualifiers are therefore
         # always context, not independent identities, when the exact base
         # anchor exists.

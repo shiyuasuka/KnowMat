@@ -23,7 +23,56 @@ KnowMat is an AI-driven, agentic pipeline that automatically extracts structured
 
 ---
 
-## Installation
+## Cold start (one recommended path)
+
+Requirements: Python 3.11+, an OpenAI-compatible LLM endpoint, and either
+cloud PaddleOCR or an NVIDIA CUDA environment for local OCR.
+
+```bash
+git clone https://github.com/shiyuasuka/KnowMat.git
+cd KnowMat
+python -m venv venv
+source venv/bin/activate          # Windows: venv\\Scripts\\activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+python -m pip install -r requirements.txt
+cp .env.example .env
+```
+
+KnowMat loads `.env` itself; do not run `source .env` (CRLF files can leak a
+trailing `\\r` into boolean settings).
+
+Configure the LLM and GLM-5.3-compatible reasoning shape:
+
+```dotenv
+LLM_API_KEY=your_llm_api_key
+LLM_BASE_URL=https://your-openai-compatible-endpoint/v1
+LLM_MODEL=glm-5.3
+KNOWMAT2_EXTRACTION_THINKING=provider_default
+KNOWMAT2_EXTRACTION_REASONING_EFFORT=low
+KNOWMAT2_LLM_API_MODE=chat_completions
+```
+
+For cloud OCR, set `PADDLEOCR_API_TOKEN` and run `--paddleocr-api`. For local
+NVIDIA OCR, install `requirements-gpu.txt` and run the single maintained
+`scripts/download_paddleocrvl_models.py` entry point (PaddleOCR-VL 1.5).
+MinerU remains an optional compatibility backend via `MINERU_API_KEY` and
+`--mineru-api`.
+
+Optional embedding setup:
+
+```bash
+python -m pip install -e ".[standardization]"
+python scripts/download_embedding_model.py
+```
+
+This warms `openai/clip-vit-base-patch32` in the user Transformers cache.
+
+## Installation (legacy details)
+
+<!-- BEGIN LEGACY INSTALLATION NOTES
+Follow the cold-start section above for new deployments. The historical
+     option-specific notes below are retained for existing installations.
 
 ### Prerequisites
 
@@ -171,7 +220,13 @@ python -m knowmat --help
 
 ---
 
+END LEGACY INSTALLATION NOTES -->
+
 ## Configuration
+
+New deployments should follow the cold-start section above. The detailed
+backend and batch sections below are retained for existing installations and
+do not alter the Alpha25 output protocol.
 
 ### Environment Variables
 
@@ -180,6 +235,9 @@ python -m knowmat --help
 | `LLM_API_KEY` | Yes | - | Your LLM API key |
 | `LLM_BASE_URL` | Yes | - | OpenAI-compatible base URL |
 | `LLM_MODEL` | Yes | - | Default model name |
+| `KNOWMAT2_EXTRACTION_THINKING` | No | `provider_default` | Provider-neutral thinking mode |
+| `KNOWMAT2_EXTRACTION_REASONING_EFFORT` | No | `provider_default` | `low`, `medium`, or `high` |
+| `KNOWMAT2_LLM_API_MODE` | No | `chat_completions` | `chat_completions` or `responses` |
 | `PADDLEOCRVL_MODEL_DIR` | No | `models/paddleocrvl1_5` | OCR model directory |
 | `PADDLEOCRVL_VERSION` | No | `1.5` | PaddleOCR-VL version |
 | `LANGCHAIN_API_KEY` | No | - | LangSmith API key |
@@ -630,7 +688,8 @@ KnowMat/
 ├── scripts/                  # Utility scripts (thin wrappers over package)
 │   ├── run_batch_enrich.py       # Backward-compat CLI for EnrichRunner
 │   ├── batch_ocr_to_finalmd.py   # Backward-compat CLI for finalmd_pipeline
-│   └── download_paddleocrvl_models.py
+│   ├── download_paddleocrvl_models.py # single local OCR model preload entry
+│   └── download_embedding_model.py    # single embedding warm-up entry
 ├── prompts/                  # LLM prompt templates
 ├── configs/                  # Configuration directory
 ├── data/                     # Data directories
@@ -641,6 +700,10 @@ KnowMat/
 ├── requirements*.txt         # pip dependencies
 └── .env.example              # Environment template
 ```
+
+Experiment outputs and audit reports from `v200` onward remain in local
+`data/experiments/`, `data/output-*`, and `reports/` history directories. These
+are generated artifacts and are not part of production source commits.
 
 ---
 
