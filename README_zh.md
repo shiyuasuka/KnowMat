@@ -1,807 +1,143 @@
-# KnowMat：材料科学数据抽取 Agentic 流水线
+# KnowMat：材料科学数据抽取流水线
 
-![KnowMat-logo](docs/_static/KnowMat-logo.jpg)
+[English README](README.md)
 
-_KnowMat Agentic 流水线示意图，用于从科学文献中抽取结构化材料数据。_
-
----
-
-## 概述
-
-KnowMat 是一个 AI 驱动的 Agentic 流水线，可将非结构化科学文献（`.pdf` / `.txt`）自动抽取为结构化、机器可读的材料科学数据。基于 **LangGraph** 构建，支持 **OpenAI 兼容的 LLM API**（包括 ERNIE/Qianfan），通过多智能代理协同完成论文解析、成分抽取、工艺条件抽取、表征信息抽取和材料性能抽取。
-
-### 核心能力
-
-- **科研级批处理**：支持整目录批量处理 PDF/TXT 文件；支持**两阶段**工作流：先仅跑 OCR（`--ocr-only`），再统一跑大模型抽取
-- **高准确度**：多代理架构，支持最多 3 轮抽取/评估迭代优化
-- **双引擎高精度 OCR**：PaddleOCR-VL 1.5（宏观版面与阅读顺序）+ PP-StructureV3（微观复杂表格与公式精修）；可选 MinerU 云端 API 模式（`--mineru-api`）；可选 PaddleOCR 云端 API 模式（`--paddleocr-api`）
-- **大规模并行批处理**：`--batch` 模式支持数万篇 PDF 并行 OCR 提交 + LLM 抽取，持久化状态追踪、崩溃恢复、多 key 自适应轮转
-- **公式与表格增强**：精准提取复杂 HTML 跨行表格与高保真 LaTeX 公式（自动修复化学式上下标）
-- **两阶段校验**：规则聚合 + LLM 幻觉修正
-- **属性标准化**：自动将属性名称映射为标准形式
-- **质量保障**：置信度打分、人工复核标记与复核指南
-- **ML友好输出**：结构化 JSON，便于入库和建模
-
----
+KnowMat 从科学论文（PDF、TXT、Markdown）抽取可审计的材料成分、工艺、结构、
+表征和性能数据。流水线使用 OpenAI 兼容的语言模型、证据绑定抽取、OCR、
+图表处理和质量审计，并保持现有 `final.json` 输出格式。
 
 ## 冷启动（唯一推荐路径）
 
-### 前置要求
-
-Python 3.11+、一个 OpenAI 兼容 LLM API，以及以下 OCR 后端之一：云端
-PaddleOCR API（无需 GPU）或带 CUDA 的 NVIDIA GPU 本地 PaddleOCR。
+要求：Python 3.11+、一个 OpenAI 兼容 LLM endpoint，以及下方任一 OCR 后端。
 
 ```bash
 git clone https://github.com/shiyuasuka/KnowMat.git
 cd KnowMat
-python -m venv venv
-source venv/bin/activate          # Windows: venv\\Scripts\\activate
+# macOS/Linux（zsh 或 bash）
+python3 -m venv venv
+source venv/bin/activate
+# Windows PowerShell（改用下面两行）：
+# py -3 -m venv venv
+# .\\venv\\Scripts\\Activate.ps1
+# Windows cmd.exe 激活：venv\\Scripts\\activate.bat
 python -m pip install --upgrade pip
 python -m pip install -e .
 python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-程序会自动读取项目根目录的 `.env`，不要执行 `source .env`；这避免 CRLF
-行尾污染布尔配置。Conda/environment.yml 和 PowerShell 片段仅保留给已有
-部署的兼容场景，不是新环境的第二套入口。
+程序会自动读取 `.env`，不要执行 `source .env`；这样可以避免 CRLF 文件的行尾
+污染配置。
 
-至少配置：
+## 配置 LLM
+
+在 `.env` 中填写：
 
 ```dotenv
-LLM_API_KEY=your_llm_api_key
+LLM_API_KEY=your_api_key
 LLM_BASE_URL=https://your-openai-compatible-endpoint/v1
-LLM_MODEL=glm-5.3
-KNOWMAT2_EXTRACTION_THINKING=provider_default
-KNOWMAT2_EXTRACTION_REASONING_EFFORT=low
-KNOWMAT2_LLM_API_MODE=chat_completions
+LLM_MODEL=your_model_name
 ```
 
-云端 OCR 额外配置 `PADDLEOCR_API_TOKEN` 并运行 `--paddleocr-api`；本地 OCR
-额外安装 `requirements-gpu.txt`，再运行唯一的
-`scripts/download_paddleocrvl_models.py`（默认 PaddleOCR-VL 1.5）。
+模型名称和 endpoint 不会被代码硬编码。不同模型支持的 reasoning 或响应格式
+参数可以保持默认，也可以按 `.env.example` 中的说明显式配置。
 
-属性标准化/图文对齐需要 embedding 时：
+## OCR 后端（二选一）
+
+### 云端 PaddleOCR（大多数用户推荐）
+
+在 `.env` 中增加：
+
+```dotenv
+PADDLEOCR_API_TOKEN=your_paddleocr_token
+PADDLEOCR_API_URL=https://paddleocr.aistudio-app.com/api/v2/ocr/jobs
+```
+
+先生成并冻结 OCR manifest，再执行 LLM 抽取：
+
+```bash
+python -m knowmat --input-folder data/raw --ocr-only --paddleocr-api \
+  --force-rerun --skip-cached-ocr --new-ocr-baseline fresh
+python -m knowmat --input-folder data/raw --output-dir data/output \
+  --use-ocr-baseline fresh --rerun-extraction --full-pipeline \
+  --workers 6 --max-runs 1
+```
+
+### NVIDIA Linux/Windows 本地 OCR
+
+本地推理需要 NVIDIA GPU 和 CUDA。完成基础安装后执行：
+
+```bash
+python -m pip uninstall -y paddlepaddle paddlepaddle-gpu
+python -m pip install -r requirements-gpu.txt \
+  -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
+python scripts/download_paddleocrvl_models.py
+python -m knowmat --input-folder data/raw --output-dir data/output \
+  --full-pipeline --force-rerun --workers 1
+```
+
+模型预下载唯一入口为 `scripts/download_paddleocrvl_models.py`，默认
+PaddleOCR-VL 1.5，权重保存在 `models/`，不会提交到 git。
+
+### macOS
+
+生产本地 OCR 依赖 NVIDIA CUDA，macOS 不支持这条路径。Apple Silicon 或 Intel
+Mac 请使用上面的云端 PaddleOCR；LLM 抽取阶段可以正常运行在 venv 中。
+
+MinerU 仍可作为兼容 OCR 后端：配置 `MINERU_API_KEY` 后增加 `--mineru-api`。
+
+## 可选：embedding 模型
+
+只有属性标准化和图文对齐需要 embedding：
 
 ```bash
 python -m pip install -e ".[standardization]"
 python scripts/download_embedding_model.py
 ```
 
-完整的云端/本地命令、环境变量和冻结 OCR 示例见
+默认 CLIP 模型会下载到 Transformers 用户缓存，可用
+`KNOWMAT_EMBEDDING_MODEL` 和 `KNOWMAT_EMBEDDING_DEVICE` 覆盖。
+
+## 常用命令
+
+```bash
+# 基于已有冻结 OCR manifest 重新抽取
+python -m knowmat --input-folder data/raw --output-dir data/output \
+  --use-ocr-baseline fresh --rerun-extraction --workers 6 --max-runs 1
+
+# 只处理指定论文
+python -m knowmat --input-folder data/raw --only paper_001 paper_002
+
+# 批量运行前验证 endpoint 能力
+python scripts/probe_extraction_capabilities.py --model "your_model_name" \
+  --output data/capability_probe.json
+```
+
+成功抽取默认不会重复三次取最高置信度。只有在明确需要多轮比较时才提高
+`--max-runs`。
+
+## 目录职责
+
+```text
+src/knowmat/       生产运行时代码
+scripts/            运维、回放、评估和模型预热命令
+tests/              回归测试
+prompts/            提示配置
+data/raw/           输入 PDF 与 OCR 中间文件
+data/output-*/      抽取结果（生成物）
+data/experiments/   实验缓存和回放（生成物）
+reports/            评估报告（生成物）
+models/             本地模型权重（生成物）
+```
+
+`v200` 及之后的实验结果和审计报告保留在本地历史目录中，但不会复制到生产
+包或源码提交。
+
+## 测试
+
+```bash
+python -m pytest -o addopts='' -q
+```
+
+完整 Alpha25 冻结 OCR 流程见
 [`docs/alpha25-ocr-llm-runbook.md`](docs/alpha25-ocr-llm-runbook.md)。
-
-<!-- BEGIN LEGACY INSTALLATION NOTES
-Legacy installation details retained for historical reference only.
-     Follow the cold-start section above for new deployments.
-## 安装（兼容说明）
-
-### 前置要求
-
-1. **Python 3.11**
-2. **OpenAI 兼容 LLM API Key**（如 MiniMax、ERNIE/Qianfan）
-3. **OCR**：PaddleOCR 云端 API token 或 MinerU API key（推荐），或 NVIDIA GPU 用于本地推理
-
-### 第一步：克隆仓库
-
-```bash
-git clone https://github.com/shiyuasuka/KnowMat.git
-cd KnowMat
-```
-
-### 第二步：安装环境
-
----
-
-#### 方案 A：云端 OCR API（推荐 — 无需 GPU）
-
-使用 PaddleOCR 云端 API 或 MinerU API 进行 PDF 解析，无需本地 GPU 和模型下载。
-
-**使用 venv（macOS / Linux / Windows）：**
-
-```bash
-python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
-
-pip install -e .
-pip install -r requirements.txt
-```
-
-**使用 Conda：**
-
-```bash
-conda env create -f environment.yml
-conda activate KnowMat
-```
-
-> **注意（非 git clone 下载）：** 如果你是通过下载 zip/tarball 而非 `git clone` 获取代码，`environment.yml` 中的 editable install 可能会因 `setuptools-scm` 报错。需要手动执行：
-> ```bash
-> # Windows PowerShell:
-> $env:SETUPTOOLS_SCM_PRETEND_VERSION="1.0.0"
-> pip install -e .
->
-> # Linux / macOS:
-> SETUPTOOLS_SCM_PRETEND_VERSION=1.0.0 pip install -e .
-> ```
-
-> 无需下载 OCR 模型 — OCR 在云端运行。
-
----
-
-#### 方案 B：本地 GPU OCR（需要 NVIDIA GPU）
-
-在本地使用 PaddleOCR-VL 进行 GPU 推理，适合离线环境或大规模本地处理。
-
-**使用 Conda（推荐）：**
-
-```bash
-conda env create -f environment.yml
-conda activate KnowMat
-
-# 安装 Paddle GPU 运行时
-pip uninstall -y paddlepaddle paddlepaddle-gpu
-pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
-conda install nvidia::cudnn cuda-version=12 -y
-
-# 下载 OCR 模型
-python scripts/download_paddleocrvl_models.py --model-dir models/paddleocrvl1_5
-```
-
-**使用 venv：**
-
-```bash
-python -m venv venv
-source venv/bin/activate
-
-pip install -e .
-pip install -r requirements.txt
-
-# 安装 Paddle GPU 运行时
-pip install -r requirements-gpu.txt -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
-
-# 下载 OCR 模型
-python scripts/download_paddleocrvl_models.py --model-dir models/paddleocrvl1_5
-```
-
-> **注意**：本地 OCR 仅支持 NVIDIA GPU（需要 CUDA）。不再支持 CPU-only 本地推理 — 无 GPU 环境请使用方案 A 的云端 API 模式。
-
----
-
-### 第三步：配置环境变量
-
-```bash
-cp .env.example .env
-```
-
-编辑 `.env` 填入你的 API 凭证：
-
-```bash
-# LLM API 配置
-LLM_API_KEY="your_llm_api_key"
-LLM_BASE_URL="https://api.minimaxi.com/v1"
-LLM_MODEL="MiniMax-M2.7"
-
-# 云端 OCR API（方案 A 必填其一）
-PADDLEOCR_API_TOKEN="your_paddleocr_api_token"
-# 或
-MINERU_API_KEY="your_mineru_api_key"
-
-# 本地 GPU OCR（方案 B 必填）
-# PADDLEOCRVL_MODEL_DIR=models/paddleocrvl1_5
-# PADDLEOCRVL_VERSION=1.5
-
-# 可选：LangSmith tracing
-# LANGCHAIN_API_KEY="your_langchain_api_key"
-# LANGCHAIN_TRACING_V2=false
-```
-
-**ERNIE/Qianfan 示例：**
-
-```bash
-LLM_API_KEY="bce-v3/xxxx"
-LLM_BASE_URL="https://qianfan.bj.baidubce.com/v2"
-LLM_MODEL="ep_xxxxx"
-```
-
-### 第四步：验证安装
-
-```bash
-python -m knowmat --help
-```
-
----
-
-### 依赖文件说明
-
-| 文件 | 用途 |
-|------|------|
-| `environment.yml` | Conda 完整环境定义 |
-| `requirements.txt` | pip 基础依赖 |
-| `requirements-gpu.txt` | GPU Paddle 依赖（NVIDIA，仅方案 B） |
-| `pyproject.toml` | 项目元数据 |
-
----
-
-END LEGACY INSTALLATION NOTES -->
-
-## 配置
-
-### 环境变量
-
-| 变量 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `LLM_API_KEY` | 是 | - | LLM API 密钥 |
-| `LLM_BASE_URL` | 是 | - | OpenAI 兼容 base URL |
-| `LLM_MODEL` | 是 | - | 默认模型名称 |
-| `KNOWMAT2_EXTRACTION_THINKING` | 否 | `provider_default` | provider-neutral thinking mode |
-| `KNOWMAT2_EXTRACTION_REASONING_EFFORT` | 否 | `provider_default` | `low`、`medium` 或 `high` |
-| `KNOWMAT2_LLM_API_MODE` | 否 | `chat_completions` | `chat_completions` 或 `responses` |
-| `PADDLEOCRVL_MODEL_DIR` | 否 | `models/paddleocrvl1_5` | OCR 模型目录 |
-| `PADDLEOCRVL_VERSION` | 否 | `1.5` | PaddleOCR-VL 版本 |
-| `LANGCHAIN_API_KEY` | 否 | - | LangSmith API 密钥 |
-| `LANGCHAIN_TRACING_V2` | 否 | `false` | 启用 LangSmith tracing |
-| `MINERU_API_KEY` | 否 | - | MinerU API 密钥（启用 `--mineru-api`） |
-| `MINERU_MODEL_VERSION` | 否 | `vlm` | MinerU 模型：`vlm` 或 `doclayout` |
-| `MINERU_API_TIMEOUT_SEC` | 否 | `600` | MinerU 轮询超时时间（秒） |
-| `MINERU_LANGUAGE` | 否 | `en` | MinerU 文档语言 |
-| `PADDLEOCR_API_TOKEN` | 否 | - | PaddleOCR 云端 API Token（启用 `--paddleocr-api`） |
-| `PADDLEOCR_API_TOKENS` | 否 | - | 多个 PaddleOCR Token，逗号分隔（用于 `--batch` 模式） |
-| `PADDLEOCR_API_URL` | 否 | `https://paddleocr.aistudio-app.com/api/v2/ocr/jobs` | PaddleOCR API 地址 |
-| `PADDLEOCR_API_TIMEOUT_SEC` | 否 | `600` | PaddleOCR 轮询超时时间（秒） |
-| `MINERU_API_KEYS` | 否 | - | 多个 MinerU Key，逗号分隔（用于 `--batch` 模式） |
-| `VLM_API_KEY` | 否 | - | VLM API 密钥（用于 `--final-md` 图片描述） |
-| `VLM_API_KEYS` | 否 | - | 多个 VLM 密钥，逗号分隔（轮询，限流时自动切换） |
-| `VLM_BASE_URL` | 否 | - | VLM API 地址（OpenAI 兼容） |
-| `VLM_MODEL` | 否 | - | VLM 模型名称（如 `ernie-4.5-turbo-vl`） |
-
-### OCR 调优（可选）
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `OCR_RENDER_DPI` | `300` | 页面渲染分辨率 |
-| `OCR_BATCH_SIZE` | `2` | VL 批处理大小（小显存 GPU 设为 1） |
-| `OCR_PAGES_PER_RELEASE` | `0` | 每 N 页释放一次 GPU 显存 |
-| `KNOWMAT_SKIP_CHEM_REOCR` | 未设置 | 设为 `1` 跳过化学式重 OCR |
-
-OCR 问题排查见 [docs/ocr-cudnn64_9-fix.md](docs/ocr-cudnn64_9-fix.md)。
-
----
-
-## 使用方法
-
-新部署请直接使用上方“冷启动”命令。下面的章节保留批处理、Final-MD 和
-历史兼容参数，均不改变生产 Alpha25 的输出协议。
-
-### 基础命令
-
-```bash
-python -m knowmat
-```
-
-默认从 `data/raw/` 读取文件，结果输出到 `data/output/`。
-
-### 指定目录
-
-```bash
-python -m knowmat --input-folder path/to/papers --output-dir path/to/output
-```
-
-### 两阶段工作流（大批量推荐）
-
-**阶段一：仅跑 OCR**
-
-```bash
-python -m knowmat --input-folder path/to/papers --ocr-only
-```
-
-**阶段二：跑 LLM 抽取**
-
-```bash
-python -m knowmat --input-folder path/to/papers
-```
-
-### MinerU 云端 API 模式
-
-KnowMat 支持使用 [MinerU](https://mineru.net) 云端 API 作为替代 OCR 后端。MinerU 提供基于 VLM 的高质量 PDF 解析，对复杂表格、公式和图片的识别效果更好。
-
-**配置：**
-
-在 `.env` 中添加 MinerU API 密钥：
-
-```bash
-MINERU_API_KEY="your_mineru_api_key"
-MINERU_MODEL_VERSION=vlm          # 可选：vlm（默认）、doclayout
-MINERU_API_TIMEOUT_SEC=600        # 轮询超时时间（秒）
-MINERU_LANGUAGE=en                # 文档语言
-```
-
-**使用方法：**
-
-```bash
-# 仅 OCR（使用 MinerU API）
-python -m knowmat --input-folder path/to/papers --ocr-only --mineru-api
-
-# 全流程（MinerU API + LLM 抽取）
-python -m knowmat --input-folder path/to/papers --mineru-api
-
-# 强制重新跑（忽略缓存）
-python -m knowmat --input-folder path/to/papers --ocr-only --mineru-api --skip-cached-ocr
-```
-
-`--mineru-api` 参数启用 MinerU API 模式。不加此参数时，默认使用本地 PaddleOCR-VL 推理。MinerU API 模式需要在 `.env` 中配置 `MINERU_API_KEY`。
-
-**相比本地 OCR 的优势：**
-- 本地无需 GPU
-- 更高质量的图片提取（由 MinerU 预裁剪）
-- 更优的 VLM 版面分析
-- 更好地支持复杂多栏排版
-
-**注意：** MinerU API 需要网络连接，用量受 API 套餐限制。
-
-### PaddleOCR 云端 API 模式
-
-KnowMat 还支持使用 [PaddleOCR 云端 API](https://paddleocr.aistudio-app.com) 作为 OCR 后端。提供与本地模式相同的 PaddleOCR-VL + PP-StructureV3 流水线，但运行在云端（本地无需 GPU）。
-
-**配置：**
-
-在 `.env` 中添加 PaddleOCR API Token：
-
-```bash
-PADDLEOCR_API_TOKEN="your_paddleocr_api_token"
-PADDLEOCR_API_URL=https://paddleocr.aistudio-app.com/api/v2/ocr/jobs
-PADDLEOCR_API_TIMEOUT_SEC=600
-```
-
-**使用方法：**
-
-```bash
-# 仅 OCR（使用 PaddleOCR 云端 API）
-python -m knowmat --input-folder path/to/papers --ocr-only --paddleocr-api
-
-# 全流程（PaddleOCR 云端 API + LLM 抽取）
-python -m knowmat --input-folder path/to/papers --paddleocr-api
-
-# 强制重新跑（忽略缓存）
-python -m knowmat --input-folder path/to/papers --ocr-only --paddleocr-api --skip-cached-ocr
-```
-
-**PP-StructureV3 公式精修 + MinerU：**
-
-当同时配置了 `PADDLEOCR_API_TOKEN` 和 `MINERU_API_KEY` 时，使用 `--mineru-api` 会自动对 MinerU 结果进行 PP-StructureV3 公式/表格精修：
-
-```bash
-# MinerU 主 OCR + PP-StructureV3 公式精修
-python -m knowmat --input-folder path/to/papers --ocr-only --mineru-api
-```
-
-### 大规模并行批处理模式
-
-当需要处理数万篇 PDF 时，KnowMat 提供 `--batch` 模式，基于 asyncio 事件循环 + SQLite 持久化状态追踪。核心能力：
-
-- **即发即走 OCR 提交**：并发提交大量 PDF 到云端 OCR API，无需阻塞等待
-- **崩溃恢复**：重启后自动从 SQLite 状态数据库恢复，已提交的远端任务继续轮询
-- **多 key 轮转**：多个 API token 自适应负载均衡，限流时自动冷却切换
-- **流式 LLM 处理**：任何一篇 OCR 完成即刻启动 LLM 抽取，与其他 OCR/LLM 任务并行
-
-**配置（多 key）：**
-
-在 `.env` 中使用逗号分隔配置多个 token：
-
-```bash
-# 多个 PaddleOCR API token（逗号分隔）
-PADDLEOCR_API_TOKENS=token_a,token_b,token_c
-
-# 或使用单个 token（向后兼容）
-PADDLEOCR_API_TOKEN=your_single_token
-
-# 多个 MinerU key（逗号分隔）
-MINERU_API_KEYS=key1,key2
-```
-
-**使用方法：**
-
-```bash
-# 大规模并行处理（PaddleOCR API）
-python -m knowmat --input-folder path/to/papers --paddleocr-api --batch \
-    --max-ocr-concurrent 30 --max-llm-concurrent 8
-
-# 使用 MinerU API
-python -m knowmat --input-folder path/to/papers --mineru-api --batch \
-    --max-ocr-concurrent 20 --max-llm-concurrent 4
-
-# 崩溃后恢复（自动检测已有状态 DB）
-python -m knowmat --input-folder path/to/papers --paddleocr-api --batch
-
-# 自定义状态数据库路径
-python -m knowmat --input-folder path/to/papers --paddleocr-api --batch \
-    --batch-db /path/to/state.db
-
-# 查看处理状态
-sqlite3 path/to/papers/.knowmat_batch.db \
-    "SELECT status, count(*) FROM tasks GROUP BY status"
-```
-
-**Batch 模式 CLI 参数：**
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--batch` | 启用大规模并行模式（需配合 `--paddleocr-api` 或 `--mineru-api`） | `False` |
-| `--max-ocr-concurrent` | 最大并发 OCR 提交数（同时在途量） | `20` |
-| `--max-llm-concurrent` | 最大并发 LLM 抽取线程数 | `4` |
-| `--batch-db` | SQLite 状态数据库路径 | `<input-folder>/.knowmat_batch.db` |
-| `--ocr-poll-interval` | OCR 任务轮询间隔（秒） | `10` |
-
-**进度输出示例：**
-
-```
-[BATCH] 12:34:56 | done: 450/10000 | ocr_submitted: 30 | llm: 8 | pending: 9512 | failed: 0 | rate: 2.1/min | keys: 3/3 healthy
-```
-
-**注意：** `--batch` 模式与默认的本地 OCR 流式处理完全独立。不加 `--batch` 时，原有基于 `ThreadPoolExecutor` 的工作流不受任何影响。
-
-### Final-MD 模式（CLIP + VLM 图片描述富集）
-
-当需要在 Markdown 中嵌入 AI 图片描述，但**不需要**完整 LLM 抽取时，使用 `--final-md` 模式。该模式分两阶段：
-
-- **阶段一** — 云端 OCR（PaddleOCR 或 MinerU）→ CLIP 图文对齐 → VLM 图片描述 → 每篇论文生成 `_final.md`
-- **阶段二** — 修复循环：对 `_final.md` 中 AI 描述不完整的论文自动重试，直至所有可描述图片都有描述
-
-一篇论文"完成"的标准：每个有有效图片文件的图例，在 `_final.md` 中都有对应的 `> [Figure N AI Description]:` 块。VLM API 故障触发无限重试，指数退避（30s → 60s → 120s → 300s）。
-
-**配置：**
-
-在 `.env` 中添加 VLM API 凭证：
-
-```bash
-# VLM API（可与 LLM 相同或不同端点）
-VLM_API_KEY="your_vlm_api_key"
-VLM_BASE_URL="https://your-vlm-endpoint/v1"
-VLM_MODEL="ernie-4.5-turbo-vl"
-
-# 多个 VLM Key 以提高吞吐量（逗号分隔，限流时自动轮转）
-VLM_API_KEYS=key1,key2,key3,key4
-```
-
-**使用方法：**
-
-```bash
-# 完整流水线：OCR + CLIP + VLM 富集（1070 篇论文示例）
-python -m knowmat --final-md --paddleocr-api \
-    --input-folder data/raw \
-    --output-dir data/extraction_output \
-    --max-ocr-concurrent 30 \
-    --max-enrich-concurrent 2 \
-    --vlm-workers 4 \
-    --skip-existing
-
-# 仅修复（跳过 OCR，重新富集 _final.md 不完整的论文）
-python -m knowmat --final-md --repair-only \
-    --input-folder data/raw \
-    --output-dir data/extraction_output \
-    --max-enrich-concurrent 2 \
-    --vlm-workers 4
-
-# 使用 MinerU OCR
-python -m knowmat --final-md --mineru-api \
-    --input-folder data/raw \
-    --output-dir data/extraction_output \
-    --max-ocr-concurrent 20 \
-    --max-enrich-concurrent 2 \
-    --vlm-workers 4 --skip-existing
-```
-
-**进度输出示例：**
-
-```
-[ENRICH] Reset 19 stuck llm_processing tasks → ocr_done
-[ENRICH] Pre-queued 737 existing OCR_DONE tasks
-[30s] done=6 enriching=2 ocr_done=731 submitted=0 pending=0 failed=0 skipped=0 total=1070
-```
-
-**Final-MD 模式 CLI 参数：**
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--final-md` | 启用 Final-MD 模式（需 `--paddleocr-api` 或 `--mineru-api`，`--repair-only` 除外） | `False` |
-| `--max-enrich-concurrent` | 最大并发 CLIP+VLM 富集 worker 数（保持 ≤ 2 防 OOM） | `2` |
-| `--vlm-workers` | 每篇论文 VLM API 并发数 | `4` |
-| `--skip-existing` | 跳过已有完整 `_final.md` 的论文 | `False` |
-| `--repair-only` | 跳过 OCR（阶段一），仅对现有 OCR 产出运行修复循环 | `False` |
-| `--max-ocr-concurrent` | 最大并发 OCR 提交数 | `20` |
-| `--ocr-poll-interval` | OCR 任务轮询间隔（秒） | `10` |
-| `--batch-db` | SQLite 状态数据库路径 | `<input>/.knowmat_batch_enrich.db` |
-
-**输出结构：**
-
-每篇论文在 `<output-dir>/<paper-id>/` 下生成 `_final.md`：
-
-```markdown
-> [Figure 3 AI Description]: SEM 显微照片显示等轴晶，平均晶粒直径 15 μm。
-> 箭头指示晶界析出物...
-
-Figure 3. 铸态合金的 SEM 图像...
-```
-
-**内存说明：** CLIP 模型（约 600 MB）作为进程级单例加载一次，所有富集 worker 共享。内存 < 16 GB 时建议保持 `--max-enrich-concurrent ≤ 2`。
-
-### 进阶参数
-
-```bash
-python -m knowmat \
-    --input-folder path/to/files \
-    --output-dir output/directory \
-    --max-runs 3 \
-    --workers 4 \
-    --force-rerun \
-    --enable-property-standardization
-```
-
-### 命令行参数
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--input-folder` | 输入目录（PDF/TXT/MD 文件） | `data/raw` |
-| `--output-dir` | 抽取结果输出目录 | `data/output` |
-| `--ocr-only` | 仅跑 OCR，跳过 LLM 抽取 | `False` |
-| `--max-runs` | 最大抽取/评估轮数 | `1` |
-| `--workers` | 并发文件处理数 | `1` |
-| `--mineru-api` | 使用 MinerU 云端 API 进行 OCR | `False` |
-| `--paddleocr-api` | 使用 PaddleOCR 云端 API 进行 OCR | `False` |
-| `--skip-cached-ocr` | 忽略 OCR 缓存，强制重新推理 | `False` |
-| `--force-rerun` | 强制重新 OCR 并重新抽取 | `False` |
-| `--enable-property-standardization` | 启用属性名标准化 | `False` |
-| `--subfield-model` | 子领域识别模型 | `LLM_MODEL` |
-| `--extraction-model` | 抽取模型 | `LLM_MODEL` |
-| `--evaluation-model` | 评估模型 | `LLM_MODEL` |
-| `--manager-model` | 二阶段校验模型 | `LLM_MODEL` |
-| `--flagging-model` | 最终质量评估模型 | `LLM_MODEL` |
-| `--batch` | 启用大规模并行模式 | `False` |
-| `--max-ocr-concurrent` | (Batch/Final-MD) 最大并发 OCR 提交数 | `20` |
-| `--max-llm-concurrent` | (Batch) 最大并发 LLM 线程数 | `4` |
-| `--batch-db` | (Batch) SQLite 状态数据库路径 | `<input>/.knowmat_batch.db` |
-| `--ocr-poll-interval` | (Batch/Final-MD) OCR 轮询间隔（秒） | `10` |
-| `--final-md` | 启用 Final-MD 模式（CLIP+VLM 图片描述富集） | `False` |
-| `--max-enrich-concurrent` | (Final-MD) 最大并发富集 worker 数 | `2` |
-| `--vlm-workers` | (Final-MD) 每篇论文 VLM 并发数 | `4` |
-| `--skip-existing` | (Final-MD) 跳过已有完整 `_final.md` 的论文 | `False` |
-| `--repair-only` | (Final-MD) 跳过 OCR，仅修复不完整论文 | `False` |
-
-### Python API
-
-```python
-from knowmat.orchestrator import run
-import os
-
-result = run(
-    pdf_path="path/to/paper.pdf",  # 也支持 .txt / .md
-    output_dir="data/output",
-    max_runs=3,
-    subfield_model=os.getenv("LLM_MODEL"),
-    extraction_model=os.getenv("LLM_MODEL"),
-    evaluation_model=os.getenv("LLM_MODEL"),
-    manager_model=os.getenv("LLM_MODEL"),
-    flagging_model=os.getenv("LLM_MODEL"),
-)
-
-print(f"Extracted {len(result['final_data']['compositions'])} compositions")
-print(f"Confidence: {result.get('confidence_score', 0):.2f}")
-print(f"Flagged: {result['flag']}")
-```
-
----
-
-## 输出结构
-
-### 输入目录（`data/raw/`）
-
-```
-data/raw/
-├── <PaperName>.pdf
-└── <PaperName>/
-    ├── <PaperName>.md                       # OCR 产出
-    ├── <PaperName>.json                     # OCR 结构化数据
-    ├── paddleocrvl_parse/                   # （仅 --save-intermediate 时）
-    │   ├── page_images/
-    │   └── ocr_raw/
-    └── _ocr_cache/                          # OCR 缓存
-```
-
-### 输出目录（`data/output/`）
-
-```
-data/output/
-└── <PaperName>/
-    ├── <PaperName>_extraction.json          # 最终结构化结果
-    ├── <PaperName>_analysis_report.txt      # 可读分析报告
-    ├── <PaperName>_runs.json                # 多轮抽取详情
-    └── <PaperName>_qa_report.json           # 质量与复核标记
-```
-
-### 抽取结果示例
-
-```json
-{
-  "compositions": [
-    {
-      "composition": "Zr64.13Cu15.75Ni10.12Al10",
-      "composition_normalized": "Zr64Cu16Ni10Al10",
-      "processing_conditions": {
-        "method": "melt spinning",
-        "temperature": "1400 K",
-        "cooling_rate": "10^6 K/s",
-        "atmosphere": "argon"
-      },
-      "characterization": {
-        "XRD": "amorphous structure confirmed",
-        "DSC": "glass transition at 625 K; crystallization at 705 K"
-      },
-      "properties_of_composition": [
-        {
-          "property_name": "glass transition temperature",
-          "property_symbol": "Tg",
-          "value": "625",
-          "value_numeric": 625.0,
-          "value_type": "exact",
-          "units": "K"
-        }
-      ]
-    }
-  ]
-}
-```
-
----
-
-## 项目结构
-
-```
-KnowMat/
-├── src/knowmat/              # 主 Python 包
-│   ├── __main__.py           # CLI 入口（python -m knowmat）
-│   ├── orchestrator.py       # LangGraph 编排
-│   ├── nodes/                # LangGraph 节点
-│   │   ├── paddleocrvl_parse_pdf.py
-│   │   ├── extraction.py
-│   │   ├── evaluation.py
-│   │   └── ...
-│   ├── pdf/                  # PDF/OCR 子模块
-│   │   ├── ocr_engine.py
-│   │   ├── figure_describer.py   # VLM 多 key 池
-│   │   ├── pipeline_c.py         # CLIP+VLM 富集流水线
-│   │   └── ...
-│   └── batch/                # 大规模并行批处理
-│       ├── batch_runner.py       # asyncio 编排器（--batch 模式）
-│       ├── enrich_runner.py      # asyncio 富集运行器（--final-md 模式）
-│       ├── finalmd_pipeline.py   # 阶段 1+2 编排 + 修复循环
-│       ├── task_store.py         # SQLite 状态持久化
-│       ├── key_pool.py           # 多 key 轮转
-│       └── ocr_dispatcher.py     # 异步 OCR 生命周期管理
-├── scripts/                  # 工具脚本（包的薄包装层，向后兼容）
-│   ├── run_batch_enrich.py       # EnrichRunner 的 CLI 包装
-│   ├── batch_ocr_to_finalmd.py   # finalmd_pipeline 的 CLI 包装
-│   ├── download_paddleocrvl_models.py # 唯一的本地 OCR 模型预下载入口
-│   └── download_embedding_model.py   # 唯一的 embedding 预热入口
-├── prompts/                  # LLM 提示词模板
-├── configs/                  # 配置目录
-├── data/                     # 数据目录
-│   ├── raw/                  # 输入文件 + OCR 产出
-│   └── output/               # 抽取结果
-├── models/                   # OCR 模型权重（gitignored）
-├── environment.yml           # Conda 环境
-├── requirements*.txt        # pip 依赖
-└── .env.example              # 环境变量模板
-```
-
-实验结果管理：`v200` 及之后的结果与审计报告保留在本地
-`data/experiments/`、`data/output-*` 和 `reports/` 历史目录中；这些目录是
-生成物，不纳入生产源码提交。
-
----
-
-## 核心特性
-
-### 多代理架构
-
-- **Parser Agent**：双引擎协同 PDF 解析（PaddleOCR-VL + PP-StructureV3）
-- **Subfield Detection Agent**：识别论文类型（实验/计算/机器学习）
-- **Extraction Agent**：基于 TrustCall 的结构化数据抽取
-- **Evaluation Agent**：质量评估与置信度评分
-- **Two-Stage Manager**：
-  - Stage 1（Aggregation）：快速规则化合并
-  - Stage 2（Validation）：LLM 幻觉检测与修正
-- **Flagging Agent**：最终质量评估与人工复核建议
-
-### 数据抽取范围
-
-- 材料成分（元素、化学计量、归一化配方）
-- 工艺条件（温度、压力、气氛、时间）
-- 表征方法与结果
-- 材料性能（ML 友好格式）：
-  - 精确值、区间、上下界（`>`、`<`、`>=`、`<=`）
-  - 值类型：`exact`、`lower_bound`、`upper_bound`、`range`、`qualitative`
-
-### 属性标准化
-
-自动将属性名称映射为标准形式：
-- `"glass transition temp"` → `"glass transition temperature"`
-- `"ultimate tensile strength"` → `"tensile strength"`
-- `"Young's modulus"` → `"elastic modulus"`
-
----
-
-## 回归测试
-
-KnowMat 内置回归测试工具，用于 AI 抽取结果与 Ground Truth 对比：
-
-```bash
-# GT 模式：AI 抽取结果与 Ground Truth 对比
-python tools/regression_diff.py gt --all
-
-# Self 模式：对比两次 AI 运行
-python tools/regression_diff.py self --snapshot baseline
-python tools/regression_diff.py self --compare baseline
-
-# QA 模式：质量基线检查
-python tools/regression_diff.py qa
-```
-
-详细用法见 [tools/README.md](tools/README.md)。
-
----
-
-## 故障排查
-
-### API Key 未设置
-
-```
-Error: LLM_API_KEY not set
-```
-
-解决：确保 `.env` 中设置了 `LLM_API_KEY`、`LLM_BASE_URL` 和 `LLM_MODEL`。
-
-### 401 Invalid Model
-
-```
-Error code: 401 - invalid_model
-```
-
-解决：检查 `.env` 中的 `LLM_MODEL`。使用千帆时，必须填写**推理端点 ID**（形如 `ep_xxxxx`），不能是模型简称。
-
-### PaddleOCR-VL 解析失败
-
-```
-Error: Failed to parse PDF with PaddleOCR-VL
-```
-
-解决：
-- 检查 PDF 是否损坏或加密
-- Windows：安装 [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
-- GPU：确保 CUDA/cuDNN 与 Paddle 版本匹配（见 [docs/platforms.md](docs/platforms.md)）
-- 可设置 `KNOWMAT_ALLOW_LEGACY_PADDLEOCR=1` 允许降级到经典 OCR
-
----
-
-## 引用
-
-如果 KnowMat 对你的研究有帮助，请引用：
-
-```bibtex
-@software{knowmat2024,
-  title = {KnowMat: Agentic Pipeline for Materials Science Data Extraction},
-  author = {Sayeed, Hasan},
-  year = {2024},
-  url = {https://github.com/hasan-sayeed/KnowMat2}
-}
-```
-
----
-
-## 贡献
-
-欢迎贡献代码与建议。详情见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
----
-
-## 许可证
-
-MIT License。见 [LICENSE.txt](LICENSE.txt)。
