@@ -197,7 +197,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--manager-model", default=None, help="Model for validation agent (Stage 2: hallucination correction).")
     parser.add_argument("--flagging-model", default=None, help="Model for flagging/quality assessment agent.")
     parser.add_argument("--ocr-log-level", default=None, help="OCR/PaddleX log level (e.g., DEBUG, INFO, WARNING). Overrides PADDLE_PDX_LOG_LEVEL if set.")
-    parser.add_argument("--paddleocrvl-version", default=None, help="PaddleOCR-VL version to use: '1.5' (default) or '1.0'.")
+    parser.add_argument("--paddleocrvl-version", default=None, help="PaddleOCR-VL version to use: '1.6' (default), '1.5', or '1.0'.")
     parser.add_argument(
         "--ocr-pages",
         default=None,
@@ -216,7 +216,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--paddleocr-api",
         action="store_true",
-        help="Use PaddleOCR cloud API for OCR (PaddleOCR-VL-1.5 + PP-StructureV3). Requires PADDLEOCR_API_TOKEN in .env.",
+        help="Use PaddleOCR cloud API for OCR (PaddleOCR-VL-1.6 + PP-StructureV3). Requires PADDLEOCR_API_TOKEN in .env.",
     )
     parser.add_argument(
         "--clear-ocr-cache",
@@ -523,18 +523,20 @@ def main(argv: list[str] | None = None) -> None:
     # 强制重跑时对所有 PDF 重新 OCR；否则仅对尚无 .md/.txt 的 PDF 做 OCR
     pdfs_missing_txt = list(pdf_files) if args.force_rerun else [p for p in pdf_files if p.stem not in txt_by_stem]
 
-    # Guard: local OCR requires NVIDIA GPU — reject CPU-only environments early
+    # Guard: local OCR requires an available Paddle runtime. macOS has a
+    # supported CPU build; NVIDIA hosts use the CUDA build for acceleration.
     if pdfs_missing_txt and not (args.paddleocr_api or args.mineru_api):
         try:
             import paddle  # type: ignore
-            if not paddle.device.is_compiled_with_cuda():
+            if not paddle.device.is_compiled_with_cuda() and sys.platform != "darwin":
                 print(
                     "Error: Local OCR requires an NVIDIA GPU (paddlepaddle-gpu with CUDA). "
-                    "CPU-only local OCR is no longer supported.\n"
+                    "On macOS, install the supported CPU PaddlePaddle build.\n"
                     "Solutions:\n"
                     "  1. Use --paddleocr-api for cloud OCR (recommended, no GPU needed)\n"
                     "  2. Use --mineru-api for MinerU cloud OCR\n"
-                    "  3. Install paddlepaddle-gpu on a machine with NVIDIA GPU"
+                    "  3. Install paddlepaddle-gpu on a machine with NVIDIA GPU\n"
+                    "  4. On macOS install paddlepaddle from the CPU index"
                 )
                 return
         except ImportError:

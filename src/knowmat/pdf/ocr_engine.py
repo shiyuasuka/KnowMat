@@ -11,6 +11,7 @@ import functools
 import gc
 import logging
 import os
+import platform
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -80,8 +81,12 @@ def default_model_dir() -> Path:
     """Return the default local model directory in this project."""
     repo_root = Path(__file__).resolve().parents[3]
     
-    version = os.getenv("PADDLEOCRVL_VERSION", "1.5")
-    default_subdir = "paddleocrvl1_0" if version == "1.0" else "paddleocrvl1_5"
+    version = os.getenv("PADDLEOCRVL_VERSION", "1.6")
+    default_subdir = {
+        "1.0": "paddleocrvl1_0",
+        "1.5": "paddleocrvl1_5",
+        "1.6": "paddleocrvl1_6",
+    }.get(version, f"paddleocrvl{version.replace('.', '_')}")
     
     model_dir = os.getenv("PADDLEOCRVL_MODEL_DIR", str(repo_root / "models" / default_subdir))
     return Path(model_dir).expanduser().resolve()
@@ -250,6 +255,11 @@ def _installed_dist_version(name: str) -> Optional[str]:
         return None
 
 
+def sys_platform_is_macos() -> bool:
+    """Return whether the current host is a supported macOS OCR host."""
+    return platform.system() == "Darwin"
+
+
 def _validate_paddle_ocr_runtime() -> None:
     """Fail fast on broken Paddle CPU/GPU combinations."""
     try:
@@ -269,6 +279,12 @@ def _validate_paddle_ocr_runtime() -> None:
     gpu_pkg = _installed_dist_version("paddlepaddle-gpu")
 
     if has_cuda:
+        return
+
+    # PaddlePaddle publishes a supported CPU build for macOS (including Apple
+    # Silicon). CUDA is only required for the NVIDIA acceleration path.
+    if sys_platform_is_macos():
+        logger.info("Using macOS CPU PaddlePaddle runtime for local OCR.")
         return
 
     if wants_gpu:
@@ -323,7 +339,7 @@ def create_ocr_engine(model_dir: Path) -> Tuple[Any, str]:
       - format_block_content=True: format block content for downstream use
       - merge_layout_blocks=True: merge adjacent blocks of same type
 
-    PaddleOCR-VL 1.5 does not accept ``use_angle_cls`` (raises ValueError).
+    PaddleOCR-VL does not accept the legacy ``use_angle_cls`` argument.
     """
     _prepare_ocr_home(model_dir)
     ensure_paddle_device_from_env()
@@ -344,7 +360,7 @@ def create_ocr_engine(model_dir: Path) -> Tuple[Any, str]:
                 "For temporary debugging only, set KNOWMAT_ALLOW_LEGACY_PADDLEOCR=1 to allow fallback."
             ) from exc
     else:
-        version = (os.getenv("PADDLEOCRVL_VERSION", "1.5") or "1.5").strip()
+        version = (os.getenv("PADDLEOCRVL_VERSION", "1.6") or "1.6").strip()
         star_aligned_kwargs: dict = {
             "use_layout_detection": True,
             "use_seal_recognition": True,
@@ -357,9 +373,15 @@ def create_ocr_engine(model_dir: Path) -> Tuple[Any, str]:
             candidates.append({"pipeline_version": "v1"})
             candidates.append({})
         else:
-            candidates.append({"pipeline_version": "v1.5", **star_aligned_kwargs})
+            pipeline_version = f"v{version}"
+            candidates.append({"pipeline_version": pipeline_version, **star_aligned_kwargs})
+            candidates.append({"pipeline_version": pipeline_version})
             candidates.append({**star_aligned_kwargs})
-            candidates.append({"pipeline_version": "v1.5"})
+            # Keep a compatibility fallback for installations that predate
+            # PaddleOCR-VL 1.6 but expose the same Python API.
+            if pipeline_version != "v1.5":
+                candidates.append({"pipeline_version": "v1.5", **star_aligned_kwargs})
+                candidates.append({"pipeline_version": "v1.5"})
             candidates.append({})
 
         last_vl_error: Optional[BaseException] = None
@@ -815,4 +837,3 @@ def normalize_lines(lines: List[str]) -> List[str]:
         normalized.append(text)
         prev = text
     return normalized
-

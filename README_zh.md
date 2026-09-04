@@ -23,6 +23,8 @@ source venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
 python -m pip install -r requirements.txt
+python -m pip install -e ".[standardization]"
+python scripts/download_embedding_model.py
 cp .env.example .env
 ```
 
@@ -42,15 +44,17 @@ LLM_MODEL=your_model_name
 模型名称和 endpoint 不会被代码硬编码。不同模型支持的 reasoning 或响应格式
 参数可以保持默认，也可以按 `.env.example` 中的说明显式配置。
 
-## OCR 后端（二选一）
+## OCR 后端
 
-### 云端 PaddleOCR（大多数用户推荐）
+### 云端 PaddleOCR
 
 在 `.env` 中增加：
 
 ```dotenv
 PADDLEOCR_API_TOKEN=your_paddleocr_token
 PADDLEOCR_API_URL=https://paddleocr.aistudio-app.com/api/v2/ocr/jobs
+# 可选；默认使用 PaddleOCR-VL-1.6
+PADDLEOCR_API_MODEL=PaddleOCR-VL-1.6
 ```
 
 先生成并冻结 OCR manifest，再执行 LLM 抽取：
@@ -63,32 +67,44 @@ python -m knowmat --input-folder data/raw --output-dir data/output \
   --workers 6 --max-runs 1
 ```
 
-### NVIDIA Linux/Windows 本地 OCR
+### NVIDIA Linux/Windows 本地 OCR（包括 Blackwell）
 
-本地推理需要 NVIDIA GPU 和 CUDA。完成基础安装后执行：
+本地推理使用 PaddlePaddle GPU 和 CUDA。完成基础安装后执行：
 
 ```bash
 python -m pip uninstall -y paddlepaddle paddlepaddle-gpu
 python -m pip install -r requirements-gpu.txt \
   -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
-python scripts/download_paddleocrvl_models.py
+python scripts/download_paddleocrvl_models.py --model-dir models/paddleocrvl1_6
 python -m knowmat --input-folder data/raw --output-dir data/output \
   --full-pipeline --force-rerun --workers 1
 ```
 
 模型预下载唯一入口为 `scripts/download_paddleocrvl_models.py`，默认
-PaddleOCR-VL 1.5，权重保存在 `models/`，不会提交到 git。
+PaddleOCR-VL 1.6，权重保存在 `models/`，不会提交到 git。Blackwell 的 CUDA
+和驱动组合请参考 [PaddleOCR NVIDIA Blackwell 指南](https://www.paddleocr.ai/latest/version3.x/pipeline_usage/PaddleOCR-VL-NVIDIA-Blackwell.html)。
 
-### macOS
+### macOS（Apple Silicon 或 Intel）
 
-生产本地 OCR 依赖 NVIDIA CUDA，macOS 不支持这条路径。Apple Silicon 或 Intel
-Mac 请使用上面的云端 PaddleOCR；LLM 抽取阶段可以正常运行在 venv 中。
+PaddleOCR-VL 1.6 支持在 macOS 上使用 PaddlePaddle 本地推理。在同一个 venv
+中安装 CPU runtime 和文档解析扩展：
+
+```bash
+python -m pip install "paddlepaddle==3.2.1" \
+  -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+python -m pip install -U "paddleocr[doc-parser]"
+python scripts/download_paddleocrvl_models.py --model-dir models/paddleocrvl1_6
+python -m knowmat --input-folder data/raw --output-dir data/output \
+  --full-pipeline --force-rerun --workers 1
+```
+
+Apple Silicon 如需 MLX-VLM 后端，请参考 [PaddleOCR Apple Silicon 指南](https://www.paddleocr.ai/latest/version3.x/pipeline_usage/PaddleOCR-VL-Apple-Silicon.html)。
 
 MinerU 仍可作为兼容 OCR 后端：配置 `MINERU_API_KEY` 后增加 `--mineru-api`。
 
-## 可选：embedding 模型
+## Embedding 模型（必需）
 
-只有属性标准化和图文对齐需要 embedding：
+冷启动命令会安装并预热 embedding 模型；属性标准化和图文对齐运行时会使用它：
 
 ```bash
 python -m pip install -e ".[standardization]"
@@ -138,6 +154,3 @@ models/             本地模型权重（生成物）
 ```bash
 python -m pytest -o addopts='' -q
 ```
-
-完整 Alpha25 冻结 OCR 流程见
-[`docs/alpha25-ocr-llm-runbook.md`](docs/alpha25-ocr-llm-runbook.md)。

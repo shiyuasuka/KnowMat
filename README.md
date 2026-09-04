@@ -26,6 +26,8 @@ source venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
 python -m pip install -r requirements.txt
+python -m pip install -e ".[standardization]"
+python scripts/download_embedding_model.py
 cp .env.example .env
 ```
 
@@ -46,15 +48,17 @@ The model name and endpoint are intentionally not hard-coded. Provider-specific
 reasoning or response-format options can be left at their defaults or copied
 from `.env.example` when supported by the selected endpoint.
 
-## OCR backends (choose one)
+## OCR backends
 
-### Cloud PaddleOCR (recommended for most users)
+### Cloud PaddleOCR
 
 Add the token to `.env`:
 
 ```dotenv
 PADDLEOCR_API_TOKEN=your_paddleocr_token
 PADDLEOCR_API_URL=https://paddleocr.aistudio-app.com/api/v2/ocr/jobs
+# Optional; defaults to PaddleOCR-VL-1.6
+PADDLEOCR_API_MODEL=PaddleOCR-VL-1.6
 ```
 
 Run OCR and freeze its manifest, then run extraction:
@@ -67,34 +71,46 @@ python -m knowmat --input-folder data/raw --output-dir data/output \
   --workers 6 --max-runs 1
 ```
 
-### Local OCR on NVIDIA Linux/Windows
+### Local OCR on NVIDIA Linux/Windows (including Blackwell)
 
-Local inference requires an NVIDIA GPU and CUDA. After the base installation:
+Local inference uses PaddlePaddle GPU and CUDA. After the base installation:
 
 ```bash
 python -m pip uninstall -y paddlepaddle paddlepaddle-gpu
 python -m pip install -r requirements-gpu.txt \
   -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
-python scripts/download_paddleocrvl_models.py
+python scripts/download_paddleocrvl_models.py --model-dir models/paddleocrvl1_6
 python -m knowmat --input-folder data/raw --output-dir data/output \
   --full-pipeline --force-rerun --workers 1
 ```
 
-The model preload command downloads PaddleOCR-VL 1.5 into `models/`. Model
-weights are local-only and are not committed.
+The model preload command downloads PaddleOCR-VL 1.6 into `models/`. Model
+weights are local-only and are not committed. For Blackwell-specific CUDA and
+driver combinations, follow the [PaddleOCR NVIDIA Blackwell guide](https://www.paddleocr.ai/latest/version3.x/pipeline_usage/PaddleOCR-VL-NVIDIA-Blackwell.html).
 
-### macOS
+### Local OCR on macOS (Apple Silicon or Intel)
 
-The production local PaddleOCR path requires NVIDIA CUDA and is not available
-on macOS. On Apple Silicon or Intel Macs, use the cloud PaddleOCR path above;
-the LLM extraction stage itself works normally in the venv.
+PaddleOCR-VL 1.6 also supports local PaddlePaddle inference on macOS. Install
+the CPU runtime and document-parser extra in the same venv:
+
+```bash
+python -m pip install "paddlepaddle==3.2.1" \
+  -i https://www.paddlepaddle.org.cn/packages/stable/cpu/
+python -m pip install -U "paddleocr[doc-parser]"
+python scripts/download_paddleocrvl_models.py --model-dir models/paddleocrvl1_6
+python -m knowmat --input-folder data/raw --output-dir data/output \
+  --full-pipeline --force-rerun --workers 1
+```
+
+For an MLX-VLM backend on Apple Silicon, see the [PaddleOCR Apple Silicon guide](https://www.paddleocr.ai/latest/version3.x/pipeline_usage/PaddleOCR-VL-Apple-Silicon.html).
 
 MinerU remains an optional compatibility OCR backend: set `MINERU_API_KEY` and
 add `--mineru-api` when required by an existing deployment.
 
-## Optional embedding model
+## Embedding model (required)
 
-Only property standardization and image-text alignment need embeddings:
+The quick-start commands install and warm the embedding model. Property
+standardization and image-text alignment use it at runtime:
 
 ```bash
 python -m pip install -e ".[standardization]"
@@ -144,6 +160,3 @@ directories and are intentionally excluded from source commits.
 ```bash
 python -m pytest -o addopts='' -q
 ```
-
-For the full Alpha25 frozen-OCR procedure, see
-[`docs/alpha25-ocr-llm-runbook.md`](docs/alpha25-ocr-llm-runbook.md).

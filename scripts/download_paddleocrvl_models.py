@@ -8,7 +8,7 @@ from pathlib import Path
 
 def default_model_dir() -> Path:
     repo_root = Path(__file__).resolve().parents[1]
-    return repo_root / "models" / "paddleocrvl1_5"
+    return repo_root / "models" / "paddleocrvl1_6"
 
 
 def main() -> None:
@@ -16,7 +16,7 @@ def main() -> None:
     parser.add_argument(
         "--model-dir",
         default=None,
-        help="Target model cache directory (default: ./models/paddleocrvl1_5)",
+        help="Target model cache directory (default: ./models/paddleocrvl1_6)",
     )
     args = parser.parse_args()
 
@@ -57,7 +57,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
 
 

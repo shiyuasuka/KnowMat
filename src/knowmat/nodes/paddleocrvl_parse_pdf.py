@@ -1019,7 +1019,7 @@ def _extract_pdf_with_paddleocr_api(
     save_intermediate: bool = True,
     page_indices: Optional[List[int]] = None,
 ) -> Tuple[str, Dict[str, Any], List[Dict[str, Any]]]:
-    """Extract PDF content via PaddleOCR cloud API (VL-1.5 + PP-StructureV3).
+    """Extract PDF content via PaddleOCR cloud API (VL-1.6 + PP-StructureV3).
 
     Produces the same (extracted_text, metadata, ocr_items) triple as other backends.
     """
@@ -1032,7 +1032,7 @@ def _extract_pdf_with_paddleocr_api(
 
     client = PaddleOCRAPIClient(token, base_url)
 
-    # Step 1: Run PaddleOCR-VL for primary OCR (version from env, default 1.5)
+    # Step 1: Run PaddleOCR-VL for primary OCR (version from env, default 1.6)
     from knowmat.pdf.paddleocr_api_client import get_paddleocr_vl_model
     vl_model = get_paddleocr_vl_model()
     logger.info("[PaddleOCR API] Running %s on %s...", vl_model, pdf.name)
@@ -1360,7 +1360,7 @@ def parse_pdf_with_paddleocrvl(state: KnowMatState) -> dict:
     render_dpi = _env_int("OCR_RENDER_DPI", 300)
     if render_dpi < 72 or render_dpi > 600:
         render_dpi = 300
-    vl_version = os.getenv("PADDLEOCRVL_VERSION", "1.5").strip() or "1.5"
+    vl_version = os.getenv("PADDLEOCRVL_VERSION", "1.6").strip() or "1.6"
     # PP-StructureV3 精修始终参与；缓存键固定为完整 VL+Structure 管线
     skip_pp = False
     skip_chem = _env_truthy("KNOWMAT_SKIP_CHEM_REOCR")
